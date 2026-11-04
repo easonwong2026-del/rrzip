@@ -1,0 +1,47 @@
+name: release
+
+# 推 v* 标签即自动构建并发布
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: macos-14
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载 7-Zip 引擎
+        run: ./scripts/fetch-7zz.sh
+
+      - name: 单元测试
+        run: ./scripts/test.sh
+
+      - name: 构建 app
+        run: ./build.sh
+
+      - name: 打包
+        id: pack
+        run: |
+          NAME="rrzip-${GITHUB_REF_NAME}.zip"
+          ditto -c -k --sequesterRsrc --keepParent build/rrzip.app "build/${NAME}"
+          shasum -a 256 "build/${NAME}" | tee "build/${NAME}.sha256"
+          echo "asset=build/${NAME}" >> "$GITHUB_OUTPUT"
+          echo "sha=build/${NAME}.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.pack.outputs.asset }}" \
+            "${{ steps.pack.outputs.sha }}" \
+            --title "rrzip $GITHUB_REF_NAME" \
+            --notes-file RELEASE_NOTES.md \
+            --verify-tag
