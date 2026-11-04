@@ -28,7 +28,9 @@ jobs:
         run: ./scripts/test.sh
 
       - name: 构建 app
-        run: ./build.sh
+        run: |
+          set -o pipefail
+          bash -x ./build.sh 2>&1 | tail -150
 
       - name: 校验产物
         run: |

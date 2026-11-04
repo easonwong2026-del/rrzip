@@ -1,5 +1,7 @@
 # rrzip
 
+[![ci](https://github.com/easonwong2026-del/rrzip/actions/workflows/ci.yml/badge.svg)](https://github.com/easonwong2026-del/rrzip/actions/workflows/ci.yml)
+
 macOS 原生压缩包工作台。SwiftUI + 系统 libarchive（`/usr/bin/tar`）+ 内置 7-Zip 26.05。
 
 代码、界面、文案全部独立编写，未使用任何第三方商业软件的代码或素材。
@@ -71,11 +73,25 @@ rrzip/
 │   └── PreviewPane.swift      # 右侧预览
 ├── QuickLook/
 │   └── PreviewProvider.swift  # 快速查看扩展（QLPreviewingController）
+├── Tests/
+│   └── main.swift             # 11 项断言（解析 / 转义 / 加密回退）
 ├── Assets/
-│   └── 7zz                    # 7-Zip 26.05 arm64
+│   ├── AppIcon.icns
+│   └── 7zz                    # 不入库，构建时下载
+├── scripts/
+│   ├── fetch-7zz.sh
+│   └── test.sh
 ├── build.sh
 └── build/rrzip.app
 ```
+
+## 测试
+
+```bash
+./scripts/test.sh
+```
+
+自动生成带中文名、含空格、嵌套目录、加密 7z 的样例包，断言 11 项：八进制转义还原、zip/tgz 列表、目录识别、文件大小、加密包识别与 7-Zip 回退。
 
 ## 许可
 
