@@ -1,0 +1,89 @@
+# rrzip
+
+macOS 原生压缩包工作台。SwiftUI + 系统 libarchive（`/usr/bin/tar`）+ 内置 7-Zip 26.05。
+
+代码、界面、文案全部独立编写，未使用任何第三方商业软件的代码或素材。
+
+## 功能
+
+| 功能 | 说明 |
+|---|---|
+| 打开 / 拖入 | 单文件选择、拖拽到窗口、Finder「打开方式」、`⌘O` |
+| 列表浏览 | 名称、大小、修改时间；目录 / 压缩包 / 图片 / 文档区分图标 |
+| 嵌套包浏览 | 双击内嵌包进入，面包屑可回退任意层（`⌘[`） |
+| 全部解压 | `⌘E` |
+| 选择性解压 | 选中条目后 `⇧⌘E` |
+| 快速预览 | 图片内联、PDF 内嵌阅读、文本/代码直接显示 |
+| 拖拽导出 | 从列表拖到访达 |
+| 创建压缩包 | `⌘N`：ZIP / **7Z** / TAR / TAR.GZ |
+| **加密** | ZIP 用 AES-256；7Z 连文件名一起加密（`-mhe=on`） |
+| **分卷** | 100 MB / 700 MB / 1 GB / 4 GB |
+| **加密包读取** | 打开时提示输入密码；右上角可一键锁定并清除密码 |
+| **访达快速查看** | 按空格直接看压缩包内容（`ArchivePreview.appex`） |
+| 命令行 | `rrzip --list <包> [--pass 密码]` |
+
+## 双引擎策略
+
+| 场景 | 引擎 |
+|---|---|
+| 常规 zip / tar / gz / rar / iso 等读取 | 系统 `bsdtar`（libarchive 3.7.4） |
+| 创建 7z、加密、分卷 | 内置 `7zz`（7-Zip 26.05 arm64） |
+| 加密头 7z（libarchive 不支持） | 内置 `7zz` |
+
+`7zz` 位于 `Contents/Resources/7zz`，随应用分发，用户无需另装。
+
+## 支持格式
+
+读取：zip · zipx · 7z（含加密头）· rar（只读）· tar · tgz · tbz2 · txz · gz · bz2 · xz · lzma · lz · zst · cab · cpio · xar · iso · lzh · arj · rpm · deb
+写入：zip · 7z · tar · tgz
+
+## 构建
+
+```bash
+./build.sh          # 首次会自动调 scripts/fetch-7zz.sh 下载引擎
+open build/rrzip.app
+```
+
+`Assets/7zz` 是第三方二进制，不入库；`scripts/fetch-7zz.sh` 会从官方 release 拉取（直连失败自动走镜像）。
+
+依赖：macOS 14+、Xcode Command Line Tools（`swiftc` 6.x）。
+
+产物：
+- `build/rrzip.app` —— 主程序
+- `build/rrzip.app/Contents/PlugIns/ArchivePreview.appex` —— 快速查看扩展
+
+## 快速查看扩展说明
+
+扩展已嵌入并单独签名（sandbox + 用户选定文件只读）。首次运行主程序后系统自动注册：
+
+- 在访达选中 zip / 7z / tar，按空格即可看到条目列表
+- 若未生效：系统设置 → 通用 → 登录项与扩展 → 快速查看，勾选 rrzip
+- 需要临时停用：删掉 `Contents/PlugIns` 目录后重新签名
+
+## 目录
+
+```
+rrzip/
+├── Sources/
+│   ├── Archive.swift          # 条目模型 + bsdtar / 7zz 双引擎封装
+│   ├── Model.swift            # 状态机：打开、密码、嵌套栈、解压、创建
+│   ├── ContentView.swift      # 主界面
+│   └── PreviewPane.swift      # 右侧预览
+├── QuickLook/
+│   └── PreviewProvider.swift  # 快速查看扩展（QLPreviewingController）
+├── Assets/
+│   └── 7zz                    # 7-Zip 26.05 arm64
+├── build.sh
+└── build/rrzip.app
+```
+
+## 许可
+
+本仓库代码 MIT。内置的 7-Zip 引擎为 LGPL + unRAR 限制，不随仓库分发，构建时按需下载。
+
+## 已知限制
+
+- rar 只读；加密 rar 暂不支持
+- 创建 TAR / TGZ 时不支持密码与分卷（格式本身不支持）
+- 预览大文件一次性读入内存，几百 MB 以上会慢
+- 快速查看扩展只列条目，不预览条目内容

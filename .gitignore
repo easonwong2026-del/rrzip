@@ -1,0 +1,6 @@
+build/
+Assets/7zz
+Assets/AppIcon-raw.png
+Assets/concepts/
+Assets/*.iconset/
+.DS_Store
