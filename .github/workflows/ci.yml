@@ -29,8 +29,14 @@ jobs:
 
       - name: 构建 app
         run: |
-          set -o pipefail
-          bash -x ./build.sh 2>&1 | tail -150
+          ./build.sh > /tmp/build.log 2>&1 || {
+            echo "::error::build.sh 失败，以下为最后 25 行"
+            tail -25 /tmp/build.log | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit 1
+          }
+          tail -5 /tmp/build.log
 
       - name: 校验产物
         run: |
