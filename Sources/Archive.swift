@@ -2,7 +2,8 @@ import Foundation
 
 /// 一层归档的条目
 struct ArchiveEntry: Identifiable, Hashable {
-    let id = UUID()
+    /// 用路径做标识：刷新列表后选中状态不会丢
+    var id: String { path }
     let path: String
     let size: Int64
     let modified: String

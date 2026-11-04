@@ -116,13 +116,17 @@ struct PreviewPane: View {
             payload = nil; image = nil; text = nil; pdf = nil
             return
         }
+        let token = entry.id
         loading = true
-        defer { loading = false }
         payload = nil; image = nil; text = nil; pdf = nil
 
         let url: URL? = await withCheckedContinuation { continuation in
             model.payloadURL(for: entry) { continuation.resume(returning: $0) }
         }
+
+        // 选中项已经换了就丢弃这次结果，避免显示上一个文件
+        guard !Task.isCancelled, selectedEntry?.id == token else { return }
+        loading = false
         guard let url else { return }
         payload = url
 

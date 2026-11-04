@@ -82,6 +82,8 @@ final class ArchiveModel: ObservableObject {
     var isEncrypted: Bool { current.map { unlocked.contains($0.archive.path) } ?? false }
 
     private var passwords: [String: String] = [:]
+    /// 预览/导出缓存：key = 归档路径 + 修改时间 + 条目路径
+    private var payloadCache: [String: URL] = [:]
 
     // MARK: - 工作目录
 
@@ -89,7 +91,9 @@ final class ArchiveModel: ObservableObject {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("rrzip", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: base.appendingPathComponent("scratch"), withIntermediateDirectories: true)
+        let scratch = base.appendingPathComponent("scratch", isDirectory: true)
+        try? FileManager.default.removeItem(at: scratch)   // 上次运行留下的临时文件全部清掉
+        try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         return base
     }()
 
@@ -330,9 +334,15 @@ final class ArchiveModel: ObservableObject {
         }
     }
 
-    /// 拖拽导出 / 预览用的临时文件
+    /// 拖拽导出 / 预览用的临时文件（带缓存，同一份文件不重复解压）
     func payloadURL(for entry: ArchiveEntry, completion: @escaping (URL?) -> Void) {
         guard let frame = current else { return completion(nil) }
+
+        let key = cacheKey(entry, in: frame)
+        if let cached = payloadCache[key], FileManager.default.fileExists(atPath: cached.path) {
+            return completion(cached)
+        }
+
         let destination = freshScratch()
         let passphrase = passwords[frame.archive.path]
         let engine = frame.engine
@@ -350,8 +360,18 @@ final class ArchiveModel: ObservableObject {
                 }
                 return file
             }.value
+            if let url {
+                if payloadCache.count > 300 { payloadCache.removeAll() }
+                payloadCache[key] = url
+            }
             completion(url)
         }
+    }
+
+    private func cacheKey(_ entry: ArchiveEntry, in frame: Frame) -> String {
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: frame.archive.path)[.modificationDate] as? Date)?
+            .timeIntervalSince1970 ?? 0
+        return "\(frame.archive.path)|\(mtime)|\(entry.path)"
     }
 
     // MARK: - 创建
