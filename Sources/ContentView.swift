@@ -74,6 +74,7 @@ struct RrzipApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var model: ArchiveModel?
 

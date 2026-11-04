@@ -27,6 +27,11 @@ jobs:
       - name: 单元测试
         run: ./scripts/test.sh
 
+      - name: 并发严格检查
+        run: |
+          xcrun swiftc -typecheck -swift-version 5 -strict-concurrency=complete \
+            -target arm64-apple-macos14.0 Sources/*.swift
+
       - name: 构建 app
         run: |
           ./build.sh > /tmp/build.log 2>&1 || {

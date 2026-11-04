@@ -395,10 +395,12 @@ final class ArchiveModel: ObservableObject {
         let save = NSSavePanel()
         save.message = "保存压缩包"
         save.nameFieldStringValue = defaultName(for: items, format: options.format)
-        guard save.runModal() == .OK, var output = save.url else { return }
-        if output.pathExtension.lowercased() != options.format.ext {
-            output = output.deletingPathExtension().appendingPathExtension(options.format.ext)
+        guard save.runModal() == .OK, let picked = save.url else { return }
+        var target = picked
+        if target.pathExtension.lowercased() != options.format.ext {
+            target = target.deletingPathExtension().appendingPathExtension(options.format.ext)
         }
+        let output = target
 
         isLoading = true
         status = "正在压缩…"
