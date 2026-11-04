@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    # 需要 arm64 的 macOS runner：内置 7zz 是 arm64 构建，构建脚本也按 arm64 出包
+    runs-on: macos-14
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 工具链信息
+        run: |
+          swift --version
+          /usr/bin/tar --version
+          sw_vers
+
+      - name: 下载 7-Zip 引擎
+        run: ./scripts/fetch-7zz.sh
+
+      - name: 单元测试
+        run: ./scripts/test.sh
+
+      - name: 构建 app
+        run: ./build.sh
+
+      - name: 校验产物
+        run: |
+          test -x build/rrzip.app/Contents/MacOS/rrzip
+          test -x build/rrzip.app/Contents/Resources/7zz
+          test -d build/rrzip.app/Contents/PlugIns/ArchivePreview.appex
+          codesign --verify --deep --strict build/rrzip.app
+
+      - name: 上传 app
+        uses: actions/upload-artifact@v4
+        with:
+          name: rrzip-app
+          path: build/rrzip.app
+          retention-days: 7
