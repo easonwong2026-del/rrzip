@@ -139,10 +139,13 @@ final class ArchiveModel: ObservableObject {
 
         for _ in 0..<4 {
             do {
+                // 快照成常量再进并发闭包：Swift 6 不允许捕获可变变量
+                let currentEngine = engine
+                let currentPassphrase = passphrase
                 let result: [ArchiveEntry] = try await Task.detached(priority: .userInitiated) {
-                    switch engine {
-                    case .libarchive: return try Tar.list(url, passphrase: passphrase)
-                    case .sevenZip: return try SevenZip.list(url, password: passphrase)
+                    switch currentEngine {
+                    case .libarchive: return try Tar.list(url, passphrase: currentPassphrase)
+                    case .sevenZip: return try SevenZip.list(url, password: currentPassphrase)
                     }
                 }.value
                 entries = result
@@ -303,12 +306,13 @@ final class ArchiveModel: ObservableObject {
             var passphrase = passwords[frame.archive.path]
             for attempt in 0..<2 {
                 do {
+                    let currentPassphrase = passphrase
                     try await Task.detached {
                         switch frame.engine {
                         case .libarchive:
-                            try Tar.extract(frame.archive, entries: paths, to: destination, passphrase: passphrase)
+                            try Tar.extract(frame.archive, entries: paths, to: destination, passphrase: currentPassphrase)
                         case .sevenZip:
-                            try SevenZip.extract(frame.archive, entries: paths, to: destination, password: passphrase)
+                            try SevenZip.extract(frame.archive, entries: paths, to: destination, password: currentPassphrase)
                         }
                     }.value
                     status = "已解压到 \(destination.lastPathComponent)"
