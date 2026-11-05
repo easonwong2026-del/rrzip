@@ -164,6 +164,37 @@ if SevenZip.isAvailable {
     print("  - 跳过（未找到 7zz）")
 }
 
+// 8. 子项索引：与旧实现结果一致，且大包下是常数级取用
+print("子项索引")
+do {
+    let entries = try Tar.list(fixtures.appendingPathComponent("basic.zip"))
+    let index = ArchiveModel.buildChildIndex(entries)
+    for prefix in ["", "照片/", "照片/城市/"] {
+        let legacy = ArchiveModel.children(of: prefix, in: entries).map(\.path)
+        let indexed = (index[prefix] ?? []).map(\.path)
+        expect(legacy == indexed, "前缀「\(prefix)」与旧实现一致", "旧=\(legacy) 新=\(indexed)")
+    }
+
+    // 10 万条目：建一次索引应在秒级以内，之后取层是 O(1)
+    var big: [ArchiveEntry] = []
+    big.reserveCapacity(100_000)
+    for i in 0..<100_000 {
+        big.append(ArchiveEntry(path: "dir\(i % 200)/sub\(i % 50)/file\(i).txt",
+                                size: 1, modified: "2026-11-05 10:00", mode: "-rw-r--r--"))
+    }
+    let started = Date()
+    let bigIndex = ArchiveModel.buildChildIndex(big)
+    let elapsed = Date().timeIntervalSince(started)
+    expect(bigIndex.count > 300, "10 万条目建出多级目录", "实际 \(bigIndex.count) 层")
+    expect(elapsed < 2.0, "10 万条目建索引 < 2s", "实际 \(String(format: "%.3f", elapsed))s")
+
+    let started2 = Date()
+    _ = bigIndex["dir7/sub7/"]
+    expect(Date().timeIntervalSince(started2) < 0.01, "取一层是常数时间")
+} catch {
+    expect(false, "子项索引", "\(error)")
+}
+
 print("")
 print(failures == 0 ? "全部通过（\(checks) 项）" : "失败 \(failures)/\(checks)")
 exit(failures == 0 ? 0 : 1)

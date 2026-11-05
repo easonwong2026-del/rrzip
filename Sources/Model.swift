@@ -65,10 +65,32 @@ struct FolderNode: Identifiable, Hashable {
 }
 
 enum ArchiveViewMode: String, CaseIterable, Identifiable {
-    case list, icons
+    case list, icons, columns
     var id: String { rawValue }
-    var title: String { self == .list ? "列表" : "图标" }
-    var symbol: String { self == .list ? "list.bullet" : "square.grid.2x2" }
+    var title: String {
+        switch self {
+        case .list: return "列表"
+        case .icons: return "图标"
+        case .columns: return "分栏"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .list: return "list.bullet"
+        case .icons: return "square.grid.2x2"
+        case .columns: return "rectangle.split.3x1"
+        }
+    }
+}
+
+/// 暂存区里的一条：记住它来自哪个包，才能跨层、跨包累积
+struct StashItem: Identifiable, Hashable {
+    let id = UUID()
+    let archive: URL
+    let path: String
+    let size: Int64
+    var name: String { (path as NSString).lastPathComponent.isEmpty ? path : (path as NSString).lastPathComponent }
+    var displaySize: String { ByteFormatter.string(size) }
 }
 
 struct CreateOptions {
@@ -107,37 +129,132 @@ final class ArchiveModel: ObservableObject {
     @Published var status: String = "拖入一个压缩包，或按 ⌘O 打开"
     @Published var errorMessage: String?
     @Published private(set) var unlocked: Set<String> = []
+    /// 暂存区：跨层、跨包攒起来，最后一次性导出
+    @Published private(set) var stash: [StashItem] = []
+    @Published var isStashVisible = false
 
     var current: Frame? { trail.last }
     var entries: [ArchiveEntry] { current?.entries ?? [] }
     var canGoBack: Bool { trail.count > 1 }
 
-    /// 当前这一层要显示的条目（目录折叠成一行）
-    var visibleEntries: [ArchiveEntry] {
-        guard let frame = current else { return [] }
-        return Self.children(of: frame.prefix, in: frame.entries)
+    // MARK: - 派生数据缓存
+    //
+    // SwiftUI 每次求值 body 都会多次访问这些属性，10 万条目的包上原来的
+    // O(n) 重算会把滚动和切目录拖垮。这里按 Frame 建一次索引，之后按前缀 O(1) 取。
+
+    private struct FrameCache {
+        let frameID: UUID
+        /// 父目录前缀 → 该层的直接子项（已排序，目录在前）
+        let childIndex: [String: [ArchiveEntry]]
+        let tree: [FolderNode]
+        let builtAt: Date
     }
 
-    /// 侧栏目录树
+    private var frameCache: FrameCache?
+    private var searchCache: (frameID: UUID, keyword: String, result: [ArchiveEntry])?
+
+    private func cachedFrame() -> FrameCache? {
+        guard let frame = current else { return nil }
+        if let cache = frameCache, cache.frameID == frame.id { return cache }
+        let index = Self.buildChildIndex(frame.entries)
+        let cache = FrameCache(
+            frameID: frame.id,
+            childIndex: index,
+            tree: Self.buildTree(from: index),
+            builtAt: Date()
+        )
+        frameCache = cache
+        return cache
+    }
+
+    /// 当前这一层要显示的条目（目录折叠成一行）
+    var visibleEntries: [ArchiveEntry] {
+        guard let frame = current, let cache = cachedFrame() else { return [] }
+        return cache.childIndex[frame.prefix] ?? []
+    }
+
+    /// 侧栏目录树（与 childIndex 同源，不再单独扫一遍全包）
     var folderTree: [FolderNode] {
+        cachedFrame()?.tree ?? []
+    }
+
+    /// 取任意前缀下的一层条目（分栏视图要同时显示多列）
+    func entries(at prefix: String) -> [ArchiveEntry] {
+        cachedFrame()?.childIndex[prefix] ?? []
+    }
+
+    /// 列表实际渲染的数据：搜索时是全包匹配结果，否则是当前层
+    var displayEntries: [ArchiveEntry] {
         guard let frame = current else { return [] }
-        var childrenByParent: [String: Set<String>] = [:]
-        for entry in frame.entries {
-            var path = entry.path
-            if !entry.isDirectory {
-                guard let slash = path.lastIndex(of: "/") else { continue }
-                path = String(path[path.startIndex...slash])
-            }
-            var parts = path.split(separator: "/").map(String.init)
-            guard !parts.isEmpty else { continue }
-            if !path.hasSuffix("/") { parts.removeLast() }   // 目录本身不带层级
-            var parent = ""
-            for part in parts {
-                childrenByParent[parent, default: []].insert(part)
-                parent += part + "/"
+        let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyword.isEmpty else {
+            return cachedFrame()?.childIndex[frame.prefix] ?? []
+        }
+        if let cached = searchCache, cached.frameID == frame.id, cached.keyword == keyword {
+            return cached.result
+        }
+        let result = frame.entries
+            .filter { $0.path.localizedCaseInsensitiveContains(keyword) }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        searchCache = (frame.id, keyword, result)
+        return result
+    }
+
+    /// 一次遍历建立「父前缀 → 子项」索引；显式目录和路径里隐含的目录都会补齐
+    nonisolated static func buildChildIndex(_ entries: [ArchiveEntry]) -> [String: [ArchiveEntry]] {
+        var index: [String: [ArchiveEntry]] = [:]
+        var dirs: [String: ArchiveEntry] = [:]
+
+        func noteDirectory(_ dirPath: String, modified: String) {
+            guard !dirPath.isEmpty, dirs[dirPath] == nil else { return }
+            dirs[dirPath] = ArchiveEntry(path: dirPath, size: 0, modified: modified, mode: "drwxr-xr-x")
+            let trimmed = String(dirPath.dropLast())
+            if let slash = trimmed.lastIndex(of: "/") {
+                noteDirectory(String(trimmed[trimmed.startIndex...slash]), modified: modified)
             }
         }
 
+        for entry in entries {
+            if entry.isDirectory {
+                let dir = entry.path.hasSuffix("/") ? entry.path : entry.path + "/"
+                noteDirectory(dir, modified: entry.modified)
+            } else if let slash = entry.path.lastIndex(of: "/") {
+                let parent = String(entry.path[entry.path.startIndex...slash])
+                noteDirectory(parent, modified: entry.modified)
+                index[parent, default: []].append(entry)
+            } else {
+                index["", default: []].append(entry)
+            }
+        }
+
+        for (dir, entry) in dirs {
+            let trimmed = String(dir.dropLast())
+            let parent: String
+            if let slash = trimmed.lastIndex(of: "/") {
+                parent = String(trimmed[trimmed.startIndex...slash])
+            } else {
+                parent = ""
+            }
+            index[parent, default: []].append(entry)
+        }
+
+        for key in index.keys {
+            index[key]?.sort { lhs, rhs in
+                if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+        }
+        return index
+    }
+
+    /// 由子项索引反推目录树
+    nonisolated static func buildTree(from index: [String: [ArchiveEntry]]) -> [FolderNode] {
+        var childrenByParent: [String: Set<String>] = [:]
+        for (parent, items) in index {
+            for item in items where item.isDirectory {
+                childrenByParent[parent, default: []].insert(item.name)
+            }
+        }
         func build(_ prefix: String) -> [FolderNode] {
             (childrenByParent[prefix] ?? [])
                 .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
@@ -147,16 +264,6 @@ final class ArchiveModel: ObservableObject {
                 }
         }
         return build("")
-    }
-
-    /// 列表实际渲染的数据：搜索时是全包匹配结果，否则是当前层
-    var displayEntries: [ArchiveEntry] {
-        guard let frame = current else { return [] }
-        let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !keyword.isEmpty else { return Self.children(of: frame.prefix, in: frame.entries) }
-        return frame.entries
-            .filter { $0.path.localizedCaseInsensitiveContains(keyword) }
-            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 
     var isSearching: Bool {
@@ -478,6 +585,122 @@ final class ArchiveModel: ObservableObject {
         }
     }
 
+    // MARK: - 暂存区
+
+    /// 把当前选中项放进暂存区
+    func addSelectionToStash() {
+        guard let frame = current else { return }
+        let items = (isSearching ? displayEntries : visibleEntries).filter { selection.contains($0.id) }
+        guard !items.isEmpty else { return }
+        for entry in items where !entry.isDirectory {
+            let item = StashItem(archive: frame.archive, path: entry.path, size: entry.size)
+            if !stash.contains(where: { $0.archive == item.archive && $0.path == item.path }) {
+                stash.append(item)
+            }
+        }
+        isStashVisible = true
+        status = "已加入暂存 · 共 \(stash.count) 项"
+        selection = []
+    }
+
+    func removeFromStash(_ item: StashItem) {
+        stash.removeAll { $0.id == item.id }
+    }
+
+    func clearStash() {
+        stash.removeAll()
+        isStashVisible = false
+    }
+
+    /// 把暂存项全部解压到用户选的目录
+    func exportStash() {
+        guard !stash.isEmpty else { return }
+        let panel = NSOpenPanel()
+        panel.message = "把暂存的 \(stash.count) 个文件导出到"
+        panel.prompt = "导出"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+
+        let items = stash
+        let passwordMap = passwords
+        isLoading = true
+        status = "正在导出 \(items.count) 项…"
+        Task {
+            var failed = 0
+            for item in items {
+                do {
+                    try await Task.detached(priority: .userInitiated) {
+                        try SevenZip.extract(item.archive, entries: [item.path],
+                                             to: destination, password: passwordMap[item.archive.path])
+                    }.value
+                } catch {
+                    failed += 1
+                }
+            }
+            isLoading = false
+            status = failed == 0 ? "已导出 \(items.count) 项" : "导出完成，\(failed) 项失败"
+            if failed == 0 { stash.removeAll(); isStashVisible = false }
+        }
+    }
+
+    /// 把暂存项打包成一个新的 zip
+    func compressStash() {
+        guard !stash.isEmpty else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "暂存.zip"
+        panel.allowedContentTypes = [.zip]
+        guard panel.runModal() == .OK, let output = panel.url else { return }
+
+        let items = stash
+        let passwordMap = passwords
+        isLoading = true
+        status = "正在打包 \(items.count) 项…"
+        Task {
+            let staging = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rrzip-stash-\(UUID().uuidString)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: staging) }
+
+            var files: [URL] = []
+            for item in items {
+                let folder = staging.appendingPathComponent(item.archive.deletingPathExtension().lastPathComponent,
+                                                           isDirectory: true)
+                try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try? await Task.detached(priority: .userInitiated) {
+                    try SevenZip.extract(item.archive, entries: [item.path],
+                                         to: folder, password: passwordMap[item.archive.path])
+                }.value
+                var file = folder.appendingPathComponent(item.path)
+                if FileManager.default.fileExists(atPath: file.path) {
+                    // 同名时加包名前缀，避免互相覆盖
+                    let ext = file.pathExtension
+                    let base = file.deletingPathExtension().lastPathComponent
+                    let renamed = folder.appendingPathComponent("\(base)-\(item.archive.deletingPathExtension().lastPathComponent)")
+                        .appendingPathExtension(ext)
+                    try? FileManager.default.moveItem(at: file, to: renamed)
+                    file = renamed
+                }
+                files.append(file)
+            }
+
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try? FileManager.default.removeItem(at: output)
+                    try SevenZip.create(at: output, from: files, format: "zip", password: nil, volume: nil)
+                }.value
+                isLoading = false
+                status = "已打包 \(files.count) 项 · \(output.lastPathComponent)"
+                NSWorkspace.shared.activateFileViewerSelecting([output])
+            } catch {
+                isLoading = false
+                status = "打包失败"
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func finishLocked() {
         isLoading = false
         status = "已加密，未解锁"
@@ -536,6 +759,13 @@ final class ArchiveModel: ObservableObject {
                 status = "展开失败"
             }
         }
+    }
+
+    /// 返回上一级（Mini 窗口的返回键）
+    func goBack() {
+        guard trail.count > 1 else { return }
+        trail.removeLast()
+        selection = []
     }
 
     func popTo(_ index: Int) {

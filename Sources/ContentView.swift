@@ -226,6 +226,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct ContentView: View {
     @ObservedObject var model: ArchiveModel
+    @StateObject private var hover = HoverCoordinator()
     @State private var isDropTarget = false
 
     var body: some View {
@@ -246,6 +247,11 @@ struct ContentView: View {
                     detailPane
                         .frame(minWidth: 236, idealWidth: 276, maxWidth: 340)
                 }
+            }
+
+            if model.isStashVisible && !model.stash.isEmpty {
+                Divider()
+                stashBar
             }
 
             Divider()
@@ -273,6 +279,10 @@ struct ContentView: View {
             if let i = CommandLine.arguments.firstIndex(of: "--search"), i + 1 < CommandLine.arguments.count {
                 model.searchText = CommandLine.arguments[i + 1]
             }
+            // 调试用：defaults write com.rrzip.mac rrzip.demoMini -bool true
+            if UserDefaults.standard.bool(forKey: "rrzip.demoMini") {
+                MiniPanelController.shared.show()
+            }
             // 支持 `open -a rrzip xxx.zip` 以及命令行直接传路径
             if model.trail.isEmpty {
                 for arg in CommandLine.arguments.dropFirst() where !arg.hasPrefix("-") {
@@ -282,6 +292,41 @@ struct ContentView: View {
                         model.open(url: url)
                         break
                     }
+                }
+            }
+            // 调试用：跳进某个包内目录（也支持 defaults write com.rrzip.mac rrzip.goto）
+            let goto = CommandLine.arguments.firstIndex(of: "--goto").flatMap { index in
+                index + 1 < CommandLine.arguments.count ? CommandLine.arguments[index + 1] : nil
+            } ?? UserDefaults.standard.string(forKey: "rrzip.goto")
+            if let goto, !goto.isEmpty {
+                var waited = 0
+                while model.current == nil && waited < 40 {
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    waited += 1
+                }
+                model.jump(to: goto)
+            }
+            // 调试用：把前几个文件放进暂存区，便于截图核对
+            if UserDefaults.standard.bool(forKey: "rrzip.demoStash") {
+                var waited = 0
+                while model.displayEntries.isEmpty && waited < 40 {
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    waited += 1
+                }
+                let targets = model.displayEntries.filter { !$0.isDirectory }.prefix(3)
+                model.selection = Set(targets.map(\.id))
+                model.addSelectionToStash()
+            }
+            // 调试用：--demo-hover 等条目读完弹一次悬停卡片，便于截图核对
+            if CommandLine.arguments.contains("--demo-hover") || UserDefaults.standard.bool(forKey: "rrzip.demoHover") {
+                var waited = 0
+                while model.displayEntries.isEmpty && waited < 40 {
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    waited += 1
+                }
+                if let first = model.displayEntries.first(where: { !$0.isDirectory }) {
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    hover.begin(first, model: model, at: NSPoint(x: 700, y: 620))
                 }
             }
         }
@@ -301,29 +346,59 @@ struct ContentView: View {
                 model.openWithPanel()
             } label: {
                 Label("打开", systemImage: "folder")
+                    .labelStyle(.titleAndIcon)
             }
 
             Button {
                 model.extractAll()
             } label: {
-                Label("全部解压", systemImage: "arrow.down.doc")
+                Image(systemName: "arrow.down.doc")
             }
             .disabled(model.current == nil)
+            .help("全部解压（⌘E）")
 
             Button {
                 model.extractSelection()
             } label: {
-                Label("解压选中", systemImage: "square.and.arrow.down.on.square")
+                Image(systemName: "square.and.arrow.down.on.square")
             }
             .disabled(model.selection.isEmpty)
+            .help("只解压选中项（⇧⌘E）")
 
             Divider().frame(height: 18)
 
             Button {
                 model.createArchive()
             } label: {
-                Label("新建", systemImage: "archivebox")
+                Image(systemName: "archivebox")
             }
+            .help("新建压缩包（⌘N）")
+
+            Button {
+                MiniPanelController.shared.toggle()
+            } label: {
+                Image(systemName: "macwindow.on.rectangle")
+            }
+            .help("Mini 小窗：拖入即看，看完就走")
+
+            Button {
+                model.isStashVisible.toggle()
+            } label: {
+                Image(systemName: model.stash.isEmpty ? "tray" : "tray.full")
+                    .overlay(alignment: .topTrailing) {
+                        if !model.stash.isEmpty {
+                            Text("\(model.stash.count)")
+                                .font(.system(size: 8, weight: .bold))
+                                .padding(.horizontal, 3)
+                                .padding(.vertical, 1)
+                                .background(Color.accentColor, in: Capsule())
+                                .foregroundStyle(.white)
+                                .offset(x: 7, y: -6)
+                        }
+                    }
+            }
+            .disabled(model.stash.isEmpty && model.selection.isEmpty)
+            .help("暂存区：把选中项攒起来，跨目录跨包一起导出")
 
             Spacer(minLength: 12)
 
@@ -336,7 +411,7 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 84)
+            .frame(width: 122)
             .help("切换列表 / 图标")
 
             if model.isLoading { ProgressView().controlSize(.small) }
@@ -376,7 +451,7 @@ struct ContentView: View {
             TextField("搜索包内文件", text: $model.searchText)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
-                .frame(width: 150)
+                .frame(width: 132)
                 .disabled(model.current == nil)
             if !model.searchText.isEmpty {
                 Button {
@@ -568,6 +643,8 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if model.viewMode == .icons {
                 iconGrid
+            } else if model.viewMode == .columns && !model.isSearching {
+                columnsView
             } else {
                 listView
             }
@@ -592,6 +669,70 @@ struct ContentView: View {
         }
         .listStyle(.inset)
         .alternatingRowBackgrounds()
+    }
+
+    /// 分栏视图：每列一层目录，点目录在右侧开新列（类似访达的列视图）
+    private var columnsView: some View {
+        ScrollView(.horizontal, showsIndicators: true) {
+            HStack(alignment: .top, spacing: 0) {
+                ForEach(Array(model.trail.enumerated()), id: \.element.id) { index, frame in
+                    columnView(prefix: frame.prefix, isLast: index == model.trail.count - 1)
+                        .frame(width: 236)
+                    Divider()
+                }
+            }
+        }
+        .background(.background)
+    }
+
+    private func columnView(prefix: String, isLast: Bool) -> some View {
+        let items = model.entries(at: prefix)
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if items.isEmpty {
+                    Text("空目录")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .padding(10)
+                }
+                ForEach(items) { entry in
+                    let selected = model.selection.contains(entry.id)
+                    HStack(spacing: 6) {
+                        EntryThumbnail(entry: entry, model: model, side: 16, corner: 3)
+                            .frame(width: 16, height: 16)
+                        Text(entry.name)
+                            .font(.system(size: 12))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 4)
+                        if entry.isDirectory {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(selected ? Color.accentColor.opacity(0.16) : Color.clear)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if entry.isDirectory {
+                            model.jump(to: entry.path)
+                        } else {
+                            model.select(entry)
+                        }
+                    }
+                    .onTapGesture(count: 2) { model.activate(entry) }
+                    .onDrag { dragProvider(for: entry) }
+                    .onHover { inside in
+                        if inside { hover.begin(entry, model: model) } else { hover.end() }
+                    }
+                    .help(entry.path)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .background(isLast ? Color.clear : Color.clear)
     }
 
     private var iconGrid: some View {
@@ -621,6 +762,9 @@ struct ContentView: View {
                     .onTapGesture(count: 2) { model.activate(entry) }
                     .onTapGesture { model.select(entry) }
                     .onDrag { dragProvider(for: entry) }
+                    .onHover { inside in
+                        if inside { hover.begin(entry, model: model) } else { hover.end() }
+                    }
                     .help(entry.path)
                 }
             }
@@ -644,6 +788,8 @@ struct ContentView: View {
                 Button("导出…") { exportSelected() }
                     .controlSize(.small)
             }
+            Button("暂存") { model.addSelectionToStash() }
+                .controlSize(.small)
             Button("删除…") { model.deleteSelection() }
                 .controlSize(.small)
             Button("取消选择") { model.selection = [] }
@@ -720,6 +866,9 @@ struct ContentView: View {
         .onTapGesture(count: 2) { model.activate(entry) }
         .onTapGesture { model.select(entry) }
         .onDrag { dragProvider(for: entry) }
+        .onHover { inside in
+            if inside { hover.begin(entry, model: model) } else { hover.end() }
+        }
         .contextMenu {
             Button(entry.isDirectory ? "进入文件夹" : "打开") { model.activate(entry) }
                 .disabled(!entry.isDirectory && !entry.isArchive)
@@ -733,6 +882,11 @@ struct ContentView: View {
             }
             .disabled(entry.isDirectory)
             Divider()
+            Button("加入暂存区") {
+                model.selection = [entry.id]
+                model.addSelectionToStash()
+            }
+            .disabled(entry.isDirectory)
             Button("加入文件…") { model.addFiles() }
             Button("从压缩包删除…") {
                 model.selection = [entry.id]
@@ -781,6 +935,73 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
+    }
+
+    private var stashBar: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "tray.full")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text("暂存区 \(model.stash.count) 项")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Button("打包成 ZIP") { model.compressStash() }
+                    .controlSize(.small)
+                Button("全部导出…") { model.exportStash() }
+                    .controlSize(.small)
+                Button("清空") { model.clearStash() }
+                    .controlSize(.small)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                Button {
+                    model.isStashVisible = false
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("收起暂存区")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(model.stash) { item in
+                        HStack(spacing: 5) {
+                            Image(systemName: "doc")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(item.name)
+                                    .font(.system(size: 10.5))
+                                    .lineLimit(1)
+                                Text(item.displaySize)
+                                    .font(.system(size: 8.5))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            Button {
+                                model.removeFromStash(item)
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                        .help(item.path)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 7)
+            }
+        }
+        .background(.bar)
     }
 
     private var statusBar: some View {
