@@ -11,39 +11,41 @@ struct RrzipApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = ArchiveModel()
 
-    init() { Self.handleCLI() }
+    init() {
+        // 有命令行参数就按 CLI 跑完退出，否则进入正常界面
+        if let code = Self.runCLI() { exit(code) }
+    }
 
-    /// 便于在终端里验证解析结果：rrzip --list <压缩包> [--pass 密码]
-    private static func handleCLI() {
+    /// 命令行入口：返回退出码，nil 表示没有 CLI 参数。
+    /// 这里刻意不用返回 Never 的局部函数——CI 的 Swift 6.0 在 -O 下会把它优化成
+    /// 不执行，导致 --list 走到「读取失败」分支。
+    private static func runCLI() -> Int32? {
         let args = CommandLine.arguments
-        let password: String? = {
-            guard let index = args.firstIndex(of: "--pass"), index + 1 < args.count else { return nil }
-            return args[index + 1]
-        }()
-
-        func fail(_ message: String) -> Never {
-            FileHandle.standardError.write(Data("error: \(message)\n".utf8))
-            exit(1)
-        }
 
         func value(_ flag: String) -> String? {
             guard let index = args.firstIndex(of: flag), index + 1 < args.count else { return nil }
             return args[index + 1]
         }
 
-        // 打印识别结果：便于排查「后缀不对但内容对」的情况
+        func writeError(_ message: String) {
+            FileHandle.standardError.write(Data("error: \(message)\n".utf8))
+        }
+
+        let password = value("--pass")
+
+        // 精确识别：便于排查「后缀不对但内容对」的文件
         if let path = value("--detect") {
             let url = URL(fileURLWithPath: path)
             guard let detection = FormatDetector.detect(url) else {
-                fail("无法识别 \(url.lastPathComponent)")
+                writeError("无法识别 \(url.lastPathComponent)")
+                return 1
             }
             print("\(detection.format.id)\t\(detection.displayName)\t\(detection.source.rawValue)")
             print("openable=\(detection.format.isOpenable)\tsevenZip=\(detection.format.sevenZipType ?? "-")")
-            exit(0)
+            return 0
         }
 
-        // 原地增删，便于脚本化与自动测试。
-        // 位置参数 = 命令行里第一个非选项之后、到下一个选项之前的所有值。
+        // 位置参数 = 指定选项之后、到下一个选项之前的所有值
         func positional(after flag: String) -> [String] {
             guard let start = args.firstIndex(of: flag) else { return [] }
             let takesValue: Set<String> = ["--prefix", "--pass"]
@@ -51,8 +53,8 @@ struct RrzipApp: App {
             var index = start + 1
             while index < args.count {
                 let token = args[index]
-                if takesValue.contains(token) { index += 2; continue }   // 跳过选项和它的值
-                if token.hasPrefix("--") { break }                       // 遇到别的选项就停
+                if takesValue.contains(token) { index += 2; continue }
+                if token.hasPrefix("--") { break }
                 out.append(token)
                 index += 1
             }
@@ -61,54 +63,71 @@ struct RrzipApp: App {
 
         if args.contains("--add") {
             let list = positional(after: "--add")
-            guard let first = list.first else { fail("--add 需要一个归档路径") }
-            let archive = URL(fileURLWithPath: first)
+            guard let first = list.first else {
+                writeError("--add 需要一个归档路径")
+                return 1
+            }
             let items = list.dropFirst().map { URL(fileURLWithPath: $0) }
-            guard !items.isEmpty else { fail("--add 需要至少一个待加入的文件") }
+            guard !items.isEmpty else {
+                writeError("--add 需要至少一个待加入的文件")
+                return 1
+            }
             do {
-                try SevenZip.add(archive, items: Array(items), prefix: value("--prefix") ?? "", password: password)
+                try SevenZip.add(URL(fileURLWithPath: first), items: Array(items),
+                                 prefix: value("--prefix") ?? "", password: password)
                 print("added \(items.count)")
-                exit(0)
-            } catch { fail(error.localizedDescription) }
+                return 0
+            } catch {
+                writeError(error.localizedDescription)
+                return 1
+            }
         }
 
         if args.contains("--remove") {
             let list = positional(after: "--remove")
-            guard let first = list.first else { fail("--remove 需要一个归档路径") }
+            guard let first = list.first else {
+                writeError("--remove 需要一个归档路径")
+                return 1
+            }
             do {
                 try SevenZip.remove(URL(fileURLWithPath: first), entries: Array(list.dropFirst()), password: password)
                 print("removed \(list.count - 1)")
-                exit(0)
-            } catch { fail(error.localizedDescription) }
-        }
-
-        guard let path = value("--list") else { return }
-        let url = URL(fileURLWithPath: path)
-
-        func dump(_ entries: [ArchiveEntry]) -> Never {
-            for entry in entries {
-                print("\(entry.mode)\t\(entry.size)\t\(entry.modified)\t\(entry.path)")
+                return 0
+            } catch {
+                writeError(error.localizedDescription)
+                return 1
             }
-            exit(0)
         }
+
+        guard let path = value("--list") else { return nil }
+        let url = URL(fileURLWithPath: path)
 
         // 按识别结果决定先试哪个引擎，失败再换另一个
         let order: [ArchiveEngine] = FormatDetector.prefersSevenZip(url)
             ? [.sevenZip, .libarchive] : [.libarchive, .sevenZip]
 
+        var listed: [ArchiveEntry]?
         var lastError: Error?
         for engine in order {
             do {
                 switch engine {
-                case .libarchive: dump(try Tar.list(url, passphrase: password))
-                case .sevenZip: dump(try SevenZip.list(url, password: password))
+                case .libarchive: listed = try Tar.list(url, passphrase: password)
+                case .sevenZip: listed = try SevenZip.list(url, password: password)
                 }
+                break
             } catch {
                 lastError = error
-                continue
             }
         }
-        fail(lastError?.localizedDescription ?? "读取失败")
+
+        guard let entries = listed else {
+            writeError(lastError?.localizedDescription ?? "读取失败")
+            return 1
+        }
+        for entry in entries {
+            print("\(entry.mode)\t\(entry.size)\t\(entry.modified)\t\(entry.path)")
+        }
+        return 0
     }
 
     var body: some Scene {
