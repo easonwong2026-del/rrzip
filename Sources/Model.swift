@@ -52,6 +52,15 @@ enum CreateVolume: String, CaseIterable, Identifiable {
     }
 }
 
+/// 侧栏目录树节点（只包含目录）
+struct FolderNode: Identifiable, Hashable {
+    var optionalChildren: [FolderNode]? { children.isEmpty ? nil : children }
+    let path: String        // 包内完整前缀，根为空串
+    let name: String
+    var children: [FolderNode]
+    var id: String { path }
+}
+
 enum ArchiveViewMode: String, CaseIterable, Identifiable {
     case list, icons
     var id: String { rawValue }
@@ -104,6 +113,37 @@ final class ArchiveModel: ObservableObject {
         return Self.children(of: frame.prefix, in: frame.entries)
     }
 
+    /// 侧栏目录树
+    var folderTree: [FolderNode] {
+        guard let frame = current else { return [] }
+        var childrenByParent: [String: Set<String>] = [:]
+        for entry in frame.entries {
+            var path = entry.path
+            if !entry.isDirectory {
+                guard let slash = path.lastIndex(of: "/") else { continue }
+                path = String(path[path.startIndex...slash])
+            }
+            var parts = path.split(separator: "/").map(String.init)
+            guard !parts.isEmpty else { continue }
+            if !path.hasSuffix("/") { parts.removeLast() }   // 目录本身不带层级
+            var parent = ""
+            for part in parts {
+                childrenByParent[parent, default: []].insert(part)
+                parent += part + "/"
+            }
+        }
+
+        func build(_ prefix: String) -> [FolderNode] {
+            (childrenByParent[prefix] ?? [])
+                .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+                .map { name in
+                    let path = prefix + name + "/"
+                    return FolderNode(path: path, name: name, children: build(path))
+                }
+        }
+        return build("")
+    }
+
     /// 列表实际渲染的数据：搜索时是全包匹配结果，否则是当前层
     var displayEntries: [ArchiveEntry] {
         guard let frame = current else { return [] }
@@ -116,6 +156,34 @@ final class ArchiveModel: ObservableObject {
 
     var isSearching: Bool {
         !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 归档格式的展示名
+    var archiveFormatName: String {
+        guard let frame = current else { return "" }
+        switch frame.archive.pathExtension.lowercased() {
+        case "zip", "zipx": return "ZIP 压缩包"
+        case "7z": return "7Z 压缩包"
+        case "rar": return "RAR 压缩包"
+        case "tar": return "TAR 归档"
+        case "tgz", "gz": return "GZIP 压缩包"
+        case "tbz", "tbz2", "bz2": return "BZIP2 压缩包"
+        case "txz", "xz": return "XZ 压缩包"
+        default: return frame.archive.pathExtension.uppercased() + " 归档"
+        }
+    }
+
+    /// 全包条目数
+    var totalEntryCount: Int { current?.entries.count ?? 0 }
+
+    /// 归档本身的修改时间
+    var archiveModifiedText: String {
+        guard let frame = current,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: frame.archive.path),
+              let date = attrs[.modificationDate] as? Date else { return "—" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy 年 M 月 d 日 HH:mm"
+        return formatter.string(from: date)
     }
 
     /// 当前归档的大小，显示在状态栏
@@ -166,6 +234,20 @@ final class ArchiveModel: ObservableObject {
         } else if entry.isArchive {
             enter(entry)
         }
+    }
+
+    /// 侧栏跳转：从根重建目录栈
+    func jump(to path: String) {
+        guard let root = trail.first else { return }
+        var stack = [root]
+        var accumulated = ""
+        for part in path.split(separator: "/").map(String.init) {
+            accumulated += part + "/"
+            stack.append(Frame(archive: root.archive, entries: root.entries,
+                               engine: root.engine, prefix: accumulated))
+        }
+        trail = stack
+        selection = []
     }
 
     private func pushFolder(_ entry: ArchiveEntry) {

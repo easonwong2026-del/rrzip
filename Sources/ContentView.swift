@@ -155,10 +155,12 @@ struct ContentView: View {
                 emptyState
             } else {
                 HSplitView {
+                    sidebar
+                        .frame(minWidth: 168, idealWidth: 196, maxWidth: 280)
                     entryList
-                        .frame(minWidth: 520)
-                    PreviewPane(model: model)
-                        .frame(minWidth: 240, idealWidth: 300, maxWidth: 420)
+                        .frame(minWidth: 360)
+                    detailPane
+                        .frame(minWidth: 236, idealWidth: 276, maxWidth: 340)
                 }
             }
 
@@ -341,6 +343,104 @@ struct ContentView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
+    }
+
+    private var sidebar: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("目录")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+
+            List {
+                Button {
+                    model.jump(to: "")
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: model.current?.prefix.isEmpty == true ? "shippingbox.fill" : "shippingbox")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        Text(model.current?.archive.deletingPathExtension().lastPathComponent ?? "根目录")
+                            .font(.system(size: 12, weight: model.current?.prefix.isEmpty == true ? .semibold : .regular))
+                            .lineLimit(1)
+                    }
+                }
+                .buttonStyle(.plain)
+                .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+
+                OutlineGroup(model.folderTree, children: \.optionalChildren) { node in
+                    Button {
+                        model.jump(to: node.path)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: model.current?.prefix == node.path ? "folder.fill" : "folder")
+                                .font(.system(size: 11))
+                                .foregroundStyle(model.current?.prefix == node.path ? Color.accentColor : Color.secondary)
+                            Text(node.name)
+                                .font(.system(size: 12, weight: model.current?.prefix == node.path ? .semibold : .regular))
+                                .lineLimit(1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+                .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+            }
+            .listStyle(.sidebar)
+        }
+    }
+
+    private var detailPane: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 8) {
+                if let archive = model.current?.archive {
+                    Image(nsImage: NSWorkspace.shared.icon(forFile: archive.path))
+                        .resizable()
+                        .frame(width: 56, height: 56)
+                }
+                Text(model.current?.archive.lastPathComponent ?? "")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                Text(model.archiveFormatName)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 14)
+            .padding(.horizontal, 12)
+
+            Divider().padding(.vertical, 10)
+
+            VStack(spacing: 7) {
+                infoRow("大小", model.archiveSizeText)
+                infoRow("项目", "\(model.totalEntryCount)")
+                infoRow("加密", model.isEncrypted ? "是" : "否")
+                infoRow("修改", model.archiveModifiedText)
+            }
+            .padding(.horizontal, 14)
+
+            Divider().padding(.vertical, 10)
+
+            PreviewPane(model: model)
+        }
+        .background(.background)
+    }
+
+    private func infoRow(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .font(.system(size: 11).monospacedDigit())
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
     }
 
     private var entryList: some View {
