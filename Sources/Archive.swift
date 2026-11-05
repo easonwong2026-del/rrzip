@@ -255,6 +255,14 @@ enum SevenZip {
         return stdout
     }
 
+    /// 完整读一遍校验。损坏、密码不对都会抛错。
+    static func verify(_ archive: URL, password: String? = nil) throws {
+        var args = ["t", "-y"]
+        if let password, !password.isEmpty { args.append("-p\(password)") }
+        args.append(archive.path)
+        try run(args)
+    }
+
     /// `7zz l -slt` 的块状输出解析
     static func list(_ archive: URL, password: String? = nil) throws -> [ArchiveEntry] {
         var args = ["l", "-slt", "-ba"]

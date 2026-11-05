@@ -20,8 +20,8 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>${APP_NAME}</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.4.0</string>
-    <key>CFBundleVersion</key><string>12</string>
+    <key>CFBundleShortVersionString</key><string>2.5.0</string>
+    <key>CFBundleVersion</key><string>13</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSHighResolutionCapable</key><true/>
@@ -73,8 +73,13 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
 PLIST
 
 echo "==> 编译"
+DEBUG_FLAGS=""
+if [ "${DEBUG:-0}" = "1" ]; then
+    DEBUG_FLAGS="-DDEBUG -Onone"
+    echo "    (调试构建：包含 --goto / demo 等调试入口)"
+fi
 xcrun swiftc \
-    -O -swift-version 5 -parse-as-library \
+    -O $DEBUG_FLAGS -swift-version 5 -parse-as-library \
     -target arm64-apple-macos${MIN_MACOS} \
     -framework AppKit -framework SwiftUI -framework PDFKit -framework AVFoundation -framework QuickLookUI -framework UniformTypeIdentifiers \
     -o "$BUNDLE/Contents/MacOS/${APP_NAME}" \
@@ -105,8 +110,8 @@ cat > "$APEXPATH/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>ArchivePreview</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac.preview</string>
     <key>CFBundlePackageType</key><string>XPC!</string>
-    <key>CFBundleShortVersionString</key><string>2.4.0</string>
-    <key>CFBundleVersion</key><string>12</string>
+    <key>CFBundleShortVersionString</key><string>2.5.0</string>
+    <key>CFBundleVersion</key><string>13</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSExtension</key>
     <dict>

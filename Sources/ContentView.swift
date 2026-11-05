@@ -213,6 +213,11 @@ struct RrzipApp: App {
                 Button("加入暂存区") { model.addSelectionToStash() }
                     .keyboardShortcut("s", modifiers: [.command, .option])
                     .disabled(model.selection.isEmpty)
+                Divider()
+                Button("批量处理…") { model.pickBatch() }
+                    .keyboardShortcut("b", modifiers: [.command, .shift])
+                Button("检查当前压缩包") { model.verifyCurrent() }
+                    .disabled(model.current == nil)
             }
         }
     }
@@ -338,10 +343,22 @@ struct ContentView: View {
         .tint(Palette.brand)
         .preferredColorScheme(model.appearance.scheme)
         .onDrop(of: [.fileURL], isTargeted: $isDropTarget) { providers in
-            guard let provider = providers.first else { return false }
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let url else { return }
-                Task { @MainActor in model.open(url: url) }
+            guard !providers.isEmpty else { return false }
+            Task { @MainActor in
+                var urls: [URL] = []
+                for provider in providers {
+                    let url: URL? = await withCheckedContinuation { continuation in
+                        _ = provider.loadObject(ofClass: URL.self) { value, _ in
+                            continuation.resume(returning: value)
+                        }
+                    }
+                    if let url { urls.append(url) }
+                }
+                if urls.count > 1 {
+                    model.batchRequest = BatchRequest(urls: urls, mode: .extract)
+                } else if let first = urls.first {
+                    model.open(url: first)
+                }
             }
             return true
         }
@@ -357,6 +374,19 @@ struct ContentView: View {
 #if DEBUG
             if UserDefaults.standard.bool(forKey: "rrzip.demoMini") {
                 MiniPanelController.shared.show()
+            }
+#endif
+#if DEBUG
+            // 调试用：defaults write com.rrzip.mac rrzip.batchFiles "a.zip,b.zip"
+            if let paths = UserDefaults.standard.string(forKey: "rrzip.batchFiles") {
+                let urls = paths.split(separator: ",")
+                    .map { URL(fileURLWithPath: String($0)) }
+                    .filter { FileManager.default.fileExists(atPath: $0.path) }
+                if !urls.isEmpty {
+                    let mode: BatchRunner.Mode =
+                        UserDefaults.standard.string(forKey: "rrzip.batchMode") == "verify" ? .verify : .extract
+                    model.batchRequest = BatchRequest(urls: urls, mode: mode)
+                }
             }
 #endif
             // 支持 `open -a rrzip xxx.zip` 以及命令行直接传路径
@@ -426,6 +456,9 @@ struct ContentView: View {
                 }
             }
 #endif
+        }
+        .sheet(item: $model.batchRequest) { request in
+            BatchSheet(urls: request.urls, mode: request.mode)
         }
         .alert("出错了", isPresented: Binding(
             get: { model.errorMessage != nil },
@@ -517,6 +550,7 @@ struct ContentView: View {
 
             Menu {
                 Button("在访达中显示") { model.revealInFinder() }
+                Button("检查完整性") { model.verifyCurrent() }
                 if model.isEncrypted { Button("锁定并清除密码") { model.lockCurrent() } }
                 Divider()
                 Picker("外观", selection: $model.appearance) {

@@ -227,6 +227,46 @@ do {
     expect(false, "原子写入", "\(error)")
 }
 
+// 10. 完整性校验
+print("完整性校验")
+if SevenZip.isAvailable {
+    do {
+        let good = fixtures.appendingPathComponent("basic.zip")
+        do { try SevenZip.verify(good); expect(true, "正常包校验通过") }
+        catch { expect(false, "正常包校验通过", "\(error)") }
+
+        // 截掉一半字节，模拟下载不完整
+        let broken = fixtures.appendingPathComponent("broken.zip")
+        let data = try Data(contentsOf: good)
+        try data.prefix(data.count / 2).write(to: broken)
+        var failed = false
+        do { try SevenZip.verify(broken) } catch { failed = true }
+        expect(failed, "截断的包校验失败")
+    } catch {
+        expect(false, "完整性校验", "\(error)")
+    }
+} else {
+    print("  - 跳过（未找到 7zz）")
+}
+
+// 11. 批量解压的目标目录不重名
+print("批量目标目录")
+do {
+    let root = fixtures.appendingPathComponent("batchroot", isDirectory: true)
+    try? FileManager.default.removeItem(at: root)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: root.appendingPathComponent("demo"), withIntermediateDirectories: true)
+
+    let archive = URL(fileURLWithPath: "/tmp/demo.zip")
+    let folder = BatchRunner.uniqueFolder(for: archive, in: root)
+    expect(folder.lastPathComponent == "demo (2)", "重名时自动加序号", "实际 \(folder.lastPathComponent)")
+
+    let fresh = BatchRunner.uniqueFolder(for: URL(fileURLWithPath: "/tmp/fresh.zip"), in: root)
+    expect(fresh.lastPathComponent == "fresh", "不重名时用原名")
+} catch {
+    expect(false, "批量目标目录", "\(error)")
+}
+
 print("")
 print(failures == 0 ? "全部通过（\(checks) 项）" : "失败 \(failures)/\(checks)")
 exit(failures == 0 ? 0 : 1)

@@ -66,6 +66,13 @@ struct FolderNode: Identifiable, Hashable {
     var id: String { path }
 }
 
+/// 一次批量处理的请求（拖入多个文件、或菜单里多选）
+struct BatchRequest: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+    let mode: BatchRunner.Mode
+}
+
 /// 外观：跟随系统 / 强制浅色 / 强制深色
 enum AppearanceMode: String, CaseIterable, Identifiable {
     case system, light, dark
@@ -164,6 +171,9 @@ final class ArchiveModel: ObservableObject {
     @Published var status: String = "拖入一个压缩包，或按 ⌘O 打开"
     @Published var errorMessage: String?
     @Published private(set) var unlocked: Set<String> = []
+    /// 非空时弹出批量面板
+    @Published var batchRequest: BatchRequest?
+
     /// 暂存区：跨层、跨包攒起来，最后一次性导出
     @Published private(set) var stash: [StashItem] = []
     @Published var isStashVisible = false
@@ -483,11 +493,50 @@ final class ArchiveModel: ObservableObject {
 
     func openWithPanel() {
         let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.message = "选择要打开的压缩包"
-        if panel.runModal() == .OK, let url = panel.url { open(url: url) }
+        panel.message = "选择一个压缩包；选多个会进入批量处理"
+        guard panel.runModal() == .OK else { return }
+        let urls = panel.urls
+        if urls.count > 1 {
+            batchRequest = BatchRequest(urls: urls, mode: .extract)
+        } else if let url = urls.first {
+            open(url: url)
+        }
+    }
+
+    /// 菜单里的「批量处理…」
+    func pickBatch() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.message = "选择要批量处理的压缩包"
+        panel.prompt = "下一步"
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        batchRequest = BatchRequest(urls: panel.urls, mode: .extract)
+    }
+
+    /// 校验当前打开的包
+    func verifyCurrent() {
+        guard let frame = current else { return }
+        let password = passwords[frame.archive.path]
+        isLoading = true
+        status = "正在校验 \(frame.archive.lastPathComponent)…"
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try SevenZip.verify(frame.archive, password: password)
+                }.value
+                isLoading = false
+                status = "校验通过 · \(frame.archive.lastPathComponent)"
+            } catch {
+                isLoading = false
+                status = "校验失败"
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     private func loadFrame(url: URL, resetTrail: Bool, restorePrefix: String? = nil) {
