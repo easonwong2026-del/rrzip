@@ -182,7 +182,12 @@ struct ContentView: View {
             return true
         }
         .task {
-            // 支持 `open -a 归档坞 xxx.zip` 以及命令行直接传路径
+            // 便于截图/调试：--icons 初始图标视图，--search xxx 预填搜索
+            if CommandLine.arguments.contains("--icons") { model.viewMode = .icons }
+            if let i = CommandLine.arguments.firstIndex(of: "--search"), i + 1 < CommandLine.arguments.count {
+                model.searchText = CommandLine.arguments[i + 1]
+            }
+            // 支持 `open -a rrzip xxx.zip` 以及命令行直接传路径
             if model.trail.isEmpty {
                 for arg in CommandLine.arguments.dropFirst() where !arg.hasPrefix("-") {
                     let url = URL(fileURLWithPath: arg)
@@ -205,7 +210,7 @@ struct ContentView: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Button {
                 model.openWithPanel()
             } label: {
@@ -231,33 +236,63 @@ struct ContentView: View {
             Button {
                 model.createArchive()
             } label: {
-                Label("新建压缩包", systemImage: "archivebox")
+                Label("新建", systemImage: "archivebox")
             }
 
-            Spacer()
+            Spacer(minLength: 12)
 
-            if model.isEncrypted {
-                Button {
-                    model.lockCurrent()
-                } label: {
-                    Label("已解锁", systemImage: "lock.open.fill")
-                        .foregroundStyle(.orange)
+            searchField
+
+            Picker("视图", selection: $model.viewMode) {
+                ForEach(ArchiveViewMode.allCases) { mode in
+                    Image(systemName: mode.symbol).tag(mode)
                 }
-                .help("点击锁定并清除本次会话的密码")
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 84)
+            .help("切换列表 / 图标")
 
             if model.isLoading { ProgressView().controlSize(.small) }
 
-            Button {
-                model.revealInFinder()
+            Menu {
+                Button("在访达中显示") { model.revealInFinder() }
+                if model.isEncrypted { Button("锁定并清除密码") { model.lockCurrent() } }
             } label: {
-                Image(systemName: "magnifyingglass")
+                Image(systemName: "ellipsis.circle")
             }
-            .help("在访达中显示")
+            .menuStyle(.borderlessButton)
+            .fixedSize()
             .disabled(model.current == nil)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            TextField("搜索包内文件", text: $model.searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .frame(width: 150)
+                .disabled(model.current == nil)
+            if !model.searchText.isEmpty {
+                Button {
+                    model.searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 6))
     }
 
     private var breadcrumb: some View {
@@ -266,6 +301,14 @@ struct ContentView: View {
                 Text("未打开归档")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
+            } else if model.isSearching {
+                HStack(spacing: 4) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 10))
+                    Text("搜索「\(model.searchText)」· \(model.displayEntries.count) 个结果")
+                        .font(.system(size: 12))
+                }
+                .foregroundStyle(.secondary)
             } else {
                 ForEach(Array(model.trail.enumerated()), id: \.element.id) { index, frame in
                     if index > 0 {
@@ -302,42 +345,129 @@ struct ContentView: View {
 
     private var entryList: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                Text("名称").frame(maxWidth: .infinity, alignment: .leading)
-                Text("大小").frame(width: 90, alignment: .trailing)
-                Text("修改时间").frame(width: 130, alignment: .trailing)
+            if model.viewMode == .list && !model.isSearching {
+                HStack(spacing: 0) {
+                    Text("名称").frame(maxWidth: .infinity, alignment: .leading)
+                    Text("大小").frame(width: 90, alignment: .trailing)
+                    Text("修改时间").frame(width: 130, alignment: .trailing)
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(.quaternary.opacity(0.35))
             }
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 6)
-            .background(.quaternary.opacity(0.35))
 
-            if model.visibleEntries.isEmpty {
-                VStack(spacing: 6) {
-                    Image(systemName: "folder")
+            if model.displayEntries.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: model.isSearching ? "magnifyingglass" : "folder")
                         .font(.system(size: 26, weight: .thin))
                         .foregroundStyle(.tertiary)
-                    Text("这个目录是空的")
+                    Text(model.isSearching ? "没有匹配的文件" : "这个目录是空的")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.viewMode == .icons {
+                iconGrid
             } else {
-            List {
-                ForEach(model.visibleEntries) { entry in
-                    row(entry)
-                        .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
-                        .listRowBackground(
-                            model.selection.contains(entry.id)
-                                ? Color.accentColor.opacity(0.16)
-                                : Color.clear
-                        )
+                listView
+            }
+
+            if !model.selection.isEmpty {
+                flowBar
+            }
+        }
+    }
+
+    private var listView: some View {
+        List {
+            ForEach(model.displayEntries) { entry in
+                row(entry)
+                    .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+                    .listRowBackground(
+                        model.selection.contains(entry.id)
+                            ? Color.accentColor.opacity(0.16)
+                            : Color.clear
+                    )
+            }
+        }
+        .listStyle(.inset)
+        .alternatingRowBackgrounds()
+    }
+
+    private var iconGrid: some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 108), spacing: 14)], spacing: 14) {
+                ForEach(model.displayEntries) { entry in
+                    VStack(spacing: 6) {
+                        Image(systemName: iconName(entry))
+                            .font(.system(size: 34, weight: .light))
+                            .foregroundStyle(entry.isArchive ? Color.accentColor : Color.secondary)
+                            .frame(height: 42)
+                        Text(entry.name)
+                            .font(.system(size: 11))
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                        Text(entry.isDirectory ? "文件夹" : entry.displaySize)
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .frame(width: 100, height: 96)
+                    .padding(4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(model.selection.contains(entry.id)
+                                  ? Color.accentColor.opacity(0.16)
+                                  : Color.clear)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) { model.activate(entry) }
+                    .onTapGesture { model.select(entry) }
+                    .onDrag { dragProvider(for: entry) }
+                    .help(entry.path)
                 }
             }
-            .listStyle(.inset)
-            .alternatingRowBackgrounds()
+            .padding(16)
+        }
+    }
+
+    /// 选中后浮出的快捷操作条
+    private var flowBar: some View {
+        HStack(spacing: 10) {
+            Text("已选 \(model.selection.count) 项")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            Spacer()
+
+            Button("解压到…") { model.extractSelection() }
+                .controlSize(.small)
+            if let entry = model.displayEntries.first(where: { model.selection.contains($0.id) }),
+               !entry.isDirectory {
+                Button("导出…") { exportSelected() }
+                    .controlSize(.small)
             }
+            Button("取消选择") { model.selection = [] }
+                .controlSize(.small)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    private func exportSelected() {
+        guard let entry = model.displayEntries.first(where: { model.selection.contains($0.id) }) else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = entry.name
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        model.payloadURL(for: entry) { url in
+            guard let url else { return }
+            try? FileManager.default.removeItem(at: destination)
+            try? FileManager.default.copyItem(at: url, to: destination)
         }
     }
 
@@ -356,9 +486,18 @@ struct ContentView: View {
                 .foregroundStyle(entry.isArchive ? Color.accentColor : Color.secondary)
                 .frame(width: 18)
 
-            Text(entry.name)
-                .font(.system(size: 12.5))
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(entry.name)
+                    .font(.system(size: 12.5))
+                    .lineLimit(1)
+                if model.isSearching {
+                    Text(entry.path)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
 
             if entry.isArchive {
                 Text("嵌套")
@@ -429,11 +568,21 @@ struct ContentView: View {
     }
 
     private var statusBar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Text(model.status)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
+            if !model.archiveSizeText.isEmpty {
+                Text(model.archiveSizeText)
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
             Spacer()
+            if model.isSearching {
+                Text("\(model.displayEntries.count) 个结果")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
             if !model.selection.isEmpty {
                 Text("已选 \(model.selection.count) 项")
                     .font(.system(size: 11))

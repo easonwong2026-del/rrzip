@@ -52,6 +52,13 @@ enum CreateVolume: String, CaseIterable, Identifiable {
     }
 }
 
+enum ArchiveViewMode: String, CaseIterable, Identifiable {
+    case list, icons
+    var id: String { rawValue }
+    var title: String { self == .list ? "列表" : "图标" }
+    var symbol: String { self == .list ? "list.bullet" : "square.grid.2x2" }
+}
+
 struct CreateOptions {
     var format: CreateFormat = .zip
     var password: String = ""
@@ -78,6 +85,8 @@ final class ArchiveModel: ObservableObject {
 
     @Published private(set) var trail: [Frame] = []
     @Published var selection: Set<ArchiveEntry.ID> = []
+    @Published var searchText: String = ""
+    @Published var viewMode: ArchiveViewMode = .list
     /// 每次重新点同一行就自增，强制预览刷新
     @Published private(set) var previewToken: Int = 0
     @Published private(set) var isLoading = false
@@ -93,6 +102,28 @@ final class ArchiveModel: ObservableObject {
     var visibleEntries: [ArchiveEntry] {
         guard let frame = current else { return [] }
         return Self.children(of: frame.prefix, in: frame.entries)
+    }
+
+    /// 列表实际渲染的数据：搜索时是全包匹配结果，否则是当前层
+    var displayEntries: [ArchiveEntry] {
+        guard let frame = current else { return [] }
+        let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyword.isEmpty else { return Self.children(of: frame.prefix, in: frame.entries) }
+        return frame.entries
+            .filter { $0.path.localizedCaseInsensitiveContains(keyword) }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    var isSearching: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 当前归档的大小，显示在状态栏
+    var archiveSizeText: String {
+        guard let frame = current,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: frame.archive.path),
+              let size = attrs[.size] as? Int64 else { return "" }
+        return ByteFormatter.string(size)
     }
 
     /// 把扁平路径折叠成一层目录视图
@@ -148,6 +179,17 @@ final class ArchiveModel: ObservableObject {
     var isEncrypted: Bool { current.map { unlocked.contains($0.archive.path) } ?? false }
 
     private var passwords: [String: String] = [:]
+
+    init() {
+        // 调试用：defaults write com.rrzip.mac rrzip.viewMode -string icons
+        if let mode = UserDefaults.standard.string(forKey: "rrzip.viewMode"),
+           let parsed = ArchiveViewMode(rawValue: mode) {
+            viewMode = parsed
+        }
+        if let keyword = UserDefaults.standard.string(forKey: "rrzip.search") {
+            searchText = keyword
+        }
+    }
     /// 预览/导出缓存：key = 归档路径 + 修改时间 + 条目路径
     private var payloadCache: [String: URL] = [:]
 
