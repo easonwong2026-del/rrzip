@@ -4,6 +4,7 @@
 import AppKit
 import Combine
 import Foundation
+import UniformTypeIdentifiers
 
 enum CreateFormat: String, CaseIterable, Identifiable {
     case zip, sevenZip, tar, tgz
@@ -82,6 +83,9 @@ enum ArchiveViewMode: String, CaseIterable, Identifiable {
         }
     }
 }
+
+/// 应用内拖拽使用的自定义类型：暂存区靠它拿到「包 + 包内路径」，不必先解压
+let rrzipEntryType = UTType(exportedAs: "com.rrzip.entry")
 
 /// 暂存区里的一条：记住它来自哪个包，才能跨层、跨包累积
 struct StashItem: Identifiable, Hashable {
@@ -327,6 +331,33 @@ final class ArchiveModel: ObservableObject {
             if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory }
             return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         }
+    }
+
+    /// 当前选中的第一个条目（键盘导航与快速查看用）
+    var selectedEntry: ArchiveEntry? {
+        let list = isSearching ? displayEntries : visibleEntries
+        return list.first { selection.contains($0.id) }
+    }
+
+    /// 上下键移动选中
+    func moveSelection(by delta: Int) {
+        let list = isSearching ? displayEntries : visibleEntries
+        guard !list.isEmpty else { return }
+        let currentIndex = list.firstIndex { selection.contains($0.id) }
+        let nextIndex: Int
+        if let currentIndex {
+            nextIndex = min(max(currentIndex + delta, 0), list.count - 1)
+        } else {
+            nextIndex = delta > 0 ? 0 : list.count - 1
+        }
+        let entry = list[nextIndex]
+        selection = [entry.id]
+    }
+
+    /// 回车：目录进入下一层，嵌套包展开，文件走默认预览
+    func activateSelected() {
+        guard let entry = selectedEntry else { return }
+        activate(entry)
     }
 
     /// 单击：选中并刷新预览
@@ -601,6 +632,16 @@ final class ArchiveModel: ObservableObject {
         isStashVisible = true
         status = "已加入暂存 · 共 \(stash.count) 项"
         selection = []
+    }
+
+    /// 拖拽加入：按包内路径登记，不需要先把文件解出来
+    func addToStash(archive: URL, path: String, size: Int64) {
+        guard !path.hasSuffix("/") else { return }
+        if !stash.contains(where: { $0.archive == archive && $0.path == path }) {
+            stash.append(StashItem(archive: archive, path: path, size: size))
+        }
+        isStashVisible = true
+        status = "已加入暂存 · 共 \(stash.count) 项"
     }
 
     func removeFromStash(_ item: StashItem) {

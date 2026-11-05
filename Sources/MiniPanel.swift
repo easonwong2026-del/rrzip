@@ -48,24 +48,68 @@ final class MiniPanelController {
     }
 }
 
+/// Mini 的多标签容器：每个标签一份独立 model，互不干扰
+@MainActor
+final class MiniTabs: ObservableObject {
+    @MainActor
+    struct Tab: Identifiable {
+        let id = UUID()
+        let model = ArchiveModel()
+        var title: String {
+            model.current?.archive.deletingPathExtension().lastPathComponent ?? "未命名"
+        }
+    }
+
+    @Published private(set) var tabs: [Tab] = []
+    @Published var activeID: UUID?
+
+    var active: Tab? {
+        tabs.first { $0.id == activeID } ?? tabs.first
+    }
+
+    func open(_ url: URL) {
+        if let existing = tabs.first(where: { $0.model.current?.archive == url }) {
+            activeID = existing.id
+            return
+        }
+        let tab = Tab()
+        tabs.append(tab)
+        activeID = tab.id
+        tab.model.open(url: url)
+    }
+
+    func close(_ id: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        tabs.remove(at: index)
+        if activeID == id {
+            activeID = tabs[safe: index]?.id ?? tabs.last?.id
+        }
+    }
+
+    func select(_ id: UUID) { activeID = id }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
 struct MiniView: View {
-    @StateObject private var model = ArchiveModel()
+    @StateObject private var tabs = MiniTabs()
     @State private var isTargeted = false
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
-
-            if model.current == nil {
-                emptyState
-            } else {
-                list
-                if !model.selection.isEmpty { actionBar }
+            if tabs.tabs.count > 1 {
+                tabStrip
+                Divider()
             }
-
-            Divider()
-            footer
+            if let tab = tabs.active {
+                MiniBody(model: tab.model, tabs: tabs)
+            } else {
+                emptyState
+            }
         }
         .frame(minWidth: 320, minHeight: 320)
         .background(.background)
@@ -79,18 +123,100 @@ struct MiniView: View {
         }
         .task {
             // 调试用：defaults write com.rrzip.mac rrzip.miniArchive /path/to.zip
-            if let path = UserDefaults.standard.string(forKey: "rrzip.miniArchive") {
-                let url = URL(fileURLWithPath: path)
-                if FileManager.default.fileExists(atPath: url.path) { model.open(url: url) }
+            if let paths = UserDefaults.standard.string(forKey: "rrzip.miniArchive"),
+               tabs.tabs.isEmpty {
+                for path in paths.split(separator: ",") {
+                    let url = URL(fileURLWithPath: String(path))
+                    if FileManager.default.fileExists(atPath: url.path) { tabs.open(url) }
+                }
             }
         }
         .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
             guard let provider = providers.first else { return false }
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url else { return }
-                Task { @MainActor in model.open(url: url) }
+                Task { @MainActor in tabs.open(url) }
             }
             return true
+        }
+    }
+
+    private var tabStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                ForEach(tabs.tabs) { tab in
+                    HStack(spacing: 4) {
+                        Text(tab.title)
+                            .font(.system(size: 10.5))
+                            .lineLimit(1)
+                        Button {
+                            tabs.close(tab.id)
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 7, weight: .bold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(tabs.activeID == tab.id ? Color.accentColor.opacity(0.18) : Color.clear)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture { tabs.select(tab.id) }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 22)
+            .padding(.bottom, 5)
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Spacer()
+            Image(systemName: "shippingbox")
+                .font(.system(size: 34, weight: .thin))
+                .foregroundStyle(.tertiary)
+            Text("拖一个压缩包进来")
+                .font(.system(size: 12, weight: .medium))
+            Text("看完就走，不用开主窗口；再拖一个会开新标签")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 16)
+            Button("选择文件…") { pickFile() }
+                .controlSize(.small)
+                .padding(.top, 2)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func pickFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls { tabs.open(url) }
+    }
+}
+
+/// 单个标签的内容
+struct MiniBody: View {
+    @ObservedObject var model: ArchiveModel
+    @ObservedObject var tabs: MiniTabs
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            list
+            if !model.selection.isEmpty { actionBar }
+            Divider()
+            footer
         }
     }
 
@@ -114,17 +240,17 @@ struct MiniView: View {
             Spacer()
 
             Button {
-                model.openWithPanel()
+                pick()
             } label: {
-                Image(systemName: "folder")
+                Image(systemName: "plus")
                     .font(.system(size: 11.5))
             }
             .buttonStyle(.plain)
-            .help("打开压缩包")
+            .help("再开一个标签")
 
             Button {
-                AppDelegate.model.map { main in
-                    if let archive = model.current?.archive { main.open(url: archive) }
+                if let archive = model.current?.archive {
+                    AppDelegate.model?.open(url: archive)
                 }
                 NSApp.activate(ignoringOtherApps: true)
                 MiniPanelController.shared.toggle()
@@ -137,8 +263,16 @@ struct MiniView: View {
             .disabled(model.current == nil)
         }
         .padding(.horizontal, 12)
-        .padding(.top, 22)
+        .padding(.top, 8)
         .padding(.bottom, 8)
+    }
+
+    private func pick() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls { tabs.open(url) }
     }
 
     private var list: some View {
@@ -201,9 +335,7 @@ struct MiniView: View {
 
     private var footer: some View {
         HStack(spacing: 6) {
-            if model.isLoading {
-                ProgressView().controlSize(.mini)
-            }
+            if model.isLoading { ProgressView().controlSize(.mini) }
             Text(model.status)
                 .font(.system(size: 9.5))
                 .foregroundStyle(.secondary)
@@ -213,25 +345,6 @@ struct MiniView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 10) {
-            Spacer()
-            Image(systemName: "shippingbox")
-                .font(.system(size: 34, weight: .thin))
-                .foregroundStyle(.tertiary)
-            Text("拖一个压缩包进来")
-                .font(.system(size: 12, weight: .medium))
-            Text("看完就走，不用开主窗口")
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-            Button("选择文件…") { model.openWithPanel() }
-                .controlSize(.small)
-                .padding(.top, 2)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func dragProvider(for entry: ArchiveEntry) -> NSItemProvider {

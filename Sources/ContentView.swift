@@ -99,6 +99,50 @@ struct RrzipApp: App {
             }
         }
 
+        // 渲染缩略图到 PNG：rrzip --thumb <归档> <包内路径> <输出.png> [--size 560]
+        if args.contains("--thumb") {
+            let rest = positional(after: "--thumb")
+            guard rest.count >= 3 else {
+                writeError("用法：--thumb <归档> <包内路径> <输出.png>")
+                return 1
+            }
+            let archive = URL(fileURLWithPath: rest[0])
+            let entryPath = rest[1]
+            let output = URL(fileURLWithPath: rest[2])
+            let side = Double(value("--size") ?? "560") ?? 560
+            let ext = (entryPath as NSString).pathExtension.lowercased()
+
+            let staging = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rrzip-thumb-\(UUID().uuidString)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: staging) }
+
+            do {
+                try SevenZip.extract(archive, entries: [entryPath], to: staging, password: password)
+            } catch {
+                writeError(error.localizedDescription)
+                return 1
+            }
+            let file = staging.appendingPathComponent(entryPath)
+            guard let image = ThumbnailStore.renderForTool(url: file, ext: ext, maxPixel: side) else {
+                writeError("渲染失败 \(entryPath)")
+                return 1
+            }
+            let rep = NSBitmapImageRep(cgImage: image)
+            guard let data = rep.representation(using: .png, properties: [:]) else {
+                writeError("编码失败")
+                return 1
+            }
+            do {
+                try data.write(to: output)
+                print("ok \(image.width)x\(image.height) -> \(output.path)")
+                return 0
+            } catch {
+                writeError(error.localizedDescription)
+                return 1
+            }
+        }
+
         guard let path = value("--list") else { return nil }
         let url = URL(fileURLWithPath: path)
 
@@ -153,6 +197,21 @@ struct RrzipApp: App {
                 }
                 .keyboardShortcut("[", modifiers: .command)
                 .disabled(!model.canGoBack)
+            }
+        }
+        .commands {
+            CommandGroup(after: .toolbar) {
+                Button("返回上级") { model.goBack() }
+                    .keyboardShortcut(.upArrow, modifiers: .command)
+                    .disabled(!model.canGoBack)
+                Button("快速查看") {
+                    QuickLookController.shared.toggle(entry: model.selectedEntry, model: model)
+                }
+                .keyboardShortcut(.space, modifiers: [])
+                .disabled(model.selectedEntry == nil)
+                Button("加入暂存区") { model.addSelectionToStash() }
+                    .keyboardShortcut("s", modifiers: [.command, .option])
+                    .disabled(model.selection.isEmpty)
             }
         }
     }
@@ -227,6 +286,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct ContentView: View {
     @ObservedObject var model: ArchiveModel
     @StateObject private var hover = HoverCoordinator()
+    @FocusState private var listFocused: Bool
+    @State private var stashTargeted = false
     @State private var isDropTarget = false
 
     var body: some View {
@@ -249,7 +310,7 @@ struct ContentView: View {
                 }
             }
 
-            if model.isStashVisible && !model.stash.isEmpty {
+            if model.isStashVisible {
                 Divider()
                 stashBar
             }
@@ -305,6 +366,19 @@ struct ContentView: View {
                     waited += 1
                 }
                 model.jump(to: goto)
+            }
+            // 调试用：直接弹系统快速查看面板
+            if UserDefaults.standard.bool(forKey: "rrzip.demoQuickLook") {
+                var waited = 0
+                while model.displayEntries.isEmpty && waited < 40 {
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    waited += 1
+                }
+                if let first = model.displayEntries.first(where: { !$0.isDirectory }) {
+                    model.selection = [first.id]
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    QuickLookController.shared.toggle(entry: first, model: model)
+                }
             }
             // 调试用：把前几个文件放进暂存区，便于截图核对
             if UserDefaults.standard.bool(forKey: "rrzip.demoStash") {
@@ -397,7 +471,7 @@ struct ContentView: View {
                         }
                     }
             }
-            .disabled(model.stash.isEmpty && model.selection.isEmpty)
+            .disabled(model.current == nil)
             .help("暂存区：把选中项攒起来，跨目录跨包一起导出")
 
             Spacer(minLength: 12)
@@ -653,6 +727,30 @@ struct ContentView: View {
                 flowBar
             }
         }
+        .focusable()
+        .focusEffectDisabled()
+        .focused($listFocused)
+        .onKeyPress(.upArrow) {
+            model.moveSelection(by: -1)
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            model.moveSelection(by: 1)
+            return .handled
+        }
+        .onKeyPress(.return) {
+            model.activateSelected()
+            return .handled
+        }
+        .onKeyPress(.space) {
+            QuickLookController.shared.toggle(entry: model.selectedEntry, model: model)
+            return .handled
+        }
+        .onKeyPress(.leftArrow) {
+            model.goBack()
+            return .handled
+        }
+        .onAppear { listFocused = true }
     }
 
     private var listView: some View {
@@ -899,6 +997,20 @@ struct ContentView: View {
 
     private func dragProvider(for entry: ArchiveEntry) -> NSItemProvider {
         let provider = NSItemProvider()
+
+        // 自定义类型：拖到暂存区时不必先解压，直接登记包内路径
+        if !entry.isDirectory, let archive = model.current?.archive {
+            let payload = [archive.path, entry.path, String(entry.size)]
+            let data = Data(payload.joined(separator: "\u{1F}").utf8)
+            provider.registerDataRepresentation(
+                forTypeIdentifier: rrzipEntryType.identifier,
+                visibility: .ownProcess
+            ) { completion in
+                completion(data, nil)
+                return nil
+            }
+        }
+
         provider.registerFileRepresentation(
             forTypeIdentifier: UTType.data.identifier,
             fileOptions: [],
@@ -969,6 +1081,12 @@ struct ContentView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
+                    if model.stash.isEmpty {
+                        Text("把文件拖到这里暂存，最后一起导出")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 2)
+                    }
                     ForEach(model.stash) { item in
                         HStack(spacing: 5) {
                             Image(systemName: "doc")
@@ -1002,6 +1120,23 @@ struct ContentView: View {
             }
         }
         .background(.bar)
+        .onDrop(of: [rrzipEntryType], isTargeted: $stashTargeted) { providers in
+            for provider in providers {
+                _ = provider.loadDataRepresentation(forTypeIdentifier: rrzipEntryType.identifier) { data, _ in
+                    guard let data,
+                          let text = String(data: data, encoding: .utf8) else { return }
+                    let parts = text.components(separatedBy: "\u{1F}")
+                    guard parts.count == 3 else { return }
+                    let archive = URL(fileURLWithPath: parts[0])
+                    let path = parts[1]
+                    let size = Int64(parts[2]) ?? 0
+                    Task { @MainActor in
+                        model.addToStash(archive: archive, path: path, size: size)
+                    }
+                }
+            }
+            return true
+        }
     }
 
     private var statusBar: some View {

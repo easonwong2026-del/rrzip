@@ -20,8 +20,8 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>${APP_NAME}</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.1.0</string>
-    <key>CFBundleVersion</key><string>9</string>
+    <key>CFBundleShortVersionString</key><string>2.2.0</string>
+    <key>CFBundleVersion</key><string>10</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSHighResolutionCapable</key><true/>
@@ -39,6 +39,14 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
             <key>NSMessage</key><string>openWithRrzip</string>
             <key>NSPortName</key><string>rrzip</string>
             <key>NSSendFileTypes</key><array><string>public.item</string></array>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.rrzip.entry</string>
+            <key>UTTypeDescription</key><string>rrzip archive entry</string>
+            <key>UTTypeConformsTo</key><array><string>public.data</string></array>
         </dict>
     </array>
     <key>CFBundleDocumentTypes</key>
@@ -67,7 +75,7 @@ echo "==> 编译"
 xcrun swiftc \
     -O -swift-version 5 -parse-as-library \
     -target arm64-apple-macos${MIN_MACOS} \
-    -framework AppKit -framework SwiftUI -framework PDFKit -framework UniformTypeIdentifiers \
+    -framework AppKit -framework SwiftUI -framework PDFKit -framework AVFoundation -framework QuickLookUI -framework UniformTypeIdentifiers \
     -o "$BUNDLE/Contents/MacOS/${APP_NAME}" \
     Sources/*.swift
 
@@ -96,8 +104,8 @@ cat > "$APEXPATH/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>ArchivePreview</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac.preview</string>
     <key>CFBundlePackageType</key><string>XPC!</string>
-    <key>CFBundleShortVersionString</key><string>2.1.0</string>
-    <key>CFBundleVersion</key><string>9</string>
+    <key>CFBundleShortVersionString</key><string>2.2.0</string>
+    <key>CFBundleVersion</key><string>10</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSExtension</key>
     <dict>
