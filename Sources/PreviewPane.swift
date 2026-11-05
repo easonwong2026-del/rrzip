@@ -11,6 +11,11 @@ struct PreviewPane: View {
     @State private var pdf: PDFDocument?
     @State private var loading = false
 
+    /// 选中项 + 刷新令牌，重复点同一行也会重新加载
+    private var previewKey: String {
+        "\(selectedEntry?.id ?? "none")|\(model.previewToken)"
+    }
+
     private var selectedEntry: ArchiveEntry? {
         guard let id = model.selection.first else { return nil }
         return model.entries.first { $0.id == id }
@@ -23,7 +28,7 @@ struct PreviewPane: View {
             content
         }
         .background(.background)
-        .task(id: selectedEntry?.id) { await load() }
+        .task(id: previewKey) { await load() }
     }
 
     private var header: some View {

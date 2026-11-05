@@ -35,6 +35,24 @@ do {
     expect(false, "zip 列表", "\(error)")
 }
 
+// 2b. 目录折叠：根层只应看到「照片/」一项，而不是全部条目
+print("目录折叠")
+do {
+    let entries = try Tar.list(fixtures.appendingPathComponent("basic.zip"))
+    let root = ArchiveModel.children(of: "", in: entries)
+    expect(root.count == 3, "根层 3 项（说明.txt / 带 空格.txt / 照片/）", "实际 \(root.map(\.path))")
+    expect(root.first?.isDirectory == true, "目录排在前面")
+
+    let inner = ArchiveModel.children(of: "照片/", in: entries)
+    expect(inner.count == 2, "照片/ 下 2 项", "实际 \(inner.map(\.path))")
+    expect(inner.first?.path == "照片/城市/", "子目录合并成一行")
+
+    let deep = ArchiveModel.children(of: "照片/城市/", in: entries)
+    expect(deep.count == 1 && deep[0].path == "照片/城市/001.jpg", "深层只显示文件")
+} catch {
+    expect(false, "目录折叠", "\(error)")
+}
+
 // 3. tar.gz
 print("tar.gz 列表")
 do {

@@ -78,6 +78,59 @@ struct RrzipApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var model: ArchiveModel?
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.servicesProvider = self
+        NSUpdateDynamicServices()
+    }
+
+    // MARK: - 访达右键「服务」
+
+    /// 用 rrzip 打开
+    @objc func openWithRrzip(_ pboard: NSPasteboard, userData: String,
+                             error: AutoreleasingUnsafeMutablePointer<NSString>) {
+        let urls = readURLs(from: pboard)
+        guard let first = urls.first else { return }
+        if let archive = urls.first(where: { ArchiveKind.isArchive(ext: $0.pathExtension.lowercased()) }) {
+            AppDelegate.model?.open(url: archive)
+        } else {
+            AppDelegate.model?.open(url: first)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// 用 rrzip 压缩：在源文件旁边生成同名 zip
+    @objc func compressWithRrzip(_ pboard: NSPasteboard, userData: String,
+                                 error: AutoreleasingUnsafeMutablePointer<NSString>) {
+        let urls = readURLs(from: pboard)
+        guard !urls.isEmpty else { return }
+
+        let base = urls.count == 1
+            ? urls[0].deletingPathExtension().lastPathComponent
+            : "归档"
+        let folder = urls[0].deletingLastPathComponent()
+        var output = folder.appendingPathComponent("\(base).zip")
+        var index = 2
+        while FileManager.default.fileExists(atPath: output.path) {
+            output = folder.appendingPathComponent("\(base) \(index).zip")
+            index += 1
+        }
+
+        do {
+            try Tar.create(at: output, from: urls, format: "zip")
+            NSWorkspace.shared.activateFileViewerSelecting([output])
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "压缩失败"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
+
+    private func readURLs(from pboard: NSPasteboard) -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        return (pboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL]) ?? []
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         guard let url = urls.first(where: { ArchiveKind.isArchive(ext: $0.pathExtension.lowercased()) })
         else { return }
@@ -98,7 +151,7 @@ struct ContentView: View {
             breadcrumb
             Divider()
 
-            if model.entries.isEmpty {
+            if model.current == nil {
                 emptyState
             } else {
                 HSplitView {
@@ -224,7 +277,7 @@ struct ContentView: View {
                         model.popTo(index)
                     } label: {
                         HStack(spacing: 4) {
-                            Image(systemName: index == model.trail.count - 1 ? "shippingbox.fill" : "shippingbox")
+                            Image(systemName: breadcrumbIcon(index))
                                 .font(.system(size: 10))
                             Text(frame.title)
                                 .font(.system(size: 12, weight: index == model.trail.count - 1 ? .semibold : .regular))
@@ -260,16 +313,40 @@ struct ContentView: View {
             .padding(.vertical, 6)
             .background(.quaternary.opacity(0.35))
 
-            List(selection: $model.selection) {
-                ForEach(model.entries) { entry in
+            if model.visibleEntries.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 26, weight: .thin))
+                        .foregroundStyle(.tertiary)
+                    Text("这个目录是空的")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+            List {
+                ForEach(model.visibleEntries) { entry in
                     row(entry)
-                        .tag(entry.id)
                         .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+                        .listRowBackground(
+                            model.selection.contains(entry.id)
+                                ? Color.accentColor.opacity(0.16)
+                                : Color.clear
+                        )
                 }
             }
             .listStyle(.inset)
             .alternatingRowBackgrounds()
+            }
         }
+    }
+
+    private func breadcrumbIcon(_ index: Int) -> String {
+        guard index < model.trail.count else { return "shippingbox" }
+        let frame = model.trail[index]
+        let isLast = index == model.trail.count - 1
+        if frame.prefix.isEmpty { return isLast ? "shippingbox.fill" : "shippingbox" }
+        return isLast ? "folder.fill" : "folder"
     }
 
     private func row(_ entry: ArchiveEntry) -> some View {
@@ -305,9 +382,8 @@ struct ContentView: View {
                 .frame(width: 130, alignment: .trailing)
         }
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            if entry.isArchive { model.enter(entry) }
-        }
+        .onTapGesture(count: 2) { model.activate(entry) }
+        .onTapGesture { model.select(entry) }
         .onDrag { dragProvider(for: entry) }
         .help(entry.path)
     }

@@ -66,11 +66,20 @@ final class ArchiveModel: ObservableObject {
         let archive: URL
         let entries: [ArchiveEntry]
         let engine: ArchiveEngine
-        var title: String { archive.deletingPathExtension().lastPathComponent }
+        /// 当前所在目录在包内的前缀，根目录是空串
+        var prefix: String = ""
+        /// 面包屑显示的名字：根是包名，进入子目录后是目录名
+        var title: String {
+            prefix.isEmpty
+                ? archive.deletingPathExtension().lastPathComponent
+                : (prefix.split(separator: "/").last.map(String.init) ?? prefix)
+        }
     }
 
     @Published private(set) var trail: [Frame] = []
     @Published var selection: Set<ArchiveEntry.ID> = []
+    /// 每次重新点同一行就自增，强制预览刷新
+    @Published private(set) var previewToken: Int = 0
     @Published private(set) var isLoading = false
     @Published var status: String = "拖入一个压缩包，或按 ⌘O 打开"
     @Published var errorMessage: String?
@@ -79,6 +88,63 @@ final class ArchiveModel: ObservableObject {
     var current: Frame? { trail.last }
     var entries: [ArchiveEntry] { current?.entries ?? [] }
     var canGoBack: Bool { trail.count > 1 }
+
+    /// 当前这一层要显示的条目（目录折叠成一行）
+    var visibleEntries: [ArchiveEntry] {
+        guard let frame = current else { return [] }
+        return Self.children(of: frame.prefix, in: frame.entries)
+    }
+
+    /// 把扁平路径折叠成一层目录视图
+    nonisolated static func children(of prefix: String, in entries: [ArchiveEntry]) -> [ArchiveEntry] {
+        var seen = Set<String>()
+        var result: [ArchiveEntry] = []
+        for entry in entries {
+            guard entry.path.hasPrefix(prefix), entry.path != prefix else { continue }
+            let rest = String(entry.path.dropFirst(prefix.count))
+            guard !rest.isEmpty else { continue }
+            if let slash = rest.firstIndex(of: "/") {
+                let name = String(rest[rest.startIndex..<slash])
+                let dirPath = prefix + name + "/"
+                if seen.insert(dirPath).inserted {
+                    result.append(ArchiveEntry(path: dirPath, size: 0, modified: entry.modified, mode: "drwxr-xr-x"))
+                }
+            } else if seen.insert(entry.path).inserted {
+                result.append(entry)
+            }
+        }
+        return result.sorted { lhs, rhs in
+            if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    /// 单击：选中并刷新预览
+    func select(_ entry: ArchiveEntry) {
+        if selection == [entry.id] {
+            previewToken &+= 1      // 重复点同一条也要重新加载
+        } else {
+            selection = [entry.id]
+        }
+    }
+
+    /// 双击：目录进入下一层，嵌套包展开，其余不动
+    func activate(_ entry: ArchiveEntry) {
+        if entry.isDirectory {
+            pushFolder(entry)
+        } else if entry.isArchive {
+            enter(entry)
+        }
+    }
+
+    private func pushFolder(_ entry: ArchiveEntry) {
+        guard let frame = current else { return }
+        var next = frame
+        next = Frame(archive: frame.archive, entries: frame.entries, engine: frame.engine, prefix: entry.path)
+        trail.append(next)
+        selection = []
+        status = "\(Self.children(of: entry.path, in: frame.entries).count) 个项目 · \(entry.name)"
+    }
     var isEncrypted: Bool { current.map { unlocked.contains($0.archive.path) } ?? false }
 
     private var passwords: [String: String] = [:]
@@ -201,7 +267,7 @@ final class ArchiveModel: ObservableObject {
         let frame = Frame(archive: url, entries: entries, engine: engine)
         if resetTrail { trail = [frame] } else { trail.append(frame) }
         selection = []
-        status = "\(entries.count) 个项目 · \(url.lastPathComponent)"
+        status = "\(Self.children(of: "", in: entries).count) 个项目 · \(url.lastPathComponent)"
         isLoading = false
     }
 
