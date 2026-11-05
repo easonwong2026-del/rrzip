@@ -195,6 +195,38 @@ do {
     expect(false, "子项索引", "\(error)")
 }
 
+// 9. 原子写入：失败时不能动到原来的包
+print("原子写入")
+do {
+    let out = fixtures.appendingPathComponent("atomic.zip")
+    try? FileManager.default.removeItem(at: out)
+    try "OLD".write(to: out, atomically: true, encoding: .utf8)
+
+    let src = fixtures.appendingPathComponent("atomic-src.txt")
+    try "NEW".write(to: src, atomically: true, encoding: .utf8)
+
+    try ArchiveModel.writeArchive(at: out, from: [src], format: .zip, password: "", volume: nil)
+    let afterSuccess = try Tar.list(out)
+    expect(afterSuccess.contains { $0.name == "atomic-src.txt" }, "成功后目标被新内容替换")
+
+    // 用一个不存在的输入制造失败：原来的包必须原样还在
+    let before = try Data(contentsOf: out)
+    let missing = fixtures.appendingPathComponent("missing-\(UUID().uuidString).txt")
+    do {
+        try ArchiveModel.writeArchive(at: out, from: [missing], format: .zip, password: "", volume: nil)
+        expect(false, "缺失输入时应当报错")
+    } catch {
+        let after = try Data(contentsOf: out)
+        expect(before == after, "创建失败后原包逐字节未变")
+
+        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: fixtures.path))?
+            .filter { $0.hasPrefix(".atomic-") } ?? []
+        expect(leftovers.isEmpty, "失败后不残留临时文件", "实际 \(leftovers)")
+    }
+} catch {
+    expect(false, "原子写入", "\(error)")
+}
+
 print("")
 print(failures == 0 ? "全部通过（\(checks) 项）" : "失败 \(failures)/\(checks)")
 exit(failures == 0 ? 0 : 1)

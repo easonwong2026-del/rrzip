@@ -77,6 +77,7 @@ struct HoverCard: View {
             .frame(width: 280, alignment: .leading)
         }
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .preferredColorScheme(AppearanceMode.stored.scheme)
         .overlay(
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(.separator.opacity(0.6), lineWidth: 0.5)
@@ -167,6 +168,18 @@ struct HoverCard: View {
 final class HoverPreviewPanel {
     static let shared = HoverPreviewPanel()
     private var panel: NSPanel?
+    private var resignObserver: NSObjectProtocol?
+
+    private init() {
+        // 切到别的 App 时鼠标不再给列表发事件，卡片会留在别人窗口上面
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in HoverPreviewPanel.shared.hide() }
+        }
+    }
 
     func show(entry: ArchiveEntry, model: ArchiveModel, at point: NSPoint) {
         hide()

@@ -19,10 +19,8 @@ struct PreviewPane: View {
         "\(selectedEntry?.id ?? "none")|\(model.previewToken)"
     }
 
-    private var selectedEntry: ArchiveEntry? {
-        guard let id = model.selection.first else { return nil }
-        return model.entries.first { $0.id == id }
-    }
+    /// 用模型里的顺序选中项，别直接取 Set.first（多选时顺序是随机的）
+    private var selectedEntry: ArchiveEntry? { model.selectedEntry }
 
     var body: some View {
         VStack(spacing: 0) {

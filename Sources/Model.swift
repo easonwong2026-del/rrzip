@@ -134,6 +134,11 @@ final class ArchiveModel: ObservableObject {
         let engine: ArchiveEngine
         /// 打开时识别出的格式（后缀或魔数），用于详情面板与引擎选择
         var detection: FormatDetection?
+        /// 是否是从外层包展开出来的临时副本：不能在这里编辑
+        var isNested: Bool = false
+        /// 打开时记下的大小与修改时间，避免每次渲染都读磁盘
+        var archiveSize: Int64?
+        var archiveModified: Date?
         /// 当前所在目录在包内的前缀，根目录是空串
         var prefix: String = ""
         /// 面包屑显示的名字：根是包名，进入子目录后是目录名
@@ -164,6 +169,8 @@ final class ArchiveModel: ObservableObject {
     @Published var isStashVisible = false
 
     var current: Frame? { trail.last }
+    /// 当前层是不是嵌套包里的临时副本
+    var isNested: Bool { current?.isNested ?? false }
     var entries: [ArchiveEntry] { current?.entries ?? [] }
     var canGoBack: Bool { trail.count > 1 }
 
@@ -319,9 +326,7 @@ final class ArchiveModel: ObservableObject {
 
     /// 归档本身的修改时间
     var archiveModifiedText: String {
-        guard let frame = current,
-              let attrs = try? FileManager.default.attributesOfItem(atPath: frame.archive.path),
-              let date = attrs[.modificationDate] as? Date else { return "—" }
+        guard let frame = current, let date = frame.archiveModified else { return "—" }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy 年 M 月 d 日 HH:mm"
         return formatter.string(from: date)
@@ -329,9 +334,7 @@ final class ArchiveModel: ObservableObject {
 
     /// 当前归档的大小，显示在状态栏
     var archiveSizeText: String {
-        guard let frame = current,
-              let attrs = try? FileManager.default.attributesOfItem(atPath: frame.archive.path),
-              let size = attrs[.size] as? Int64 else { return "" }
+        guard let frame = current, let size = frame.archiveSize else { return "" }
         return ByteFormatter.string(size)
     }
 
@@ -563,7 +566,13 @@ final class ArchiveModel: ObservableObject {
         }
 
         if passphrase != nil { unlocked.insert(url.path) }
-        let frame = Frame(archive: url, entries: entries, engine: engine, detection: detection)
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let frame = Frame(
+            archive: url, entries: entries, engine: engine, detection: detection,
+            isNested: !resetTrail,
+            archiveSize: attrs?[.size] as? Int64,
+            archiveModified: attrs?[.modificationDate] as? Date
+        )
         if resetTrail { trail = [frame] } else { trail.append(frame) }
         selection = []
         isLoading = false
@@ -580,6 +589,10 @@ final class ArchiveModel: ObservableObject {
     /// 往当前归档里加文件（落在当前目录下）
     func addFiles() {
         guard let frame = current else { return }
+        guard !frame.isNested else {
+            errorMessage = "嵌套包里的内容来自外层包的临时副本，改动不会保存。\n请先把内层包导出，再单独打开编辑。"
+            return
+        }
         let panel = NSOpenPanel()
         panel.message = "选择要加入 \(frame.archive.lastPathComponent) 的文件"
         panel.prompt = "加入"
@@ -591,6 +604,20 @@ final class ArchiveModel: ObservableObject {
         let items = panel.urls
         let archive = frame.archive
         let prefix = frame.prefix
+
+        // 同名文件会被 7-Zip 直接替换，先问一句
+        let existing = Set(Self.children(of: prefix, in: frame.entries).map(\.name))
+        let conflicts = items.filter { existing.contains($0.lastPathComponent) }
+        if !conflicts.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "有 \(conflicts.count) 个同名文件"
+            alert.informativeText = "继续会覆盖压缩包里的同名文件：\n"
+                + conflicts.prefix(5).map(\.lastPathComponent).joined(separator: "、")
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "覆盖")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
         let password = passwords[archive.path]
 
         isLoading = true
@@ -613,6 +640,10 @@ final class ArchiveModel: ObservableObject {
     /// 删除选中的条目
     func deleteSelection() {
         guard let frame = current else { return }
+        guard !frame.isNested else {
+            errorMessage = "嵌套包里的内容来自外层包的临时副本，改动不会保存。\n请先把内层包导出，再单独打开编辑。"
+            return
+        }
         let targets = (isSearching ? displayEntries : visibleEntries).filter { selection.contains($0.id) }
         guard !targets.isEmpty else { return }
 
@@ -760,8 +791,8 @@ final class ArchiveModel: ObservableObject {
                 // 快照成常量：Swift 6 不允许并发闭包捕获可变变量
                 let filesToArchive = files
                 try await Task.detached(priority: .userInitiated) {
-                    try? FileManager.default.removeItem(at: output)
-                    try SevenZip.create(at: output, from: filesToArchive, format: "zip", password: nil, volume: nil)
+                    try Self.writeArchive(at: output, from: filesToArchive,
+                                          format: .zip, password: "", volume: nil)
                 }.value
                 isLoading = false
                 status = "已打包 \(files.count) 项 · \(output.lastPathComponent)"
@@ -941,7 +972,13 @@ final class ArchiveModel: ObservableObject {
                 return file
             }.value
             if let url {
-                if payloadCache.count > 300 { payloadCache.removeAll() }
+                if payloadCache.count > 300 {
+                    // 只清字典会把解压出来的文件留在磁盘上，一并删掉
+                    for (_, cached) in payloadCache {
+                        try? FileManager.default.removeItem(at: cached.deletingLastPathComponent())
+                    }
+                    payloadCache.removeAll()
+                }
                 payloadCache[key] = url
             }
             completion(url)
@@ -955,6 +992,80 @@ final class ArchiveModel: ObservableObject {
     }
 
     // MARK: - 创建
+
+    /// 原子写入：先在同目录写隐藏临时文件，成功后再替换目标。
+    /// 覆盖同名包时不会先删旧文件，失败也能保留原来的包。
+    nonisolated static func writeArchive(
+        at output: URL,
+        from items: [URL],
+        format: CreateFormat,
+        password: String,
+        volume: String?
+    ) throws {
+        let fm = FileManager.default
+        let folder = output.deletingLastPathComponent()
+        let base = output.deletingPathExtension().lastPathComponent
+        let staged = folder
+            .appendingPathComponent(".\(base)-\(UUID().uuidString.prefix(8))")
+            .appendingPathExtension(output.pathExtension)
+
+        func cleanupStaged() {
+            try? fm.removeItem(at: staged)
+            if let siblings = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
+                for sibling in siblings where sibling.lastPathComponent.hasPrefix(staged.lastPathComponent + ".") {
+                    try? fm.removeItem(at: sibling)
+                }
+            }
+        }
+
+        let needsSevenZip = format.usesSevenZip || !password.isEmpty || volume != nil
+        do {
+            if needsSevenZip {
+                guard SevenZip.isAvailable else { throw ArchiveError.engineUnavailable }
+                try SevenZip.create(
+                    at: staged, from: items,
+                    format: format == .sevenZip ? "7z" : format.ext,
+                    password: password.isEmpty ? nil : password,
+                    volume: volume
+                )
+            } else {
+                try Tar.create(at: staged, from: items, format: format.ext)
+            }
+            try commitStaged(staged, to: output, hasVolumes: volume != nil)
+        } catch {
+            cleanupStaged()
+            throw error
+        }
+    }
+
+    /// 把临时产物换成目标名。有分卷时按前缀整组替换。
+    nonisolated static func commitStaged(_ staged: URL, to output: URL, hasVolumes: Bool) throws {
+        let fm = FileManager.default
+        let folder = output.deletingLastPathComponent()
+        let stagedName = staged.lastPathComponent
+        let outName = output.lastPathComponent
+
+        if hasVolumes {
+            if let siblings = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
+                for sibling in siblings where sibling.lastPathComponent.hasPrefix(outName + ".") {
+                    try? fm.removeItem(at: sibling)
+                }
+            }
+            if let siblings = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
+                for sibling in siblings where sibling.lastPathComponent.hasPrefix(stagedName + ".") {
+                    let suffix = sibling.lastPathComponent.dropFirst(stagedName.count)
+                    try fm.moveItem(at: sibling, to: folder.appendingPathComponent(outName + suffix))
+                }
+            }
+            if fm.fileExists(atPath: staged.path) {
+                try fm.moveItem(at: staged, to: output)
+            }
+        } else if fm.fileExists(atPath: output.path) {
+            _ = try fm.replaceItemAt(output, withItemAt: staged)
+        } else {
+            try fm.moveItem(at: staged, to: output)
+        }
+    }
 
     func createArchive() {
         let picker = NSOpenPanel()
@@ -981,38 +1092,16 @@ final class ArchiveModel: ObservableObject {
         isLoading = true
         status = "正在压缩…"
         let volume = options.volume.argument
-        let needsSevenZip = options.format.usesSevenZip || !options.password.isEmpty || volume != nil
-
-        // 覆盖写：7zz 的 a 命令对已存在的包是「追加」而不是重建，先删干净
-        try? FileManager.default.removeItem(at: output)
-        if volume != nil {
-            let folder = output.deletingLastPathComponent()
-            let prefix = output.lastPathComponent + "."
-            if let siblings = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
-                for sibling in siblings where sibling.lastPathComponent.hasPrefix(prefix) {
-                    try? FileManager.default.removeItem(at: sibling)
-                }
-            }
-        }
 
         Task {
             do {
-                if needsSevenZip {
-                    guard SevenZip.isAvailable else { throw ArchiveError.engineUnavailable }
-                    try await Task.detached {
-                        try SevenZip.create(
-                            at: output,
-                            from: items,
-                            format: options.format == .sevenZip ? "7z" : options.format.ext,
-                            password: options.password.isEmpty ? nil : options.password,
-                            volume: volume
-                        )
-                    }.value
-                } else {
-                    try await Task.detached {
-                        try Tar.create(at: output, from: items, format: options.format.ext)
-                    }.value
-                }
+                try await Task.detached {
+                    // 先写临时文件，成功后才替换同名旧包：失败时原文件不动
+                    try Self.writeArchive(
+                        at: output, from: items, format: options.format,
+                        password: options.password, volume: volume
+                    )
+                }.value
                 status = "已创建 \(output.lastPathComponent)"
                 isLoading = false
                 NSWorkspace.shared.activateFileViewerSelecting([output])

@@ -67,10 +67,17 @@ final class MiniTabs: ObservableObject {
         tabs.first { $0.id == activeID } ?? tabs.first
     }
 
+    /// 每个标签持有一份完整条目列表，开太多会明显吃内存
+    static let maxTabs = 8
+
     func open(_ url: URL) {
         if let existing = tabs.first(where: { $0.model.current?.archive == url }) {
             activeID = existing.id
             return
+        }
+        if tabs.count >= Self.maxTabs {
+            // 关掉最早的一个，给新标签腾位置
+            if let oldest = tabs.first { close(oldest.id) }
         }
         let tab = Tab()
         tabs.append(tab)
@@ -113,6 +120,7 @@ struct MiniView: View {
         }
         .frame(minWidth: 320, minHeight: 320)
         .background(.background)
+        .preferredColorScheme(AppearanceMode.stored.scheme)
         .overlay {
             if isTargeted {
                 RoundedRectangle(cornerRadius: 10)
@@ -121,6 +129,7 @@ struct MiniView: View {
                     .allowsHitTesting(false)
             }
         }
+#if DEBUG
         .task {
             // 调试用：defaults write com.rrzip.mac rrzip.miniArchive /path/to.zip
             if let paths = UserDefaults.standard.string(forKey: "rrzip.miniArchive"),
@@ -131,6 +140,7 @@ struct MiniView: View {
                 }
             }
         }
+#endif
         .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
             guard let provider = providers.first else { return false }
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
@@ -308,7 +318,7 @@ struct MiniBody: View {
                 .contentShape(Rectangle())
                 .onTapGesture { model.select(entry) }
                 .onTapGesture(count: 2) { model.activate(entry) }
-                .onDrag { dragProvider(for: entry) }
+                .onDrag { EntryDrag.provider(for: entry, model: model) }
                 .help(entry.path)
             }
         }
@@ -345,26 +355,5 @@ struct MiniBody: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-    }
-
-    private func dragProvider(for entry: ArchiveEntry) -> NSItemProvider {
-        let provider = NSItemProvider()
-        provider.registerFileRepresentation(
-            forTypeIdentifier: UTType.data.identifier,
-            fileOptions: [],
-            visibility: .all
-        ) { completion in
-            Task { @MainActor in
-                model.payloadURL(for: entry) { url in
-                    if let url {
-                        completion(url, false, nil)
-                    } else {
-                        completion(nil, false, ArchiveError.tool("导出 \(entry.name) 失败"))
-                    }
-                }
-            }
-            return nil
-        }
-        return provider
     }
 }

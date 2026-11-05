@@ -346,15 +346,19 @@ struct ContentView: View {
             return true
         }
         .task {
+#if DEBUG
             // 便于截图/调试：--icons 初始图标视图，--search xxx 预填搜索
             if CommandLine.arguments.contains("--icons") { model.viewMode = .icons }
             if let i = CommandLine.arguments.firstIndex(of: "--search"), i + 1 < CommandLine.arguments.count {
                 model.searchText = CommandLine.arguments[i + 1]
             }
+#endif
             // 调试用：defaults write com.rrzip.mac rrzip.demoMini -bool true
+#if DEBUG
             if UserDefaults.standard.bool(forKey: "rrzip.demoMini") {
                 MiniPanelController.shared.show()
             }
+#endif
             // 支持 `open -a rrzip xxx.zip` 以及命令行直接传路径
             if model.trail.isEmpty {
                 for arg in CommandLine.arguments.dropFirst() where !arg.hasPrefix("-") {
@@ -367,6 +371,7 @@ struct ContentView: View {
                 }
             }
             // 调试用：跳进某个包内目录（也支持 defaults write com.rrzip.mac rrzip.goto）
+#if DEBUG
             let goto = CommandLine.arguments.firstIndex(of: "--goto").flatMap { index in
                 index + 1 < CommandLine.arguments.count ? CommandLine.arguments[index + 1] : nil
             } ?? UserDefaults.standard.string(forKey: "rrzip.goto")
@@ -378,7 +383,9 @@ struct ContentView: View {
                 }
                 model.jump(to: goto)
             }
+#endif
             // 调试用：直接弹系统快速查看面板
+#if DEBUG
             if UserDefaults.standard.bool(forKey: "rrzip.demoQuickLook") {
                 var waited = 0
                 while model.displayEntries.isEmpty && waited < 40 {
@@ -391,7 +398,9 @@ struct ContentView: View {
                     QuickLookController.shared.toggle(entry: first, model: model)
                 }
             }
+#endif
             // 调试用：把前几个文件放进暂存区，便于截图核对
+#if DEBUG
             if UserDefaults.standard.bool(forKey: "rrzip.demoStash") {
                 var waited = 0
                 while model.displayEntries.isEmpty && waited < 40 {
@@ -402,7 +411,9 @@ struct ContentView: View {
                 model.selection = Set(targets.map(\.id))
                 model.addSelectionToStash()
             }
+#endif
             // 调试用：--demo-hover 等条目读完弹一次悬停卡片，便于截图核对
+#if DEBUG
             if CommandLine.arguments.contains("--demo-hover") || UserDefaults.standard.bool(forKey: "rrzip.demoHover") {
                 var waited = 0
                 while model.displayEntries.isEmpty && waited < 40 {
@@ -414,6 +425,7 @@ struct ContentView: View {
                     hover.begin(first, model: model, at: NSPoint(x: 700, y: 620))
                 }
             }
+#endif
         }
         .alert("出错了", isPresented: Binding(
             get: { model.errorMessage != nil },
@@ -435,7 +447,6 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(Palette.brand)
-        .preferredColorScheme(model.appearance.scheme)
 
             Button {
                 model.extractAll()
@@ -531,8 +542,8 @@ struct ContentView: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .disabled(model.current == nil)
-            .help("在压缩包里增删文件，保存后原地写回")
+            .disabled(model.current == nil || model.isNested)
+            .help(model.isNested ? "嵌套包内不支持编辑：请先导出内层包" : "在压缩包里增删文件，保存后原地写回")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
@@ -774,19 +785,29 @@ struct ContentView: View {
     }
 
     private var listView: some View {
-        List {
-            ForEach(model.displayEntries) { entry in
-                row(entry)
-                    .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
-                    .listRowBackground(
-                        model.selection.contains(entry.id)
-                            ? Palette.brand.opacity(0.16)
-                            : Color.clear
-                    )
+        ScrollViewReader { proxy in
+            List {
+                ForEach(model.displayEntries) { entry in
+                    row(entry)
+                        .id(entry.id)
+                        .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+                        .listRowBackground(
+                            model.selection.contains(entry.id)
+                                ? Palette.brand.opacity(0.16)
+                                : Color.clear
+                        )
+                }
+            }
+            .listStyle(.inset)
+            .alternatingRowBackgrounds()
+            .onChange(of: model.selection) { _, selection in
+                // 键盘上下移动时要跟着滚动，否则选中项跑出屏幕就看不见了
+                guard let id = selection.first else { return }
+                withAnimation(.easeOut(duration: 0.12)) {
+                    proxy.scrollTo(id, anchor: .center)
+                }
             }
         }
-        .listStyle(.inset)
-        .alternatingRowBackgrounds()
     }
 
     /// 分栏视图：每列一层目录，点目录在右侧开新列（类似访达的列视图）
@@ -841,7 +862,7 @@ struct ContentView: View {
                         }
                     }
                     .onTapGesture(count: 2) { model.activate(entry) }
-                    .onDrag { dragProvider(for: entry) }
+                    .onDrag { EntryDrag.provider(for: entry, model: model) }
                     .onHover { inside in
                         if inside { hover.begin(entry, model: model) } else { hover.end() }
                     }
@@ -879,7 +900,7 @@ struct ContentView: View {
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2) { model.activate(entry) }
                     .onTapGesture { model.select(entry) }
-                    .onDrag { dragProvider(for: entry) }
+                    .onDrag { EntryDrag.provider(for: entry, model: model) }
                     .onHover { inside in
                         if inside { hover.begin(entry, model: model) } else { hover.end() }
                     }
@@ -978,7 +999,7 @@ struct ContentView: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { model.activate(entry) }
         .onTapGesture { model.select(entry) }
-        .onDrag { dragProvider(for: entry) }
+        .onDrag { EntryDrag.provider(for: entry, model: model) }
         .onHover { inside in
             if inside { hover.begin(entry, model: model) } else { hover.end() }
         }
@@ -1001,50 +1022,17 @@ struct ContentView: View {
             }
             .disabled(entry.isDirectory)
             Button("加入文件…") { model.addFiles() }
+                .disabled(model.isNested)
             Button("从压缩包删除…") {
                 model.selection = [entry.id]
                 model.deleteSelection()
             }
             .foregroundStyle(.red)
+            .disabled(model.isNested)
         }
         .help(entry.path)
     }
 
-    private func dragProvider(for entry: ArchiveEntry) -> NSItemProvider {
-        let provider = NSItemProvider()
-
-        // 自定义类型：拖到暂存区时不必先解压，直接登记包内路径
-        if !entry.isDirectory, let archive = model.current?.archive {
-            let payload = [archive.path, entry.path, String(entry.size)]
-            let data = Data(payload.joined(separator: "\u{1F}").utf8)
-            provider.registerDataRepresentation(
-                forTypeIdentifier: rrzipEntryType.identifier,
-                visibility: .ownProcess
-            ) { completion in
-                completion(data, nil)
-                return nil
-            }
-        }
-
-        provider.registerFileRepresentation(
-            forTypeIdentifier: UTType.data.identifier,
-            fileOptions: [],
-            visibility: .all
-        ) { completion in
-            // 回调来自任意队列，必须切回主线程再碰 model
-            Task { @MainActor in
-                model.payloadURL(for: entry) { url in
-                    if let url {
-                        completion(url, false, nil)
-                    } else {
-                        completion(nil, false, ArchiveError.tool("导出 \(entry.name) 失败"))
-                    }
-                }
-            }
-            return nil
-        }
-        return provider
-    }
 
     private var emptyState: some View {
         VStack(spacing: 14) {
@@ -1181,19 +1169,5 @@ struct ContentView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
-    }
-
-    private func iconName(_ entry: ArchiveEntry) -> String {
-        if entry.isDirectory { return "folder.fill" }
-        if entry.isArchive { return "shippingbox.fill" }
-        switch entry.ext {
-        case "png", "jpg", "jpeg", "heic", "gif", "webp", "tiff": return "photo"
-        case "pdf": return "doc.richtext"
-        case "mp4", "mov", "mkv", "avi": return "film"
-        case "mp3", "flac", "wav", "m4a": return "music.note"
-        case "txt", "md", "json", "swift", "js", "py", "sh", "html", "css": return "doc.text"
-        case "app": return "app"
-        default: return "doc"
-        }
     }
 }

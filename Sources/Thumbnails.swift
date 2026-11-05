@@ -12,8 +12,16 @@ import SwiftUI
 final class ThumbnailStore: ObservableObject {
     static let shared = ThumbnailStore()
 
+    private init() {
+        // 缩略图只是装饰：限制条数与总字节，超了让 NSCache 自己淘汰
+        cache.countLimit = 400
+        cache.totalCostLimit = 64 * 1024 * 1024
+    }
+
     private let cache = NSCache<NSString, CGImageBox>()
     private var inFlight = Set<String>()
+    /// 渲染失败的键：避免滚动回来时反复解压同一个坏文件
+    private var failed = Set<String>()
     /// 缩略图落盘后自增：视图只读缓存，靠这个信号刷新，避免依赖 @State
     @Published private(set) var version = 0
 
@@ -57,7 +65,9 @@ final class ThumbnailStore: ObservableObject {
     func request(for entry: ArchiveEntry, model: ArchiveModel, maxPixel: CGFloat) {
         guard supports(entry) else { return }
         let key = cacheKey(for: entry, model: model, maxPixel: maxPixel)
-        guard cache.object(forKey: key) == nil, !inFlight.contains(key as String) else { return }
+        guard cache.object(forKey: key) == nil,
+              !inFlight.contains(key as String),
+              !failed.contains(key as String) else { return }
         inFlight.insert(key as String)
 
         let ext = entry.ext
@@ -70,7 +80,10 @@ final class ThumbnailStore: ObservableObject {
                 let image = Self.render(url: url, ext: ext, maxPixel: maxPixel)
                 await MainActor.run {
                     self.inFlight.remove(key as String)
-                    guard let image else { return }
+                    guard let image else {
+                        self.failed.insert(key as String)
+                        return
+                    }
                     self.cache.setObject(CGImageBox(image), forKey: key)
                     self.version &+= 1
                 }

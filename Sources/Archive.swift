@@ -84,15 +84,22 @@ enum Tar {
         env["COPYFILE_DISABLE"] = "1"
         process.environment = env
 
-        let out = Pipe(), err = Pipe()
+        // stderr 写临时文件而不是管道：两个管道顺序读会在错误输出超过缓冲区时互等
+        let out = Pipe()
+        let errFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rrzip-stderr-\(UUID().uuidString)")
+        FileManager.default.createFile(atPath: errFile.path, contents: nil)
+        let errHandle = try FileHandle(forWritingTo: errFile)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = out
-        process.standardError = err
+        process.standardError = errHandle
         try process.run()
 
         let outData = out.fileHandleForReading.readDataToEndOfFile()
-        let errData = err.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        try? errHandle.close()
+        let errData = (try? Data(contentsOf: errFile)) ?? Data()
+        try? FileManager.default.removeItem(at: errFile)
 
         let stdout = String(data: outData, encoding: .utf8) ?? ""
         let stderr = String(data: errData, encoding: .utf8) ?? ""
@@ -223,15 +230,21 @@ enum SevenZip {
         env["LANG"] = "en_US.UTF-8"
         process.environment = env
 
-        let out = Pipe(), err = Pipe()
+        let out = Pipe()
+        let errFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rrzip-stderr-\(UUID().uuidString)")
+        FileManager.default.createFile(atPath: errFile.path, contents: nil)
+        let errHandle = try FileHandle(forWritingTo: errFile)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = out
-        process.standardError = err
+        process.standardError = errHandle
         try process.run()
 
         let outData = out.fileHandleForReading.readDataToEndOfFile()
-        let errData = err.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        try? errHandle.close()
+        let errData = (try? Data(contentsOf: errFile)) ?? Data()
+        try? FileManager.default.removeItem(at: errFile)
 
         let stdout = String(data: outData, encoding: .utf8) ?? ""
         if process.terminationStatus != 0 {

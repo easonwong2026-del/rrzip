@@ -5,6 +5,14 @@ import SwiftUI
 
 /// 统一的配色：品牌紫 + 按文件类型区分的色板。
 /// 深色模式下提高底色透明度，保证图标块在暗背景上仍然分得清。
+extension AppearanceMode {
+    /// 弹窗、小窗这些独立窗口读不到主窗口的 preferredColorScheme，只能自己读一次
+    static var stored: AppearanceMode {
+        UserDefaults.standard.string(forKey: "rrzip.appearance")
+            .flatMap(AppearanceMode.init(rawValue:)) ?? .system
+    }
+}
+
 enum Palette {
     /// 品牌色：选中、强调、徽标统一用它
     static let brand = Color(red: 0.45, green: 0.34, blue: 0.94)
