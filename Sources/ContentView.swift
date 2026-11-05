@@ -401,10 +401,8 @@ struct ContentView: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 108), spacing: 14)], spacing: 14) {
                 ForEach(model.displayEntries) { entry in
                     VStack(spacing: 6) {
-                        Image(systemName: iconName(entry))
-                            .font(.system(size: 34, weight: .light))
-                            .foregroundStyle(entry.isArchive ? Color.accentColor : Color.secondary)
-                            .frame(height: 42)
+                        EntryThumbnail(entry: entry, model: model, side: 56, corner: 8)
+                            .frame(height: 56)
                         Text(entry.name)
                             .font(.system(size: 11))
                             .lineLimit(2)
@@ -481,10 +479,8 @@ struct ContentView: View {
 
     private func row(_ entry: ArchiveEntry) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: iconName(entry))
-                .font(.system(size: 13))
-                .foregroundStyle(entry.isArchive ? Color.accentColor : Color.secondary)
-                .frame(width: 18)
+            EntryThumbnail(entry: entry, model: model, side: 20, corner: 4)
+                .frame(width: 20, height: 20)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(entry.name)

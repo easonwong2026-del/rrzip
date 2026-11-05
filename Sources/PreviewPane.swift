@@ -40,7 +40,7 @@ struct PreviewPane: View {
             Spacer()
             if let entry = selectedEntry {
                 Text(entry.isDirectory ? "文件夹" : entry.displaySize)
-                    .font(.system(size: 10.5))
+                    .font(.system(size: 10.5).monospacedDigit())
                     .foregroundStyle(.secondary)
             }
         }
@@ -91,6 +91,9 @@ struct PreviewPane: View {
                         .font(.system(size: 10.5, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(3)
+                    Text("\(entry.isDirectory ? "—" : entry.displaySize) · 修改于 \(entry.modified)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
                     HStack(spacing: 8) {
                         Button("打开") {
                             if let payload { NSWorkspace.shared.open(payload) }
