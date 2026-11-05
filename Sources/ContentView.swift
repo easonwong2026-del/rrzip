@@ -429,6 +429,21 @@ struct ContentView: View {
                 }
             }
 #endif
+#if DEBUG
+            // 调试用：选中指定条目，便于核对右侧预览
+            // defaults write com.rrzip.mac rrzip.select "封面.jpg"
+            if let wanted = UserDefaults.standard.string(forKey: "rrzip.select"), !wanted.isEmpty {
+                var waited = 0
+                while model.displayEntries.isEmpty && waited < 40 {
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    waited += 1
+                }
+                if let match = model.displayEntries.first(where: { $0.name == wanted })
+                    ?? model.displayEntries.first(where: { $0.name.contains(wanted) }) {
+                    model.select(match)
+                }
+            }
+#endif
             // 调试用：把前几个文件放进暂存区，便于截图核对
 #if DEBUG
             if UserDefaults.standard.bool(forKey: "rrzip.demoStash") {

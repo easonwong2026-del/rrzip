@@ -20,8 +20,8 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>${APP_NAME}</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.5.0</string>
-    <key>CFBundleVersion</key><string>13</string>
+    <key>CFBundleShortVersionString</key><string>2.6.0</string>
+    <key>CFBundleVersion</key><string>14</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSHighResolutionCapable</key><true/>
@@ -81,7 +81,7 @@ fi
 xcrun swiftc \
     -O $DEBUG_FLAGS -swift-version 5 -parse-as-library \
     -target arm64-apple-macos${MIN_MACOS} \
-    -framework AppKit -framework SwiftUI -framework PDFKit -framework AVFoundation -framework QuickLookUI -framework UniformTypeIdentifiers \
+    -framework AppKit -framework SwiftUI -framework PDFKit -framework AVFoundation -framework AVKit -framework QuickLookUI -framework UniformTypeIdentifiers \
     -o "$BUNDLE/Contents/MacOS/${APP_NAME}" \
     Sources/*.swift
 
@@ -110,8 +110,8 @@ cat > "$APEXPATH/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>ArchivePreview</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac.preview</string>
     <key>CFBundlePackageType</key><string>XPC!</string>
-    <key>CFBundleShortVersionString</key><string>2.5.0</string>
-    <key>CFBundleVersion</key><string>13</string>
+    <key>CFBundleShortVersionString</key><string>2.6.0</string>
+    <key>CFBundleVersion</key><string>14</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSExtension</key>
     <dict>
