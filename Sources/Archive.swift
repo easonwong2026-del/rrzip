@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 rrzip contributors
+//
 import Foundation
 
 /// 一层归档的条目
@@ -18,12 +21,15 @@ struct ArchiveEntry: Identifiable, Hashable {
 }
 
 enum ArchiveKind {
-    static let readable: Set<String> = [
-        "zip", "zipx", "7z", "rar", "tar", "tgz", "tbz", "tbz2", "txz",
-        "gz", "bz2", "xz", "lzma", "lz", "zst", "cab", "cpio", "xar",
-        "iso", "lha", "lzh", "arj", "rpm", "deb", "pkg"
-    ]
+    /// 可识别的后缀全部来自格式目录（含 jar / apk / cbz 这类别名）
+    static let readable: Set<String> = {
+        var set = Set(FormatCatalog.formats.flatMap(\.extensions))
+        set.formUnion(FormatCatalog.compounds.flatMap(\.extensions))
+        return set
+    }()
+
     static let writable: Set<String> = ["zip", "7z", "tar", "tgz"]
+
     static func isArchive(ext: String) -> Bool { readable.contains(ext) }
 }
 
@@ -206,11 +212,12 @@ enum SevenZip {
     static var isAvailable: Bool { binary != nil }
 
     @discardableResult
-    static func run(_ args: [String]) throws -> String {
+    static func run(_ args: [String], cwd: URL? = nil) throws -> String {
         guard let binary else { throw ArchiveError.engineUnavailable }
         let process = Process()
         process.executableURL = binary
         process.arguments = args
+        if let cwd { process.currentDirectoryURL = cwd }
 
         var env = ProcessInfo.processInfo.environment
         env["LANG"] = "en_US.UTF-8"
@@ -309,6 +316,47 @@ enum SevenZip {
         if let volume, !volume.isEmpty { args.append("-v\(volume)") }
         args.append(output.path)
         args.append(contentsOf: items.map(\.path))
+        try run(args)
+    }
+
+    // MARK: - 原地编辑
+
+    /// 把文件加入归档。`prefix` 非空时放进对应子目录。
+    /// 7-Zip 只保留文件基名，所以要落进子目录得先铺一层符号链接再以相对路径写入，
+    /// 这样既不改目标内容，也不用复制大文件。
+    static func add(_ archive: URL, items: [URL], prefix: String = "", password: String? = nil) throws {
+        guard !items.isEmpty else { return }
+        var base = ["a", "-y"]
+        if let password, !password.isEmpty { base.append("-p\(password)") }
+
+        if prefix.isEmpty {
+            try run(base + [archive.path] + items.map(\.path))
+            return
+        }
+
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rrzip-add-\(UUID().uuidString)", isDirectory: true)
+        let folder = staging.appendingPathComponent(prefix, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: staging) }
+
+        var relatives: [String] = []
+        for item in items {
+            let target = folder.appendingPathComponent(item.lastPathComponent)
+            try? FileManager.default.removeItem(at: target)
+            try FileManager.default.createSymbolicLink(at: target, withDestinationURL: item)
+            relatives.append(prefix + item.lastPathComponent)
+        }
+        try run(base + [archive.path] + relatives, cwd: staging)
+    }
+
+    /// 从归档里删除条目（路径是包内路径，目录要带结尾斜杠）
+    static func remove(_ archive: URL, entries: [String], password: String? = nil) throws {
+        guard !entries.isEmpty else { return }
+        var args = ["d", "-y"]
+        if let password, !password.isEmpty { args.append("-p\(password)") }
+        args.append(archive.path)
+        args.append(contentsOf: entries)
         try run(args)
     }
 }

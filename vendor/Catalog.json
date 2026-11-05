@@ -1,0 +1,630 @@
+{
+  "formats": [
+    {
+      "id": "7zip",
+      "name": "7-Zip Archive",
+      "kind": "archive",
+      "uti": ["org.7-zip.7-zip-archive"],
+      "extensions": ["7z"],
+      "mime": ["application/x-7z-compressed"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "37 7A BC AF 27 1C", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles", "edit", "splitVolumes"], "default": true },
+        { "id": "swc", "capabilities": ["listContents", "extractFiles"] }
+      ]
+    },
+    {
+      "id": "ar",
+      "name": "Archiver Archive",
+      "kind": "archive",
+      "uti": ["public.ar-archive"],
+      "extensions": ["ar", "deb"],
+      "mime": ["application/x-archive"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "21 3C 61 72 63 68 3E 0A", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "arj",
+      "name": "ARJ Archive",
+      "kind": "archive",
+      "uti": [],
+      "extensions": ["arj"],
+      "mime": ["application/x-arj"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "60 EA", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "bzip2",
+      "name": "Bzip2 File",
+      "kind": "compression",
+      "uti": ["public.bzip2-archive"],
+      "extensions": ["bz2","bz","bzip2"],
+      "mime": ["application/x-bzip2"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "42 5A 68", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true },
+        { "id": "swc", "capabilities": ["listContents", "extractFiles"] }
+      ]
+    },
+    {
+      "id": "cab",
+      "name": "CAB Archive",
+      "kind": "archive",
+      "uti": ["com.microsoft.cab", "com.microsoft.cab-archive"],
+      "extensions": ["cab"],
+      "mime": ["application/vnd.ms-cab-compressed"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "4D 53 43 46", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "cpio",
+      "name": "CPIO Archive",
+      "kind": "archive",
+      "uti": ["public.cpio-archive"],
+      "extensions": ["cpio"],
+      "mime": ["application/x-cpio"],
+      "rules": [
+        { "policy": "any", "tests": [
+          {"type": "signature", "bytes": "30 37 30 37 30 31", "offset": 0},
+          {"type": "signature", "bytes": "30 37 30 37 30 32", "offset": 0},
+          {"type": "signature", "bytes": "30 37 30 37 30 37", "offset": 0}
+          ] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "dmg",
+      "name": "Apple Disk Image",
+      "kind": "image",
+      "uti": ["com.apple.disk-image", "com.apple.disk-image-smi"],
+      "extensions": ["dmg", "smi", "img"],
+      "mime": ["application/x-apple-diskimage"],
+      "rules": [
+          { "policy": "any", "tests": [{"type": "end_signature", "bytes": "6B 6F 6C 79", "offset":  512}] }
+      ],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "fat",
+      "name": "FAT Disk Image",
+      "kind": "image",
+      "uti": ["public.disk-image"],
+      "extensions": ["fat"],
+      "mime": [],
+      "rules": [],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "gzip",
+      "name": "Gzip File",
+      "kind": "compression",
+      "uti": ["public.gz-archive","org.gnu.gnu-zip-archive"],
+      "extensions": ["gz","gzip"],
+      "mime": ["application/gzip", "application/x-gzip"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "1F 8B", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true },
+        { "id": "swc", "capabilities": ["listContents", "extractFiles"] }
+      ]
+    },
+    {
+      "id": "chm",
+      "name": "Microsoft Compiled HTML Help",
+      "kind": "archive",
+      "uti": ["com.microsoft.chm", "com.microsoft.chm-archive"],
+      "extensions": ["chm"],
+      "mime": ["application/vnd.ms-htmlhelp"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "49 54 53 46", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "iso",
+      "name": "ISO Disk Image",
+      "kind": "image",
+      "uti": ["public.iso-image"],
+      "extensions": ["iso"],
+      "mime": ["application/x-iso9660-image"],
+      "rules": [
+        { "policy": "all", "tests": [
+          {"type": "signature", "bytes": "43 44 30 30 31", "offset": 32769},
+          {"type": "signature", "bytes": "43 44 30 30 31", "offset": 34817},
+          {"type": "signature", "bytes": "43 44 30 30 31", "offset": 36865}
+          ] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "lha",
+      "name": "LHA/LZH Archive",
+      "kind": "archive",
+      "uti": ["org.7-zip.lha-archive"],
+      "extensions": ["lha","lzh"],
+      "mime": ["application/octet-stream"],
+      "rules": [
+        { "policy": "any", "tests": [
+          {"type": "signature", "bytes": "2D 6C 68 30 2D", "offset": 2},
+          {"type": "signature", "bytes": "2D 6C 68 35 2D", "offset": 2},
+          {"type": "signature", "bytes": "2D 6C 68 64 2D", "offset": 2}
+          ] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "lz4",
+      "name": "LZ4 File",
+      "kind": "compression",
+      "uti": ["public.lz4-archive"],
+      "extensions": ["lz4"],
+      "mime": [],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "04 22 4D 18", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "swc", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "lzma",
+      "name": "LZMA File",
+      "kind": "compression",
+      "uti": ["org.tukaani.lzma-archive"],
+      "extensions": ["lzma"],
+      "mime": ["application/x-lzma"],
+      "rules": [],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "lzx",
+      "name": "LZX Archive",
+      "kind": "archive",
+      "uti": ["com.microsoft.lzx-archive", "cx.c3.lzx-archive"],
+      "extensions": ["lzx"],
+      "mime": [],
+      "rules": [],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true },
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] }
+      ]
+    },
+    {
+      "id": "msapp",
+      "name": "Microsoft Windows application",
+      "kind": "archive",
+      "uti": ["com.microsoft.windows-executable"],
+      "extensions": ["exe"],
+      "mime": ["application/x-msdownload"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "4D 5A", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "msi",
+      "name": "Microsoft MSI Installer",
+      "kind": "archive",
+      "uti": ["com.microsoft.windows-installer-package"],
+      "extensions": ["msi"],
+      "mime": ["application/x-ole-storage"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "D0 CF 11 E0 A1 B1 1A E1", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "ntfs",
+      "name": "NTFS Disk Image",
+      "kind": "image",
+      "uti": ["public.disk-image"],
+      "extensions": ["ntfs"],
+      "mime": [],
+      "rules": [],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "pkg",
+      "name": "Apple Software Package",
+      "kind": "archive",
+      "uti": ["com.apple.installer-package-archive"],
+      "extensions": ["pkg"],
+      "mime": ["application/octet-stream"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "78 61 72 21", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "qcow2",
+      "name": "QCOW2 Disk Image",
+      "kind": "image",
+      "uti": ["public.disk-image"],
+      "extensions": ["qcow2"],
+      "mime": ["application/x-qemu-disk"],
+      "rules": [
+          { "policy": "any", "tests": [
+            {"type": "signature", "bytes": "51 46 49 FB", "offset": 0}
+            ] }
+      ],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "rar",
+      "name": "RAR Archive",
+      "kind": "archive",
+      "uti": ["com.rarlab.rar-archive"],
+      "extensions": ["rar", "cbr"],
+      "mime": ["application/x-rar-compressed", "application/vnd.rar", "application/vnd.comicbook-rar"],
+      "rules": [
+        { "policy": "any", "tests": [
+          {"type": "signature", "bytes": "52 61 72 21 1A 07 00", "offset": 0},
+          {"type": "signature", "bytes": "52 61 72 21 1A 07 01 00", "offset": 0}
+          ] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "rpm",
+      "name": "Linux RPM archive",
+      "kind": "archive",
+      "uti": ["public.rpm-archive", "com.redhat.rpm-archive"],
+      "extensions": ["rpm"],
+      "mime": ["application/x-rpm"],
+      "rules": [
+        { "policy": "any", "tests": [
+          {"type": "signature", "bytes": "ED AB EE DB", "offset": 0}
+          ] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "sea",
+      "name": "Self-Extracting Archive",
+      "kind": "archive",
+      "uti": ["com.apple.self-extracting-archive"],
+      "extensions": ["sea"],
+      "mime": ["application/x-sea", "application/sea"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "53 74 75 66 66 49 74 20", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "sit",
+      "name": "StuffIt Archive",
+      "kind": "archive",
+      "uti": ["com.stuffit.archive.sit"],
+      "extensions": ["sit"],
+      "mime": ["application/x-stuffit"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "53 74 75 66 66 49 74 20", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "sitx",
+      "name": "StuffIt X Archive",
+      "kind": "archive",
+      "uti": ["com.stuffit.archive.sitx"],
+      "extensions": ["sitx"],
+      "mime": ["application/x-stuffitx"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "53 74 75 66 66 49 74 21", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "squashfs",
+      "name": "SquashFS Disk Image",
+      "kind": "image",
+      "uti": ["com.plougher.squashfs-archive"],
+      "extensions": ["squashfs"],
+      "mime": ["application/octet-stream"],
+      "rules": [],
+      "engines": [
+          { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "tar",
+      "name": "Tar Archive",
+      "kind": "archive",
+      "uti": ["public.tar-archive"],
+      "extensions": ["tar"],
+      "mime": ["application/x-tar"],
+      "rules": [
+        { "policy": "any", "tests": [
+          {"type": "signature", "bytes": "75 73 74 61 72 00 30 30", "offset": 257},
+          {"type": "signature", "bytes": "75 73 74 61 72 20 20 00", "offset": 257}
+          ] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true },
+        { "id": "swc", "capabilities": ["listContents", "extractFiles"] }
+      ]
+    },
+    {
+      "id": "vdi",
+      "name": "VDI Disk Image",
+      "kind": "image",
+      "uti": ["public.disk-image"],
+      "extensions": ["vdi"],
+      "mime": [" application/x-vdi-disk", "application/x-virtualbox-vdi"],
+      "rules": [
+          { "policy": "any", "tests": [{"type": "signature", "bytes": "7F 10 DA BE", "offset": 64}] }
+      ],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "vmdk",
+      "name": "VMDK Disk Image",
+      "kind": "image",
+      "uti": ["public.disk-image"],
+      "extensions": ["vmdk"],
+      "mime": ["application/x-virtualbox-vmdk", "application/x-vmdk", "application/x-vmdk-disk"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "4B 44 4D", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "vhd",
+      "name": "VHD Disk Image",
+      "kind": "image",
+      "uti": ["public.disk-image"],
+      "extensions": ["vhd"],
+      "mime": ["application/x-vhd", "application/x-vhd-disk", "application/x-virtualbox-vhd"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "63 6F 6E 65 63 74 69 78", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "vhdx",
+      "name": "VHDX Disk Image",
+      "kind": "image",
+      "uti": ["public.disk-image"],
+      "extensions": ["vhdx"],
+      "mime": ["application/vhdx", "application/x-vhdx-disk", "application/x-virtualbox-vhdx"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "76 68 64 78 66 69 6C 65", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "wim",
+      "name": "WIM Disk Image",
+      "kind": "image",
+      "uti": ["com.microsoft.wim-archive"],
+      "extensions": ["wim"],
+      "mime": ["application/x-ms-wim"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "4D 53 57 49 4D 00 00 00", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "xar",
+      "name": "XAR Archive",
+      "kind": "archive",
+      "uti": ["com.apple.xar-archive"],
+      "extensions": ["xar"],
+      "mime": ["application/x-xar"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "78 61 72 21", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "xz",
+      "name": "XZ File",
+      "kind": "compression",
+      "uti": ["public.xz-archive","org.tukaani.xz-archive"],
+      "extensions": ["xz"],
+      "mime": ["application/x-xz"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "FD 37 7A 58 5A 00", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true },
+        { "id": "swc", "capabilities": ["listContents", "extractFiles"] }
+      ]
+    },
+    {
+      "id": "z",
+      "name": "Unix Compress File",
+      "kind": "compression",
+      "uti": ["public.z-archive"],
+      "extensions": ["z"],
+      "mime": ["application/x-compress", "application/x-compressed"],
+      "rules": [
+        { "policy": "any", "tests": [{"type": "signature", "bytes": "1F 9D", "offset": 0}] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    },
+    {
+      "id": "zip",
+      "name": "ZIP Archive",
+      "kind": "archive",
+      "uti": ["public.zip-archive", "com.pkware.zip-archive", "com.sun.java-archive", "com.android.package-archive"],
+      "extensions": ["zip", "jar", "aar", "apk", "cbz"],
+      "mime": ["application/zip", "application/x-zip-compressed", "application/zip-compressed", "multipart/x-zip", "application/java-archive", "application/vnd.android.package-archive", "application/vnd.comicbook+zip"],
+      "rules": [
+        { "policy": "any", "tests": [
+          {"type": "signature", "bytes": "50 4B 03 04", "offset": 0},
+          {"type": "signature", "bytes": "50 4B 03 06", "offset": 0},
+          {"type": "signature", "bytes": "50 4B 03 08", "offset": 0}
+          ] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"] },
+        { "id": "7zip", "capabilities": ["listContents", "extractFiles", "edit", "splitVolumes"], "default": true },
+        { "id": "swc", "capabilities": ["listContents", "extractFiles"] }
+      ]
+    },
+    {
+      "id": "zipx",
+      "name": "ZIPX Archive",
+      "kind": "archive",
+      "uti": ["com.winzip.zipx-archive"],
+      "extensions": ["zipx"],
+      "mime": ["application/zip", "application/x-zip-compressed", "application/zip-compressed", "multipart/x-zip"],
+      "rules": [
+        { "policy": "any", "tests": [
+          {"type": "signature", "bytes": "50 4B 03 04", "offset": 0},
+          {"type": "signature", "bytes": "50 4B 03 06", "offset": 0},
+          {"type": "signature", "bytes": "50 4B 03 08", "offset": 0}
+          ] }
+      ],
+      "engines": [
+        { "id": "xad", "capabilities": ["listContents", "extractFiles"], "default": true }
+      ]
+    }
+  ],
+  "compounds": [
+    {
+      "id": "tar.bz2",
+      "name": "Bzip2 Tar Archive",
+      "uti": ["org.bzip.bzip2-tar-archive"],
+      "extensions": ["tbz2","tbz","tbzip2","tb","tb2","tar.bz2"],
+      "components": ["tar","bzip2"]
+    },
+    {
+      "id": "tar.gz",
+      "name": "Gzip Tar Archive",
+      "uti": ["org.gnu.gnu-zip-tar-archive"],
+      "extensions": ["tgz","tgzip","tar.gz"],
+      "components": ["tar","gzip"]
+    },
+    {
+      "id": "tar.lz4",
+      "name": "LZ4 Tar Archive",
+      "uti": ["public.lz4-tar-archive"],
+      "extensions": ["tlz4","tar.lz4"],
+      "components": ["tar","lz4"]
+    },
+    {
+      "id": "tar.lzma",
+      "name": "LZMA Tar Archive",
+      "uti": ["org.tukaani.tar-lzma-archive"],
+      "extensions": ["tlzma", "tar.lzma"],
+      "components": ["tar","lzma"]
+    },
+    {
+      "id": "tar.xz",
+      "name": "XZ Tar Archive",
+      "uti": ["org.tukaani.tar-xz-archive"],
+      "extensions": ["txz","tar.xz"],
+      "components": ["tar","xz"]
+    },
+    {
+      "id": "tar.z",
+      "name": "Z Tar Archive",
+      "uti": ["public.z-archive"],
+      "extensions": ["taz","tar.z"],
+      "components": ["tar","z"]
+    }
+  ],
+  "splits": [
+    { "id": "zip-spanned", "name": "Spanned ZIP", "format": "zip", "scheme": "spanned",
+      "pattern": "\\.z[0-9]{2,}$",
+      "endRecord": { "bytes": "50 4B 05 06", "length": 22 },
+      "markers": [
+        { "field": { "offset": 4, "length": 2, "match": "nonzeroBelowMax" } },
+        { "with": { "offset": -20, "bytes": "50 4B 06 07" },
+          "field": { "offset": -4, "length": 4, "match": "aboveOne" } }
+      ],
+      "firstVolume": { "pattern": "\\.(z[0-9]{2,}|zip)$", "replacement": ".z01" },
+      "label": ".zip" },
+
+    { "id": "zip-numeric", "name": "Split ZIP", "format": "zip", "scheme": "numeric",
+      "pattern": "\\.zip\\.[0-9]{3,}$",
+      "firstVolume": { "pattern": "\\.[0-9]{3,}$", "replacement": ".001" },
+      "label": ".zip.001" },
+
+    { "id": "7z-numeric", "name": "Split 7z", "format": "7zip", "scheme": "numeric",
+      "pattern": "\\.7z\\.[0-9]{3,}$",
+      "firstVolume": { "pattern": "\\.[0-9]{3,}$", "replacement": ".001" },
+      "label": ".7z.001" }
+  ]
+}

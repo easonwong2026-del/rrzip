@@ -4,7 +4,8 @@
 
 macOS 原生压缩包工作台。SwiftUI + 系统 libarchive（`/usr/bin/tar`）+ 内置 7-Zip 26.05。
 
-代码、界面、文案全部独立编写，未使用任何第三方商业软件的代码或素材。
+界面、交互与实现独立编写；格式目录数据取自开源项目 MacPacker（GPL-3.0），
+因此本仓库整体以 GPL-3.0 分发，详见 [NOTICE](NOTICE)。
 
 ## 功能
 
@@ -29,22 +30,40 @@ macOS 原生压缩包工作台。SwiftUI + 系统 libarchive（`/usr/bin/tar`）
 | **图片缩略图** | 图片条目直接出缩略图（≤12 MB，按需解压 + 缓存） |
 | **快捷操作条** | 选中后浮出「解压到… / 导出…」 |
 | **访达右键** | 选中文件后「服务 → 用 rrzip 压缩 / 用 rrzip 打开」 |
-| 命令行 | `rrzip --list <包> [--pass 密码]` |
+| **格式识别** | 先看后缀，后缀不认识就读内容（magic number），改名/无后缀的文件也能打开 |
+| **原地编辑** | 往压缩包里加文件、删条目，保存后直接写回原包（`编辑` 菜单 / 右键） |
+| **磁盘映像** | DMG、ISO、VHD/VHDX、VDI、VMDK、QCOW2、WIM 等交给内置 7-Zip 打开 |
+| 命令行 | `rrzip --list <包>` · `--detect <文件>` · `--add` · `--remove` |
 
 ## 双引擎策略
 
 | 场景 | 引擎 |
 |---|---|
 | 常规 zip / tar / gz / rar / iso 等读取 | 系统 `bsdtar`（libarchive 3.7.4） |
-| 创建 7z、加密、分卷 | 内置 `7zz`（7-Zip 26.05 arm64） |
+| 磁盘映像（dmg / vhd / vhdx / vdi / vmdk / qcow2 / wim / chm / msi） | 内置 `7zz` |
+| 创建 7z、加密、分卷 | 内置 `7zz` |
+| 原地增删 | 内置 `7zz` |
 | 加密头 7z（libarchive 不支持） | 内置 `7zz` |
+
+打开文件时先识别格式，再按格式挑起始引擎，失败会自动换另一个。
 
 `7zz` 位于 `Contents/Resources/7zz`，随应用分发，用户无需另装。
 
 ## 支持格式
 
-读取：zip · zipx · 7z（含加密头）· rar（只读）· tar · tgz · tbz2 · txz · gz · bz2 · xz · lzma · lz · zst · cab · cpio · xar · iso · lzh · arj · rpm · deb
-写入：zip · 7z · tar · tgz
+识别 37 种、本机引擎可打开 32 种：
+
+| 类别 | 格式 |
+|---|---|
+| 压缩包 | zip · zipx · 7z · rar · tar · jar · apk · cbz · cbr · cab · cpio · xar · pkg · ar · arj · lha/lzh · rpm · deb · sit · sitx |
+| 单层压缩 | gz · bz2 · xz · lzma · lz4 · z · zst |
+| 磁盘映像 | dmg · iso · vhd · vhdx · vdi · vmdk · qcow2 · wim · squashfs · ntfs · fat |
+| 其它容器 | msi · chm · exe（自解压） |
+| 复合后缀 | tar.gz · tar.bz2 · tar.xz · tar.zst 等 6 种 |
+| 分卷 | zip 分卷（.z01/.zip.001）· 7z 分卷 |
+
+sit / sitx / lz4 / lzx 只能识别、不能打开（本机引擎不支持，会给出明确提示）。
+写入：zip · 7z · tar · tgz；原地编辑：zip 与 7z。
 
 ## 构建
 
@@ -74,19 +93,22 @@ open build/rrzip.app
 ```
 rrzip/
 ├── Sources/
-│   ├── Archive.swift          # 条目模型 + bsdtar / 7zz 双引擎封装
+│   ├── Archive.swift          # 条目模型 + bsdtar / 7zz 双引擎封装（含增删）
+│   ├── FormatCatalog.swift    # 格式目录（数据来自 MacPacker，生成文件）
+│   ├── FormatDetector.swift   # 后缀 + 魔数识别
 │   ├── Model.swift            # 状态机：打开、密码、嵌套栈、解压、创建
 │   ├── ContentView.swift      # 主界面
 │   └── PreviewPane.swift      # 右侧预览
 ├── QuickLook/
 │   └── PreviewProvider.swift  # 快速查看扩展（QLPreviewingController）
 ├── Tests/
-│   └── main.swift             # 11 项断言（解析 / 转义 / 加密回退）
+│   └── main.swift             # 29 项断言（解析 / 转义 / 加密 / 识别 / 编辑）
 ├── Assets/
 │   ├── AppIcon.icns
 │   └── 7zz                    # 不入库，构建时下载
 ├── scripts/
 │   ├── fetch-7zz.sh
+│   ├── gen-catalog.py
 │   └── test.sh
 ├── build.sh
 └── build/rrzip.app
@@ -107,15 +129,20 @@ rrzip/
 ./scripts/test.sh
 ```
 
-自动生成带中文名、含空格、嵌套目录、加密 7z 的样例包，断言 11 项：八进制转义还原、zip/tgz 列表、目录识别、文件大小、加密包识别与 7-Zip 回退。
+自动生成带中文名、含空格、嵌套目录、加密 7z 的样例包，断言 29 项：八进制转义还原、zip/tgz 列表、目录折叠、加密包识别与 7-Zip 回退、后缀与魔数识别、原地增删。
 
 ## 许可
 
-本仓库代码 MIT。内置的 7-Zip 引擎为 LGPL + unRAR 限制，不随仓库分发，构建时按需下载。
+GNU GPL-3.0（见 [LICENSE](LICENSE)）。因为使用了 MacPacker 的格式目录数据，整个仓库同样以 GPL-3.0 分发。
+
+- 格式目录来源与改动说明：[NOTICE](NOTICE)
+- 内置 7-Zip 引擎为 LGPL-2.1+（含 unRAR 限制），不随仓库分发，构建时按需下载
 
 ## 已知限制
 
 - rar 只读；加密 rar 暂不支持
+- 原地编辑只支持 zip 与 7z（7-Zip 的能力边界），tar / gz 系列不支持
+- sit / sitx / lz4 / lzx 能识别但打不开
 - 创建 TAR / TGZ 时不支持密码与分卷（格式本身不支持）
 - 预览大文件一次性读入内存，几百 MB 以上会慢
 - 快速查看扩展只列条目，不预览条目内容

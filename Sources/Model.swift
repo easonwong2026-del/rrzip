@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 rrzip contributors
+//
 import AppKit
 import Combine
 import Foundation
@@ -82,6 +85,8 @@ final class ArchiveModel: ObservableObject {
         let archive: URL
         let entries: [ArchiveEntry]
         let engine: ArchiveEngine
+        /// 打开时识别出的格式（后缀或魔数），用于详情面板与引擎选择
+        var detection: FormatDetection?
         /// 当前所在目录在包内的前缀，根目录是空串
         var prefix: String = ""
         /// 面包屑显示的名字：根是包名，进入子目录后是目录名
@@ -161,16 +166,15 @@ final class ArchiveModel: ObservableObject {
     /// 归档格式的展示名
     var archiveFormatName: String {
         guard let frame = current else { return "" }
-        switch frame.archive.pathExtension.lowercased() {
-        case "zip", "zipx": return "ZIP 压缩包"
-        case "7z": return "7Z 压缩包"
-        case "rar": return "RAR 压缩包"
-        case "tar": return "TAR 归档"
-        case "tgz", "gz": return "GZIP 压缩包"
-        case "tbz", "tbz2", "bz2": return "BZIP2 压缩包"
-        case "txz", "xz": return "XZ 压缩包"
-        default: return frame.archive.pathExtension.uppercased() + " 归档"
-        }
+        if let detection = frame.detection { return detection.displayName }
+        let ext = frame.archive.pathExtension.uppercased()
+        return ext.isEmpty ? "未知格式" : ext + " 归档"
+    }
+
+    /// 识别方式，显示在详情面板（内容识别 = 后缀不可靠）
+    var detectionSourceText: String {
+        guard let detection = current?.detection else { return "" }
+        return detection.source == .magic ? "按内容识别" : "按后缀识别"
     }
 
     /// 全包条目数
@@ -244,7 +248,7 @@ final class ArchiveModel: ObservableObject {
         for part in path.split(separator: "/").map(String.init) {
             accumulated += part + "/"
             stack.append(Frame(archive: root.archive, entries: root.entries,
-                               engine: root.engine, prefix: accumulated))
+                               engine: root.engine, detection: root.detection, prefix: accumulated))
         }
         trail = stack
         selection = []
@@ -253,7 +257,8 @@ final class ArchiveModel: ObservableObject {
     private func pushFolder(_ entry: ArchiveEntry) {
         guard let frame = current else { return }
         var next = frame
-        next = Frame(archive: frame.archive, entries: frame.entries, engine: frame.engine, prefix: entry.path)
+        next = Frame(archive: frame.archive, entries: frame.entries, engine: frame.engine,
+                     detection: frame.detection, prefix: entry.path)
         trail.append(next)
         selection = []
         status = "\(Self.children(of: entry.path, in: frame.entries).count) 个项目 · \(entry.name)"
@@ -314,15 +319,17 @@ final class ArchiveModel: ObservableObject {
         if panel.runModal() == .OK, let url = panel.url { open(url: url) }
     }
 
-    private func loadFrame(url: URL, resetTrail: Bool) {
+    private func loadFrame(url: URL, resetTrail: Bool, restorePrefix: String? = nil) {
         isLoading = true
         status = "正在读取 \(url.lastPathComponent)…"
-        Task { await performLoad(url: url, resetTrail: resetTrail) }
+        Task { await performLoad(url: url, resetTrail: resetTrail, restorePrefix: restorePrefix) }
     }
 
-    private func performLoad(url: URL, resetTrail: Bool) async {
+    private func performLoad(url: URL, resetTrail: Bool, restorePrefix: String? = nil) async {
         var passphrase = passwords[url.path]
-        var engine: ArchiveEngine = .libarchive
+        let detection = FormatDetector.detect(url)
+        // 磁盘映像类（dmg/vhd/qcow2…）libarchive 读不了，直接交给 7-Zip
+        var engine: ArchiveEngine = FormatDetector.prefersSevenZip(url) ? .sevenZip : .libarchive
         var entries: [ArchiveEntry]?
         var askedPassword = false
         var switchedEngine = false
@@ -388,11 +395,87 @@ final class ArchiveModel: ObservableObject {
         }
 
         if passphrase != nil { unlocked.insert(url.path) }
-        let frame = Frame(archive: url, entries: entries, engine: engine)
+        let frame = Frame(archive: url, entries: entries, engine: engine, detection: detection)
         if resetTrail { trail = [frame] } else { trail.append(frame) }
         selection = []
-        status = "\(Self.children(of: "", in: entries).count) 个项目 · \(url.lastPathComponent)"
         isLoading = false
+        if let prefix = restorePrefix, !prefix.isEmpty {
+            jump(to: prefix)          // 编辑后回到原来那一层
+            status = "\(visibleEntries.count) 个项目 · \(url.lastPathComponent)"
+        } else {
+            status = "\(Self.children(of: "", in: entries).count) 个项目 · \(url.lastPathComponent)"
+        }
+    }
+
+    // MARK: - 原地编辑
+
+    /// 往当前归档里加文件（落在当前目录下）
+    func addFiles() {
+        guard let frame = current else { return }
+        let panel = NSOpenPanel()
+        panel.message = "选择要加入 \(frame.archive.lastPathComponent) 的文件"
+        panel.prompt = "加入"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+
+        let items = panel.urls
+        let archive = frame.archive
+        let prefix = frame.prefix
+        let password = passwords[archive.path]
+
+        isLoading = true
+        status = "正在加入 \(items.count) 项…"
+        Task {
+            do {
+                let snapshotItems = items
+                try await Task.detached(priority: .userInitiated) {
+                    try SevenZip.add(archive, items: snapshotItems, prefix: prefix, password: password)
+                }.value
+                loadFrame(url: archive, resetTrail: true, restorePrefix: prefix)
+            } catch {
+                isLoading = false
+                status = "加入失败"
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// 删除选中的条目
+    func deleteSelection() {
+        guard let frame = current else { return }
+        let targets = (isSearching ? displayEntries : visibleEntries).filter { selection.contains($0.id) }
+        guard !targets.isEmpty else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "从压缩包中删除 \(targets.count) 项？"
+        alert.informativeText = "只改动 \(frame.archive.lastPathComponent)，原始文件不受影响。删除后无法撤销。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let paths = targets.map(\.path)
+        let archive = frame.archive
+        let prefix = frame.prefix
+        let password = passwords[archive.path]
+
+        isLoading = true
+        status = "正在删除 \(paths.count) 项…"
+        Task {
+            do {
+                let snapshotPaths = paths
+                try await Task.detached(priority: .userInitiated) {
+                    try SevenZip.remove(archive, entries: snapshotPaths, password: password)
+                }.value
+                loadFrame(url: archive, resetTrail: true, restorePrefix: prefix)
+            } catch {
+                isLoading = false
+                status = "删除失败"
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     private func finishLocked() {

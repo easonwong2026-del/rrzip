@@ -1,0 +1,40 @@
+rrzip — macOS 归档工具
+Copyright (C) 2026 rrzip contributors
+
+本程序是自由软件：你可以依照自由软件基金会发布的 GNU 通用公共许可证
+（第 3 版或你选择的任何更新版本）条款重新分发和/或修改它。
+
+本程序按“现状”分发，不提供任何担保，包括适销性或特定用途适用性的默示担保。
+详见 LICENSE（GNU GPL-3.0 全文）。
+
+---
+
+## 第三方来源
+
+### 1. MacPacker
+
+- 项目：https://github.com/sarensw/MacPacker
+- 作者：Stephan Arenswald 及贡献者
+- 许可：GPL-3.0
+- 使用部分：
+  - `Modules/Sources/Core/Formats/Catalog.json`（原样保存在本仓库 `vendor/Catalog.json`）
+    → 生成 `Sources/FormatCatalog.swift` 中的格式清单、后缀别名、magic number 规则、
+    复合后缀与分卷定义。
+- 改动说明：
+  - 只保留识别所需字段（id / 名称 / 后缀 / magic 规则），补充与本项目引擎对应的
+    7-Zip 类型名；
+  - 由 `scripts/gen-catalog.py` 转换为 Swift 源码，随构建一起编译，不再读取 JSON；
+  - 识别流程（先后缀、再复合后缀与分卷、最后读内容）参照 MacPacker 的
+    `ArchiveTypeDetector` 设计，`Sources/FormatDetector.swift` 为本项目自行实现。
+- 因此本仓库整体以 GPL-3.0 分发。
+
+### 2. 7-Zip
+
+- 项目：https://www.7-zip.org
+- 许可：LGPL-2.1+，含 unRAR 限制
+- 使用方式：作为独立可执行文件 `7zz` 随应用分发，通过子进程调用，不做静态链接。
+  二进制不入库，由 `scripts/fetch-7zz.sh` 在构建时从官方发布页下载。
+
+### 3. 系统组件
+
+- `bsdtar` / `libarchive`：随 macOS 提供，通过子进程调用。

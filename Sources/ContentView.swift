@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 rrzip contributors
+//
 import PDFKit
 import QuickLook
 import SwiftUI
@@ -13,37 +16,99 @@ struct RrzipApp: App {
     /// 便于在终端里验证解析结果：rrzip --list <压缩包> [--pass 密码]
     private static func handleCLI() {
         let args = CommandLine.arguments
-        guard let flag = args.firstIndex(of: "--list"), flag + 1 < args.count else { return }
-        let url = URL(fileURLWithPath: args[flag + 1])
         let password: String? = {
             guard let index = args.firstIndex(of: "--pass"), index + 1 < args.count else { return nil }
             return args[index + 1]
         }()
 
-        func dump(_ entries: [ArchiveEntry]) {
-            for entry in entries {
-                print("\(entry.mode)\t\(entry.size)\t\(entry.modified)\t\(entry.path)")
-            }
-            exit(0)
-        }
         func fail(_ message: String) -> Never {
             FileHandle.standardError.write(Data("error: \(message)\n".utf8))
             exit(1)
         }
 
-        do {
-            dump(try Tar.list(url, passphrase: password))
-        } catch ArchiveError.needsPassword {
-            do { dump(try SevenZip.list(url, password: password)) }
-            catch { fail(error.localizedDescription) }
-        } catch {
-            let message = error.localizedDescription
-            if message.lowercased().contains("header is encrypted") {
-                do { dump(try SevenZip.list(url, password: password)) }
-                catch { fail(error.localizedDescription) }
-            }
-            fail(message)
+        func value(_ flag: String) -> String? {
+            guard let index = args.firstIndex(of: flag), index + 1 < args.count else { return nil }
+            return args[index + 1]
         }
+
+        // 打印识别结果：便于排查「后缀不对但内容对」的情况
+        if let path = value("--detect") {
+            let url = URL(fileURLWithPath: path)
+            guard let detection = FormatDetector.detect(url) else {
+                fail("无法识别 \(url.lastPathComponent)")
+            }
+            print("\(detection.format.id)\t\(detection.displayName)\t\(detection.source.rawValue)")
+            print("openable=\(detection.format.isOpenable)\tsevenZip=\(detection.format.sevenZipType ?? "-")")
+            exit(0)
+        }
+
+        // 原地增删，便于脚本化与自动测试。
+        // 位置参数 = 命令行里第一个非选项之后、到下一个选项之前的所有值。
+        func positional(after flag: String) -> [String] {
+            guard let start = args.firstIndex(of: flag) else { return [] }
+            let takesValue: Set<String> = ["--prefix", "--pass"]
+            var out: [String] = []
+            var index = start + 1
+            while index < args.count {
+                let token = args[index]
+                if takesValue.contains(token) { index += 2; continue }   // 跳过选项和它的值
+                if token.hasPrefix("--") { break }                       // 遇到别的选项就停
+                out.append(token)
+                index += 1
+            }
+            return out
+        }
+
+        if args.contains("--add") {
+            let list = positional(after: "--add")
+            guard let first = list.first else { fail("--add 需要一个归档路径") }
+            let archive = URL(fileURLWithPath: first)
+            let items = list.dropFirst().map { URL(fileURLWithPath: $0) }
+            guard !items.isEmpty else { fail("--add 需要至少一个待加入的文件") }
+            do {
+                try SevenZip.add(archive, items: Array(items), prefix: value("--prefix") ?? "", password: password)
+                print("added \(items.count)")
+                exit(0)
+            } catch { fail(error.localizedDescription) }
+        }
+
+        if args.contains("--remove") {
+            let list = positional(after: "--remove")
+            guard let first = list.first else { fail("--remove 需要一个归档路径") }
+            do {
+                try SevenZip.remove(URL(fileURLWithPath: first), entries: Array(list.dropFirst()), password: password)
+                print("removed \(list.count - 1)")
+                exit(0)
+            } catch { fail(error.localizedDescription) }
+        }
+
+        guard let path = value("--list") else { return }
+        let url = URL(fileURLWithPath: path)
+
+        func dump(_ entries: [ArchiveEntry]) -> Never {
+            for entry in entries {
+                print("\(entry.mode)\t\(entry.size)\t\(entry.modified)\t\(entry.path)")
+            }
+            exit(0)
+        }
+
+        // 按识别结果决定先试哪个引擎，失败再换另一个
+        let order: [ArchiveEngine] = FormatDetector.prefersSevenZip(url)
+            ? [.sevenZip, .libarchive] : [.libarchive, .sevenZip]
+
+        var lastError: Error?
+        for engine in order {
+            do {
+                switch engine {
+                case .libarchive: dump(try Tar.list(url, passphrase: password))
+                case .sevenZip: dump(try SevenZip.list(url, password: password))
+                }
+            } catch {
+                lastError = error
+                continue
+            }
+        }
+        fail(lastError?.localizedDescription ?? "读取失败")
     }
 
     var body: some Scene {
@@ -266,6 +331,19 @@ struct ContentView: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .disabled(model.current == nil)
+
+            Menu {
+                Button("添加文件…") { model.addFiles() }
+                    .disabled(model.current == nil)
+                Button("删除选中项…") { model.deleteSelection() }
+                    .disabled(model.selection.isEmpty)
+            } label: {
+                Label("编辑", systemImage: "pencil")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(model.current == nil)
+            .help("在压缩包里增删文件，保存后原地写回")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
@@ -419,6 +497,7 @@ struct ContentView: View {
                 infoRow("项目", "\(model.totalEntryCount)")
                 infoRow("加密", model.isEncrypted ? "是" : "否")
                 infoRow("修改", model.archiveModifiedText)
+                infoRow("识别", model.detectionSourceText)
             }
             .padding(.horizontal, 14)
 
@@ -546,6 +625,8 @@ struct ContentView: View {
                 Button("导出…") { exportSelected() }
                     .controlSize(.small)
             }
+            Button("删除…") { model.deleteSelection() }
+                .controlSize(.small)
             Button("取消选择") { model.selection = [] }
                 .controlSize(.small)
                 .buttonStyle(.plain)
@@ -620,6 +701,26 @@ struct ContentView: View {
         .onTapGesture(count: 2) { model.activate(entry) }
         .onTapGesture { model.select(entry) }
         .onDrag { dragProvider(for: entry) }
+        .contextMenu {
+            Button(entry.isDirectory ? "进入文件夹" : "打开") { model.activate(entry) }
+                .disabled(!entry.isDirectory && !entry.isArchive)
+            Button("解压到…") {
+                model.selection = [entry.id]
+                model.extractSelection()
+            }
+            Button("导出…") {
+                model.selection = [entry.id]
+                exportSelected()
+            }
+            .disabled(entry.isDirectory)
+            Divider()
+            Button("加入文件…") { model.addFiles() }
+            Button("从压缩包删除…") {
+                model.selection = [entry.id]
+                model.deleteSelection()
+            }
+            .foregroundStyle(.red)
+        }
         .help(entry.path)
     }
 

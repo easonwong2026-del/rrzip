@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 rrzip contributors
+//
 import Foundation
 
 // 极简测试：不依赖 XCTest，编译成命令行直接跑
@@ -84,6 +87,81 @@ if FileManager.default.fileExists(atPath: encrypted.path) {
     }
 } else {
     print("  - 跳过（无 7zz 或样本未生成）")
+}
+
+// 6. 格式识别
+print("格式识别")
+do {
+    let zip = fixtures.appendingPathComponent("basic.zip")
+    let byExt = FormatDetector.detect(zip)
+    expect(byExt?.format.id == "zip", "zip 按后缀识别", "实际 \(byExt?.format.id ?? "nil")")
+    expect(byExt?.source == .fileExtension, "后缀来源标记")
+
+    // 改名成 .bin：后缀无效，应当靠魔数认出来
+    let renamed = fixtures.appendingPathComponent("renamed.bin")
+    try? FileManager.default.removeItem(at: renamed)
+    try FileManager.default.copyItem(at: zip, to: renamed)
+    let byMagic = FormatDetector.detect(renamed)
+    expect(byMagic?.format.id == "zip", "改名后按魔数识别", "实际 \(byMagic?.format.id ?? "nil")")
+    expect(byMagic?.source == .magic, "魔数来源标记")
+
+    // 复合后缀
+    let tgz = fixtures.appendingPathComponent("bundle.tgz")
+    let compound = FormatDetector.detect(tgz)
+    expect(compound?.compound?.id == "tar.gz", "复合后缀识别", "实际 \(compound?.compound?.id ?? "nil")")
+    expect(compound?.format.id == "tar", "复合后缀回到基础格式")
+
+    // 无后缀的 7z
+    if let sevenZ = try? Data(contentsOf: fixtures.appendingPathComponent("secret.7z")) {
+        let bare = fixtures.appendingPathComponent("bare_archive")
+        try? sevenZ.write(to: bare)
+        let detected = FormatDetector.detect(bare)
+        expect(detected?.format.id == "7zip", "无后缀按魔数识别 7z", "实际 \(detected?.format.id ?? "nil")")
+    }
+
+    // 非归档文件不应误判
+    let text = fixtures.appendingPathComponent("plain.txt")
+    try? "just text\n".write(to: text, atomically: true, encoding: .utf8)
+    expect(FormatDetector.detect(text) == nil, "普通文本不误判为归档")
+} catch {
+    expect(false, "格式识别", "\(error)")
+}
+
+// 7. 原地编辑
+print("原地编辑")
+if SevenZip.isAvailable {
+    do {
+        let work = fixtures.appendingPathComponent("edit")
+        try? FileManager.default.removeItem(at: work)
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        try "one\n".write(to: work.appendingPathComponent("1.txt"), atomically: true, encoding: .utf8)
+        try "two\n".write(to: work.appendingPathComponent("2.txt"), atomically: true, encoding: .utf8)
+        let sub = work.appendingPathComponent("子目录")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try "three\n".write(to: sub.appendingPathComponent("3.txt"), atomically: true, encoding: .utf8)
+
+        let archive = fixtures.appendingPathComponent("edit.zip")
+        try? FileManager.default.removeItem(at: archive)
+        try SevenZip.create(at: archive, from: [work.appendingPathComponent("1.txt")], format: "zip", password: nil, volume: nil)
+        expect(try SevenZip.list(archive).count == 1, "初始 1 项")
+
+        try SevenZip.add(archive, items: [work.appendingPathComponent("2.txt")])
+        expect(try SevenZip.list(archive).count == 2, "加入根目录后 2 项")
+
+        try SevenZip.add(archive, items: [sub.appendingPathComponent("3.txt")], prefix: "子目录/")
+        let afterPrefix = try SevenZip.list(archive)
+        expect(afterPrefix.contains { $0.path == "子目录/3.txt" }, "带前缀加入落到子目录",
+               "实际 \(afterPrefix.map(\.path))")
+
+        try SevenZip.remove(archive, entries: ["1.txt"])
+        let afterRemove = try SevenZip.list(archive)
+        expect(afterRemove.count == 2, "删除后 2 项", "实际 \(afterRemove.count)")
+        expect(!afterRemove.contains { $0.path == "1.txt" }, "被删条目已消失")
+    } catch {
+        expect(false, "原地编辑", "\(error)")
+    }
+} else {
+    print("  - 跳过（未找到 7zz）")
 }
 
 print("")

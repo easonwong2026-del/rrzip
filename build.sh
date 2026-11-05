@@ -20,8 +20,8 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>${APP_NAME}</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.5.0</string>
-    <key>CFBundleVersion</key><string>6</string>
+    <key>CFBundleShortVersionString</key><string>2.0.0</string>
+    <key>CFBundleVersion</key><string>7</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSHighResolutionCapable</key><true/>
@@ -96,8 +96,8 @@ cat > "$APEXPATH/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>ArchivePreview</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac.preview</string>
     <key>CFBundlePackageType</key><string>XPC!</string>
-    <key>CFBundleShortVersionString</key><string>1.5.0</string>
-    <key>CFBundleVersion</key><string>6</string>
+    <key>CFBundleShortVersionString</key><string>2.0.0</string>
+    <key>CFBundleVersion</key><string>7</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSExtension</key>
     <dict>
@@ -140,7 +140,7 @@ xcrun swiftc \
     -framework AppKit -framework QuickLookUI \
     -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$APEXPATH/Contents/MacOS/ArchivePreview" \
-    Sources/Archive.swift QuickLook/PreviewProvider.swift
+    Sources/Archive.swift Sources/FormatCatalog.swift QuickLook/PreviewProvider.swift
 
 codesign --force --sign - --entitlements /tmp/rrzip-appex.entitlements "$APEXPATH" >/dev/null 2>&1
 
