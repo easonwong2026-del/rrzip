@@ -686,9 +686,11 @@ final class ArchiveModel: ObservableObject {
             }
 
             do {
+                // 快照成常量：Swift 6 不允许并发闭包捕获可变变量
+                let filesToArchive = files
                 try await Task.detached(priority: .userInitiated) {
                     try? FileManager.default.removeItem(at: output)
-                    try SevenZip.create(at: output, from: files, format: "zip", password: nil, volume: nil)
+                    try SevenZip.create(at: output, from: filesToArchive, format: "zip", password: nil, volume: nil)
                 }.value
                 isLoading = false
                 status = "已打包 \(files.count) 项 · \(output.lastPathComponent)"
