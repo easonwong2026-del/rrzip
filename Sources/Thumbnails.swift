@@ -215,10 +215,7 @@ struct EntryThumbnail: View {
                             .strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
                     )
             } else {
-                Image(systemName: fallbackSymbol)
-                    .font(.system(size: side * 0.62))
-                    .foregroundStyle(entry.isArchive ? Color.accentColor : Color.secondary)
-                    .frame(width: side, height: side)
+                KindBadge(kind: FileKind(entry), side: side, corner: corner)
             }
         }
         .onAppear {
@@ -226,15 +223,4 @@ struct EntryThumbnail: View {
         }
     }
 
-    private var fallbackSymbol: String {
-        if entry.isDirectory { return "folder.fill" }
-        if entry.isArchive { return "shippingbox.fill" }
-        switch entry.ext {
-        case "png", "jpg", "jpeg", "heic", "gif", "webp", "tiff": return "photo"
-        case "pdf": return "doc.richtext"
-        case "mp4", "mov", "m4v", "mpg", "mpeg": return "film"
-        case "mp3", "flac", "wav", "m4a": return "music.note"
-        default: return "doc"
-        }
-    }
 }

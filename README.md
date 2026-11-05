@@ -27,6 +27,8 @@ macOS 原生压缩包工作台。SwiftUI + 系统 libarchive（`/usr/bin/tar`）
 | **访达快速查看** | 按空格直接看压缩包内容（`ArchivePreview.appex`） |
 | **包内搜索** | 工具栏搜索框，跨层级匹配，结果显示完整路径 |
 | **三种视图** | 列表 / 图标网格 / **分栏列视图** 一键切换 |
+| **类型配色** | 文件夹蓝、压缩包紫、图片橙、PDF 红、视频粉、音频青、代码绿、磁盘靛，深浅色都适配 |
+| **外观切换** | ⋯ 菜单里可选「跟随系统 / 浅色 / 深色」 |
 | **悬停预览** | 鼠标停 0.4 秒在光标旁弹出内容卡片：图片与 PDF 出大图，文本出前几行 |
 | **Mini 小窗** | 常驻置顶的小窗，**多标签**同时开多个包；拖入即看、双击进目录、拖文件出来 |
 | **暂存拖拽** | 条目可直接拖进暂存条（只记包内路径，不解压） |
@@ -110,6 +112,7 @@ rrzip/
 │   ├── Archive.swift          # 条目模型 + bsdtar / 7zz 双引擎封装（含增删）
 │   ├── FormatCatalog.swift    # 格式目录（数据来自 MacPacker，生成文件）
 │   ├── FormatDetector.swift   # 后缀 + 魔数识别
+│   ├── Palette.swift          # 品牌色 + 文件类型色板
 │   ├── HoverPreview.swift     # 悬停预览浮窗
 │   ├── QuickLook.swift        # 空格快速查看（QLPreviewPanel）
 │   ├── MiniPanel.swift        # Mini 常驻小窗

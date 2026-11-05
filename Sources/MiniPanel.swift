@@ -116,7 +116,7 @@ struct MiniView: View {
         .overlay {
             if isTargeted {
                 RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(Color.accentColor, lineWidth: 2)
+                    .strokeBorder(Palette.brand, lineWidth: 2)
                     .padding(4)
                     .allowsHitTesting(false)
             }
@@ -162,7 +162,7 @@ struct MiniView: View {
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 6)
-                            .fill(tabs.activeID == tab.id ? Color.accentColor.opacity(0.18) : Color.clear)
+                            .fill(tabs.activeID == tab.id ? Palette.brand.opacity(0.18) : Color.clear)
                     )
                     .contentShape(Rectangle())
                     .onTapGesture { tabs.select(tab.id) }
@@ -302,7 +302,7 @@ struct MiniBody: View {
                 .listRowInsets(EdgeInsets(top: 1, leading: 10, bottom: 1, trailing: 10))
                 .listRowBackground(
                     model.selection.contains(entry.id)
-                        ? Color.accentColor.opacity(0.16)
+                        ? Palette.brand.opacity(0.16)
                         : Color.clear
                 )
                 .contentShape(Rectangle())

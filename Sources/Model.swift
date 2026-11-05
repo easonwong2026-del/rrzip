@@ -4,6 +4,7 @@
 import AppKit
 import Combine
 import Foundation
+import SwiftUI
 import UniformTypeIdentifiers
 
 enum CreateFormat: String, CaseIterable, Identifiable {
@@ -63,6 +64,26 @@ struct FolderNode: Identifiable, Hashable {
     let name: String
     var children: [FolderNode]
     var id: String { path }
+}
+
+/// 外观：跟随系统 / 强制浅色 / 强制深色
+enum AppearanceMode: String, CaseIterable, Identifiable {
+    case system, light, dark
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .system: return "跟随系统"
+        case .light: return "浅色"
+        case .dark: return "深色"
+        }
+    }
+    var scheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
 }
 
 enum ArchiveViewMode: String, CaseIterable, Identifiable {
@@ -126,7 +147,12 @@ final class ArchiveModel: ObservableObject {
     @Published private(set) var trail: [Frame] = []
     @Published var selection: Set<ArchiveEntry.ID> = []
     @Published var searchText: String = ""
-    @Published var viewMode: ArchiveViewMode = .list
+    @Published var viewMode: ArchiveViewMode = .list {
+        didSet { UserDefaults.standard.set(viewMode.rawValue, forKey: "rrzip.viewMode") }
+    }
+    @Published var appearance: AppearanceMode = .system {
+        didSet { UserDefaults.standard.set(appearance.rawValue, forKey: "rrzip.appearance") }
+    }
     /// 每次重新点同一行就自增，强制预览刷新
     @Published private(set) var previewToken: Int = 0
     @Published private(set) var isLoading = false
@@ -410,6 +436,10 @@ final class ArchiveModel: ObservableObject {
         if let mode = UserDefaults.standard.string(forKey: "rrzip.viewMode"),
            let parsed = ArchiveViewMode(rawValue: mode) {
             viewMode = parsed
+        }
+        if let mode = UserDefaults.standard.string(forKey: "rrzip.appearance"),
+           let parsed = AppearanceMode(rawValue: mode) {
+            appearance = parsed
         }
         if let keyword = UserDefaults.standard.string(forKey: "rrzip.search") {
             searchText = keyword

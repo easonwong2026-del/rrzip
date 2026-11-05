@@ -175,11 +175,12 @@ struct RrzipApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("rrzip") {
+        Window("rrzip", id: "main") {
             ContentView(model: model)
-                .frame(minWidth: 900, minHeight: 560)
+                .frame(minWidth: 1020, minHeight: 600)
                 .onAppear { AppDelegate.model = model }
         }
+        .defaultSize(width: 1180, height: 720)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("打开压缩包…") { model.openWithPanel() }
@@ -281,6 +282,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    /// 窗口关掉后再点 Dock 图标，把主窗口找回来
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            sender.windows.first?.makeKeyAndOrderFront(nil)
+        }
+        return true
+    }
 }
 
 struct ContentView: View {
@@ -321,11 +330,13 @@ struct ContentView: View {
         .overlay {
             if isDropTarget {
                 RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color.accentColor, lineWidth: 3)
+                    .strokeBorder(Palette.brand, lineWidth: 3)
                     .padding(6)
                     .allowsHitTesting(false)
             }
         }
+        .tint(Palette.brand)
+        .preferredColorScheme(model.appearance.scheme)
         .onDrop(of: [.fileURL], isTargeted: $isDropTarget) { providers in
             guard let provider = providers.first else { return false }
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
@@ -422,6 +433,9 @@ struct ContentView: View {
                 Label("打开", systemImage: "folder")
                     .labelStyle(.titleAndIcon)
             }
+            .buttonStyle(.borderedProminent)
+            .tint(Palette.brand)
+        .preferredColorScheme(model.appearance.scheme)
 
             Button {
                 model.extractAll()
@@ -465,7 +479,7 @@ struct ContentView: View {
                                 .font(.system(size: 8, weight: .bold))
                                 .padding(.horizontal, 3)
                                 .padding(.vertical, 1)
-                                .background(Color.accentColor, in: Capsule())
+                                .background(Palette.brand, in: Capsule())
                                 .foregroundStyle(.white)
                                 .offset(x: 7, y: -6)
                         }
@@ -493,6 +507,13 @@ struct ContentView: View {
             Menu {
                 Button("在访达中显示") { model.revealInFinder() }
                 if model.isEncrypted { Button("锁定并清除密码") { model.lockCurrent() } }
+                Divider()
+                Picker("外观", selection: $model.appearance) {
+                    ForEach(AppearanceMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.inline)
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
@@ -607,9 +628,8 @@ struct ContentView: View {
                     model.jump(to: "")
                 } label: {
                     HStack(spacing: 5) {
-                        Image(systemName: model.current?.prefix.isEmpty == true ? "shippingbox.fill" : "shippingbox")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
+                        KindBadge(kind: .archive, side: 16, corner: 4)
+                            .frame(width: 16, height: 16)
                         Text(model.current?.archive.deletingPathExtension().lastPathComponent ?? "根目录")
                             .font(.system(size: 12, weight: model.current?.prefix.isEmpty == true ? .semibold : .regular))
                             .lineLimit(1)
@@ -623,9 +643,8 @@ struct ContentView: View {
                         model.jump(to: node.path)
                     } label: {
                         HStack(spacing: 5) {
-                            Image(systemName: model.current?.prefix == node.path ? "folder.fill" : "folder")
-                                .font(.system(size: 11))
-                                .foregroundStyle(model.current?.prefix == node.path ? Color.accentColor : Color.secondary)
+                            KindBadge(kind: .folder, side: 16, corner: 4)
+                                .frame(width: 16, height: 16)
                             Text(node.name)
                                 .font(.system(size: 12, weight: model.current?.prefix == node.path ? .semibold : .regular))
                                 .lineLimit(1)
@@ -641,22 +660,23 @@ struct ContentView: View {
 
     private var detailPane: some View {
         VStack(spacing: 0) {
+            let kind = FileKind(ext: model.current?.archive.pathExtension.lowercased() ?? "")
             VStack(spacing: 8) {
-                if let archive = model.current?.archive {
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: archive.path))
-                        .resizable()
-                        .frame(width: 56, height: 56)
-                }
+                KindBadge(kind: kind, side: 54, corner: 14)
                 Text(model.current?.archive.lastPathComponent ?? "")
                     .font(.system(size: 12.5, weight: .semibold))
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
-                Text(model.archiveFormatName)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
+                TintPill(text: model.archiveFormatName, tint: kind.tint)
             }
-            .padding(.top, 14)
-            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .background(
+                LinearGradient(
+                    colors: [kind.tint.opacity(0.16), kind.tint.opacity(0.02)],
+                    startPoint: .top, endPoint: .bottom
+                )
+            )
 
             Divider().padding(.vertical, 10)
 
@@ -760,7 +780,7 @@ struct ContentView: View {
                     .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
                     .listRowBackground(
                         model.selection.contains(entry.id)
-                            ? Color.accentColor.opacity(0.16)
+                            ? Palette.brand.opacity(0.16)
                             : Color.clear
                     )
             }
@@ -811,7 +831,7 @@ struct ContentView: View {
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(selected ? Color.accentColor.opacity(0.16) : Color.clear)
+                    .background(selected ? Palette.brand.opacity(0.16) : Color.clear)
                     .contentShape(Rectangle())
                     .onTapGesture {
                         if entry.isDirectory {
@@ -853,7 +873,7 @@ struct ContentView: View {
                     .background(
                         RoundedRectangle(cornerRadius: 10)
                             .fill(model.selection.contains(entry.id)
-                                  ? Color.accentColor.opacity(0.16)
+                                  ? Palette.brand.opacity(0.16)
                                   : Color.clear)
                     )
                     .contentShape(Rectangle())
@@ -940,12 +960,7 @@ struct ContentView: View {
             }
 
             if entry.isArchive {
-                Text("嵌套")
-                    .font(.system(size: 9, weight: .medium))
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(Color.accentColor.opacity(0.15), in: Capsule())
-                    .foregroundStyle(Color.accentColor)
+                TintPill(text: "嵌套", tint: FileKind.archive.tint)
             }
 
             Spacer(minLength: 8)
@@ -1141,6 +1156,9 @@ struct ContentView: View {
 
     private var statusBar: some View {
         HStack(spacing: 10) {
+            Circle()
+                .fill(Palette.brand)
+                .frame(width: 5, height: 5)
             Text(model.status)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
