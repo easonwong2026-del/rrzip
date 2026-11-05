@@ -25,7 +25,15 @@ jobs:
         run: ./scripts/fetch-7zz.sh
 
       - name: 单元测试
-        run: ./scripts/test.sh
+        run: |
+          ./scripts/test.sh 2>&1 | tee /tmp/test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            tail -40 /tmp/test.log | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit "$status"
+          fi
 
       - name: 并发严格检查
         run: |
