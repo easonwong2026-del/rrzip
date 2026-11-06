@@ -141,13 +141,13 @@ enum Layout {
     /// 现在等于不留余量，展开 898 / 收起 818 —— 都在「800 多」区间内。
     static let comfortMargin: CGFloat = 0
 
-    /// 低于它从完整模式收起（≈ 998）
+    /// 低于它从完整模式收起（= 818，等于三栏几何下限）
     static var autoCollapseWidth: CGFloat { fullModeMinWidth + comfortMargin }
 
     /// 收缩与展开之间留滞回，避免拖动时来回弹
     static let hysteresis: CGFloat = 80
 
-    /// 高于它从简化模式展开（≈ 1078）
+    /// 高于它从简化模式展开（= 898，留 80 的滞回）
     static var autoExpandWidth: CGFloat { autoCollapseWidth + hysteresis }
 
     /// 窗口最小尺寸与模式无关：只有解耦，窄窗口才可能真正出现
