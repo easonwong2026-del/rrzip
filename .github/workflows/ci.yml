@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   build-test:
     # 需要 arm64 的 macOS runner：内置 7zz 是 arm64 构建，构建脚本也按 arm64 出包
@@ -41,6 +45,22 @@ jobs:
             echo "::error::测试数 $count 低于基线 120（v2.11.0 应为 124）"
             exit 1
           fi
+
+      # 失败日志只看得到「exit code 1」，靠这个把 40 行日志贴到 PR 上
+      - name: 失败时贴日志
+        if: failure() && github.event.pull_request.number
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for f in /tmp/test.log /tmp/build.log; do
+            [ -f "$f" ] || continue
+            {
+              echo '```'
+              tail -60 "$f"
+              echo '```'
+            } > /tmp/ci-body.md
+            gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/ci-body.md || true
+          done
 
       - name: 并发严格检查
         run: |

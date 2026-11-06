@@ -23,6 +23,11 @@ func testCompressLevel() {
 func testProgress() {
     do {
         print("进度回调")
+        // 7zz 是构建时下载的，CI 上缺了就跳过——环境缺失不该判成功能失败
+        guard SevenZip.isAvailable else {
+            print("  - 跳过：7zz 不可用")
+            return
+        }
         do {
             let dir = fixtures.appendingPathComponent("progress-src", isDirectory: true)
             try? FileManager.default.removeItem(at: dir)
