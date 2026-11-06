@@ -219,8 +219,12 @@ xcrun swiftc \
     FinderSync/FinderSync.swift
 
 # 访达扩展必须是沙盒进程，否则 pluginkit 根本不登记它（系统设置里看不到「访达扩展」）。
-# temporary-exception：沙盒里读不到真实的 ~/Library/Application Support，
-# 用它把主程序写的 finder.json 与任务日志放进来；ad-hoc 下生效，上 App Group 后可撤。
+#
+# 三条 temporary-exception 是给 ad-hoc 签名兜底的：
+#   · home-relative：沙盒里读不到真实的 ~/Library/Application Support，用它拿 finder.json 与日志
+#   · absolute-path：FinderSync 的 selectedItemURLs 在 ad-hoc 签名下不会自动获得沙盒授权，
+#     用户右键选中的包会被拒（弹「ArchiveFinder 没有权限打开 …」）。
+#     正式 Developer ID 签名时这一条应该能被自动授权取代，届时可以删掉再验一次。
 cat > /tmp/rrzip-finder.entitlements <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -231,6 +235,11 @@ cat > /tmp/rrzip-finder.entitlements <<'PLIST'
     <key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
     <array>
         <string>/Library/Application Support/rrzip/</string>
+    </array>
+    <key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
+    <array>
+        <string>/</string>
+        <string>/private/var/folders/</string>
     </array>
 </dict>
 </plist>
