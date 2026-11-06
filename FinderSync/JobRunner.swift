@@ -214,7 +214,13 @@ enum FinderJobRunner {
                 try SevenZip.create(at: output, from: urls, format: format.rawValue,
                                     password: nil, volume: nil)
             } else if format == .zip {
-                try Tar.create(at: output, from: urls, format: "zip")
+                // 单个源走 ditto：deflate 压缩 + 包内只保留源文件名。
+                // 多个源退回 tar 合并（只 store，但不丢内容）。
+                if urls.count == 1, let single = urls.first {
+                    try Tar.createZip(at: output, from: single)
+                } else {
+                    try Tar.create(at: output, from: urls, format: "zip")
+                }
             } else {
                 throw ArchiveError.tool("右键只能压 ZIP；7Z 请在 rrzip 里新建")
             }

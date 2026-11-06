@@ -639,6 +639,39 @@ do {
     expect(false, "访达任务执行", "\(error)")
 }
 
+// 压缩产物的包内路径：不能带绝对路径前缀
+print("压缩路径")
+do {
+    let src = fixtures.appendingPathComponent("zip-src", isDirectory: true)
+    try? FileManager.default.removeItem(at: src)
+    try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+    try "hello".write(to: src.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+    let inner = src.appendingPathComponent("子目录", isDirectory: true)
+    try FileManager.default.createDirectory(at: inner, withIntermediateDirectories: true)
+    try "x".write(to: inner.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+
+    // 单源走 ditto（扩展里压 zip 的路径）
+    let single = fixtures.appendingPathComponent("zip-single.zip")
+    try? FileManager.default.removeItem(at: single)
+    try Tar.createZip(at: single, from: src)
+    let singlePaths = try Tar.list(single).map(\.path)
+    expect(singlePaths.contains { $0.hasPrefix("zip-src/") },
+           "包内以源目录名开头", singlePaths.prefix(2).joined(separator: ","))
+    expect(!singlePaths.contains { $0.contains("var/folders") || $0.hasPrefix("Users/") },
+           "包内没有绝对路径前缀", singlePaths.prefix(2).joined(separator: ","))
+
+    // 多源走 tar（同一目录下的合并压缩；跨目录会退回绝对路径，属少数情况）
+    let multi = fixtures.appendingPathComponent("zip-multi.zip")
+    try? FileManager.default.removeItem(at: multi)
+    try Tar.create(at: multi, from: [src, single], format: "zip")
+    let multiPaths = try Tar.list(multi).map(\.path)
+    expect(multiPaths.contains { $0.hasPrefix("zip-src/") }, "多源保留目录名")
+    expect(!multiPaths.contains { $0.contains("var/folders") || $0.hasPrefix("Users/") },
+           "多源也不带绝对路径", multiPaths.prefix(2).joined(separator: ","))
+} catch {
+    expect(false, "压缩路径", "\(error)")
+}
+
 print("")
 print(failures == 0 ? "全部通过（\(checks) 项）" : "失败 \(failures)/\(checks)")
 exit(failures == 0 ? 0 : 1)

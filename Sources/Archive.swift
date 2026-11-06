@@ -203,8 +203,47 @@ enum Tar {
         case "tgz": args = ["-czf", output.path]
         default: throw ArchiveError.unsupported(format)
         }
-        args.append(contentsOf: items.map(\.path))
-        try run(args)
+        guard let first = items.first else { throw ArchiveError.tool("没有要压缩的内容") }
+
+        // 以第一项的父目录为工作目录、传相对名。
+        // 直接传绝对路径的话，包内会存成 Users/xxx/Documents/foo/…，
+        // 解压出来凭空多出好几层；用户看到的就是「压出来的包是坏的」。
+        let parent = first.deletingLastPathComponent()
+        let relatives = items.map { item -> String in
+            item.deletingLastPathComponent().path == parent.path
+                ? item.lastPathComponent
+                : item.path   // 跨目录的少数情况退回绝对路径，至少不丢内容
+        }
+        args.append(contentsOf: relatives)
+        try run(args, cwd: parent)
+    }
+
+    /// 用系统 ditto 打 zip。单源压缩走这条路：
+    /// tar 的 zip 实现只 store（不压缩），1.3 GB 的目录压完还是 1.3 GB；
+    /// ditto 走 deflate，而且 `--keepParent` 天然只保留源文件名，不会带绝对路径。
+    static func createZip(at output: URL, from item: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        process.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent",
+                             item.path, output.path]
+
+        var env = ProcessInfo.processInfo.environment
+        env["COPYFILE_DISABLE"] = "1"
+        process.environment = env
+
+        let errPipe = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = errPipe
+
+        try process.run()
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let message = String(decoding: errData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw ArchiveError.tool(message.isEmpty ? "压缩失败：\(item.lastPathComponent)" : message)
+        }
     }
 }
 
