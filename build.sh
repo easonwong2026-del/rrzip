@@ -205,11 +205,13 @@ xcrun swiftc \
     -O -swift-version 5 -parse-as-library \
     -target arm64-apple-macos${MIN_MACOS} \
     -module-name ArchiveFinder \
-    -framework Cocoa -framework FinderSync \
+    -framework Cocoa -framework FinderSync -framework UserNotifications \
     -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$FSXPATH/Contents/MacOS/ArchiveFinder" \
     Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift \
-    Sources/ArchiveService.swift FinderSync/MenuBuilder.swift FinderSync/FinderSync.swift
+    Sources/ArchiveService.swift \
+    FinderSync/MenuBuilder.swift FinderSync/JobKit.swift FinderSync/JobRunner.swift \
+    FinderSync/FinderSync.swift
 codesign --force --sign - "$FSXPATH" >/dev/null 2>&1
 
 echo "==> 签名（ad-hoc）"

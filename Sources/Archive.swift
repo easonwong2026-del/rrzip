@@ -183,10 +183,13 @@ enum Tar {
         return String(decoding: out, as: UTF8.self)
     }
 
-    static func extract(_ archive: URL, entries: [String], to destination: URL, passphrase: String? = nil) throws {
+    static func extract(_ archive: URL, entries: [String], to destination: URL,
+                        passphrase: String? = nil, keepExisting: Bool = false) throws {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         var args: [String] = []
         if let passphrase, !passphrase.isEmpty { args += ["--passphrase", passphrase] }
+        // 目标已存在同名文件时默认覆盖；keepExisting 走 bsdtar 的跳过语义
+        if keepExisting { args.append("--keep-old-files") }
         args += ["-xf", archive.path, "-C", destination.path]
         if !entries.isEmpty { args.append(contentsOf: entries) }
         try run(args)
@@ -208,13 +211,30 @@ enum Tar {
 /// 应用内附带的 7-Zip 26.05（arm64）
 /// 负责：创建 7z / 加密 / 分卷；以及 libarchive 读不了的加密头 7z
 enum SevenZip {
-    static var binary: URL? {
-        if let bundled = Bundle.main.url(forResource: "7zz", withExtension: nil),
-           FileManager.default.isExecutableFile(atPath: bundled.path) {
-            return bundled
+    /// 依次尝试：主 bundle 的 Resources、以及「自己是 appex」时上级 app 的 Resources。
+    /// 快捷查看和访达扩展里 `Bundle.main` 指向扩展自身，7zz 不在扩展包里；
+    /// 这两条候选路径让三个 target 共用一份实现，不必各自注入。
+    private static let candidates: [URL] = {
+        var list: [URL] = []
+        if let resources = Bundle.main.resourceURL {
+            list.append(resources.appendingPathComponent("7zz"))
         }
-        return nil
+        // <app>/Contents/PlugIns/<ext>.appex → <app>/Contents/Resources/7zz
+        list.append(
+            Bundle.main.bundleURL
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Resources/7zz")
+        )
+        return list
+    }()
+
+    /// 找一次就记住：每次解压都 stat 两个路径没必要
+    private static let resolved: URL? = candidates.first {
+        FileManager.default.isExecutableFile(atPath: $0.path)
     }
+
+    static var binary: URL? { resolved }
 
     static var isAvailable: Bool { binary != nil }
 
@@ -311,9 +331,13 @@ enum SevenZip {
         return entries
     }
 
-    static func extract(_ archive: URL, entries: [String], to destination: URL, password: String? = nil) throws {
+    static func extract(_ archive: URL, entries: [String], to destination: URL,
+                        password: String? = nil, skipExisting: Bool = false) throws {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        var args = ["x", "-y", "-o\(destination.path)"]
+        var args = ["x", "-y"]
+        // -aos：已存在的文件跳过，不覆盖
+        if skipExisting { args.append("-aos") }
+        args.append("-o\(destination.path)")
         if let password, !password.isEmpty { args.append("-p\(password)") }
         args.append(archive.path)
         if !entries.isEmpty { args.append(contentsOf: entries) }

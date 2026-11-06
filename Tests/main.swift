@@ -499,6 +499,131 @@ do {
     expect(FinderMenuBuilder.actions(for: empty).isEmpty, "空选择不出菜单")
 }
 
+// 访达任务计划层：目标目录、冲突策略、通知文案
+print("访达任务计划")
+do {
+    let zip = fixtures.appendingPathComponent("basic.zip")
+
+    // 设置：缺键不该让整份配置失效
+    let partial = Data(#"{"secondLevel": false}"#.utf8)
+    let settings = try JSONDecoder().decode(FinderSettings.self, from: partial)
+    expect(settings.secondLevel == false, "读到显式配置项")
+    expect(settings.enabled.count == FinderAction.allCases.count, "缺 enabled 时全部放行")
+    expect(settings.extractStrategy == .newFolder, "缺 extractStrategy 时默认新建文件夹")
+    expect(settings.filtered([.open, .extractHere]) == [.open, .extractHere], "默认全部开启")
+
+    var onlyOpen = FinderSettings()
+    onlyOpen.enabled = ["open"]
+    expect(onlyOpen.filtered([.open, .extractHere, .compressZip]) == [.open],
+           "设置里关掉的项从菜单消失")
+
+    // 解压到此处：落点是源目录，冲突一律跳过而不是覆盖
+    let here = FinderJobPlanner.planExtraction(of: [zip], mode: .here)
+    expect(here.count == 1, "一个包一条计划")
+    expect(here[0].destination == zip.deletingLastPathComponent(), "落点是源目录")
+    expect(here[0].onConflict == .skip, "解压到此处不覆盖")
+
+    // 解压到包名文件夹：同名目录递增
+    let work = fixtures.appendingPathComponent("plan-test", isDirectory: true)
+    try? FileManager.default.removeItem(at: work)
+    try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+    let aZip = work.appendingPathComponent("a.zip")
+    let aSeven = work.appendingPathComponent("a.7z")
+
+    let fresh = FinderJobPlanner.planExtraction(of: [aZip], mode: .newFolder)
+    expect(fresh[0].destination.lastPathComponent == "a", "解到包名文件夹")
+
+    try FileManager.default.createDirectory(
+        at: work.appendingPathComponent("a", isDirectory: true),
+        withIntermediateDirectories: true)
+    let taken = FinderJobPlanner.planExtraction(of: [aZip], mode: .newFolder)
+    expect(taken[0].destination.lastPathComponent == "a 2", "目录已存在时递增", 
+           taken[0].destination.lastPathComponent)
+
+    // 同一批里两个同名包不能都解到 a/ —— 第二个要预留避让
+    let batch = FinderJobPlanner.planExtraction(of: [aZip, aSeven], mode: .newFolder)
+    expect(batch[0].destination.lastPathComponent == "a 2", "批内第一个让开已有目录")
+    expect(batch[1].destination.lastPathComponent == "a 3", "批内第二个继续避让",
+           batch[1].destination.lastPathComponent)
+
+    // 通知文案：结论在前，数字在后
+    var ok = JobOutcome()
+    ok.succeeded = ["a.zip", "b.zip"]
+    ok.destination = URL(fileURLWithPath: "/tmp/out")
+    expect(FinderNoticeText.title(for: ok, verb: "解压") == "解压完成 · 2 个", "全部成功")
+    expect(FinderNoticeText.body(for: ok) == "位置：out/", "副标题给落点")
+
+    ok.skippedFiles = 3
+    expect(FinderNoticeText.title(for: ok, verb: "解压") == "解压完成 2 个，跳过 3 个同名文件",
+           "跳过项报数量")
+
+    var encrypted = JobOutcome()
+    encrypted.needsPassword = ["secret.7z"]
+    expect(FinderNoticeText.title(for: encrypted, verb: "解压") == "需要密码 · secret.7z",
+           "加密包优先报密码")
+    expect(FinderNoticeText.body(for: encrypted)?.contains("输入密码") == true, "副标题说明怎么办")
+
+    var broken = JobOutcome()
+    broken.failed = [.init(name: "bad.zip", reason: "文件已损坏")]
+    expect(FinderNoticeText.title(for: broken, verb: "解压") == "解压失败 · bad.zip", "全失败")
+    expect(FinderNoticeText.body(for: broken) == "文件已损坏", "副标题给原因")
+
+    let partialOutcome = JobOutcome(succeeded: ["a.zip"], skippedFiles: 0,
+                                    needsPassword: [], failed: [.init(name: "b.7z", reason: "损坏")])
+    expect(FinderNoticeText.title(for: partialOutcome, verb: "解压") == "解压完成 1 个，1 个失败",
+           "部分失败")
+}
+
+// 访达任务执行：真的解压一次，验证不覆盖
+print("访达任务执行")
+do {
+    let zip = fixtures.appendingPathComponent("basic.zip")
+    let work = fixtures.appendingPathComponent("exec-test", isDirectory: true)
+    try? FileManager.default.removeItem(at: work)
+    try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+
+    let localZip = work.appendingPathComponent("basic.zip")
+    try FileManager.default.copyItem(at: zip, to: localZip)
+
+    // 1. 解到包名文件夹
+    let first = FinderJobRunner.extract([localZip], mode: .newFolder)
+    expect(first.succeeded == ["basic.zip"], "第一次解压成功", "\(first.failed)")
+    expect(FileManager.default.fileExists(atPath: work.appendingPathComponent("basic/说明.txt").path),
+           "解到包名子目录")
+
+    // 2. 再解一次同一目录：应该另建 basic 2，不动第一份
+    _ = FinderJobRunner.extract([localZip], mode: .newFolder)
+    expect(FileManager.default.fileExists(atPath: work.appendingPathComponent("basic 2/说明.txt").path),
+           "重名目录递增，不覆盖上一份")
+
+    // 3. 解到此处：目标已存在同名文件时必须跳过而不是覆盖
+    let hereDir = work.appendingPathComponent("here", isDirectory: true)
+    try FileManager.default.createDirectory(at: hereDir, withIntermediateDirectories: true)
+    let hereZip = hereDir.appendingPathComponent("basic.zip")
+    try FileManager.default.copyItem(at: zip, to: hereZip)
+
+    _ = FinderJobRunner.extract([hereZip], mode: .here)
+    let target = hereDir.appendingPathComponent("说明.txt")
+    try "ADMIN".write(to: target, atomically: true, encoding: .utf8)
+
+    let second = FinderJobRunner.extract([hereZip], mode: .here)
+    let content = (try? String(contentsOf: target, encoding: .utf8)) ?? ""
+    expect(content.contains("ADMIN"), "已存在的同名文件没有被覆盖", content)
+    expect(second.skippedFiles == 4,
+           "跳过数被记下来（basic.zip 里 4 个文件都已存在）", "\(second.skippedFiles)")
+
+    // 4. 加密包：解压前就判出来，且不留空目录
+    let secret = fixtures.appendingPathComponent("secret.7z")
+    if FileManager.default.fileExists(atPath: secret.path) {
+        let encrypted = FinderJobRunner.extract([secret], mode: .newFolder)
+        expect(encrypted.needsPassword == ["secret.7z"], "加密包提前判为需要密码")
+        expect(!FileManager.default.fileExists(atPath: fixtures.appendingPathComponent("secret").path),
+               "不给加密包留空目录")
+    }
+} catch {
+    expect(false, "访达任务执行", "\(error)")
+}
+
 print("")
 print(failures == 0 ? "全部通过（\(checks) 项）" : "失败 \(failures)/\(checks)")
 exit(failures == 0 ? 0 : 1)

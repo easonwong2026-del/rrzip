@@ -5,6 +5,9 @@ import PDFKit
 import QuickLook
 import SwiftUI
 import UniformTypeIdentifiers
+// UNUserNotificationCenter 没标 Sendable，但它的方法本身就是线程安全的；
+// 用 @preconcurrency 压掉严格并发下的误报，不绕过检查本身
+@preconcurrency import UserNotifications
 
 @main
 struct RrzipApp: App {
@@ -255,6 +258,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
+        requestNotificationPermissionIfNeeded()
+    }
+
+    /// 访达扩展只能投递通知、不能申请授权，所以授权这件事只能由主程序做。
+    /// 晚 2.5 秒，避开首帧窗口与首次引导。
+    private func requestNotificationPermissionIfNeeded() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            let center = UNUserNotificationCenter.current()
+            center.getNotificationSettings { settings in
+                guard settings.authorizationStatus == .notDetermined else { return }
+                center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+            }
+        }
     }
 
     // MARK: - 访达右键「服务」

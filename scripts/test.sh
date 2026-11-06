@@ -28,8 +28,9 @@ echo "==> 编译测试"
 mkdir -p build
 xcrun swiftc -O -swift-version 5 \
     -target arm64-apple-macos14.0 \
+    -framework UserNotifications \
     -o build/rrzip-tests \
-    Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift Sources/ArchiveService.swift Sources/Model.swift Sources/Palette.swift Sources/Batch.swift Sources/Thumbnails.swift FinderSync/MenuBuilder.swift Tests/main.swift
+    Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift Sources/ArchiveService.swift Sources/Model.swift Sources/Palette.swift Sources/Batch.swift Sources/Thumbnails.swift FinderSync/MenuBuilder.swift FinderSync/JobKit.swift FinderSync/JobRunner.swift Tests/main.swift
 
 if [ -x "$ROOT/Assets/7zz" ]; then cp "$ROOT/Assets/7zz" build/7zz; fi
 
