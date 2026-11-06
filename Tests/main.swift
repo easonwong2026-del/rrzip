@@ -382,6 +382,49 @@ if SevenZip.isAvailable {
     }
 }
 
+// 16. 列表排序与暂存落盘
+print("排序与暂存")
+MainActor.assumeIsolated {
+    let model = ArchiveModel()
+    let big = ArchiveEntry(path: "b.txt", size: 300, modified: "2026-01-02 10:00", mode: "-rw-r--r--")
+    let small = ArchiveEntry(path: "a.txt", size: 100, modified: "2026-01-03 10:00", mode: "-rw-r--r--")
+    let folder = ArchiveEntry(path: "z/", size: 0, modified: "2026-01-01 10:00", mode: "drwxr-xr-x")
+
+    model.sortKey = .name
+    model.sortAscending = true
+    expect(model.sortEntries([big, folder, small]).map(\.name) == ["z", "a.txt", "b.txt"],
+           "名称升序且目录在前", model.sortEntries([big, folder, small]).map(\.name).joined(separator: ","))
+
+    model.sortKey = .size
+    model.sortAscending = true
+    expect(model.sortEntries([big, small]).map(\.size) == [100, 300], "按大小升序")
+
+    model.sortAscending = false
+    expect(model.sortEntries([big, small]).map(\.size) == [300, 100], "再点一次变降序")
+}
+
+do {
+    let item = StashItem(archive: fixtures.appendingPathComponent("basic.zip"),
+                         path: "说明.txt", size: 0)
+
+    let perArchive = fixtures.appendingPathComponent("stash-out", isDirectory: true)
+    try? FileManager.default.removeItem(at: perArchive)
+    try FileManager.default.createDirectory(at: perArchive, withIntermediateDirectories: true)
+    let placed = try ArchiveModel.exportStashItem(item, to: perArchive, layout: .perArchive, password: nil)
+    expect(FileManager.default.fileExists(atPath: placed.path), "按包分目录导出成功")
+    expect(placed.path.contains("/basic/"), "落在包名子目录里", placed.path)
+
+    let flat = fixtures.appendingPathComponent("stash-flat", isDirectory: true)
+    try? FileManager.default.removeItem(at: flat)
+    try FileManager.default.createDirectory(at: flat, withIntermediateDirectories: true)
+    let first = try ArchiveModel.exportStashItem(item, to: flat, layout: .flat, password: nil)
+    let second = try ArchiveModel.exportStashItem(item, to: flat, layout: .flat, password: nil)
+    expect(first.lastPathComponent == "说明.txt", "平铺保留原文件名", first.lastPathComponent)
+    expect(second.lastPathComponent == "说明 2.txt", "同名自动加序号", second.lastPathComponent)
+} catch {
+    expect(false, "暂存落盘", "\(error)")
+}
+
 print("")
 print(failures == 0 ? "全部通过（\(checks) 项）" : "失败 \(failures)/\(checks)")
 exit(failures == 0 ? 0 : 1)

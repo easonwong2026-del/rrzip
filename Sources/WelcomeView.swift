@@ -179,4 +179,9 @@ struct WelcomeView: View {
     static var version: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
     }
+
+    /// 引导只看主次版本：2.8.0 → 2.8.1 这种补丁升级不该再弹一次
+    static func minorVersion(_ raw: String) -> String {
+        raw.split(separator: ".").prefix(2).joined(separator: ".")
+    }
 }

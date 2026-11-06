@@ -19,7 +19,7 @@ struct SettingsView: View {
                 .tabItem { Label("通用", systemImage: "gearshape") }
             CreateSettingsView()
                 .tabItem { Label("压缩", systemImage: "archivebox") }
-            ExtractSettingsView()
+            ExtractSettingsView(model: model)
                 .tabItem { Label("解压", systemImage: "tray.and.arrow.down") }
             IntegrationSettingsView()
                 .tabItem { Label("Finder 与预览", systemImage: "square.on.square") }
@@ -109,6 +109,7 @@ private struct CreateSettingsView: View {
 // MARK: - 解压
 
 private struct ExtractSettingsView: View {
+    @ObservedObject var model: ArchiveModel
     /// 空串 = 每次询问
     @AppStorage("rrzip.extractDestination") private var destination = ""
     @AppStorage("rrzip.revealAfterExtract") private var revealAfterExtract = true
@@ -152,6 +153,17 @@ private struct ExtractSettingsView: View {
 
             Section("完成后") {
                 Toggle("在访达中显示解压结果", isOn: $revealAfterExtract)
+            }
+
+            Section("暂存区导出") {
+                Picker("同名文件怎么放", selection: $model.stashLayout) {
+                    ForEach(StashLayout.allCases) { layout in
+                        Text(layout.title).tag(layout)
+                    }
+                }
+                Text(model.stashLayout.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
