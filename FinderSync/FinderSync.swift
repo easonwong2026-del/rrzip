@@ -105,6 +105,7 @@ final class FinderSync: FIFinderSync {
     private func startExtraction(mode: FinderSettings.ExtractStrategy, op: String) {
         let archives = FinderSelection.inspect(selected).archives
         guard !archives.isEmpty else { return }
+        let app = appURL
 
         // 选择必须在主线程拿完；解压本身放到后台，右键菜单不能卡住
         DispatchQueue.global(qos: .userInitiated).async {
@@ -119,6 +120,20 @@ final class FinderSync: FIFinderSync {
                                                      needsPassword: outcome.needsPassword,
                                                      skippedFiles: outcome.skippedFiles,
                                                      destination: outcome.destination?.path)))
+
+            // 加密包：扩展发不出用户通知（appex 没这个权限），
+            // 与其静默失败，不如把包交给主程序——用户本来也要在那里输密码。
+            if !outcome.needsPassword.isEmpty {
+                let locked = archives.filter {
+                    outcome.needsPassword.contains($0.lastPathComponent)
+                }
+                DispatchQueue.main.async {
+                    NSWorkspace.shared.open(locked, withApplicationAt: app,
+                                            configuration: NSWorkspace.OpenConfiguration())
+                }
+                return
+            }
+
             // 「解压到此处」的产物就是当前目录，跳过去没意义，只发通知
             FinderNotifier.report(outcome, verb: "解压",
                                   reveal: mode == .newFolder ? outcome.destination : nil)
