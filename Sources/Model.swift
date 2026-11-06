@@ -1568,9 +1568,16 @@ final class ArchiveModel: ObservableObject {
             }
         }
 
-        let needsSevenZip = format.usesSevenZip || !password.isEmpty || volume != nil
+        // 「必须 7zz」和「优先 7zz」要分开：
+        // 7z / 加密 / 分卷 没有 7zz 就做不了，必须报错；
+        // ZIP 只是想要 -mx —— bsdtar 的 zip 写入只 store，四档级别等于摆设
+        // （选「极限」和「存储」压出来一样大），所以 ZIP 也走 7zz，
+        // 但没 7zz 时还能退回 ditto，不该直接失败。
+        let requiresSevenZip = format.usesSevenZip || !password.isEmpty || volume != nil
+        let prefersSevenZip = format == .zip && SevenZip.isAvailable
+
         do {
-            if needsSevenZip {
+            if requiresSevenZip {
                 guard SevenZip.isAvailable else { throw ArchiveError.engineUnavailable }
                 try SevenZip.create(
                     at: staged, from: items,
@@ -1580,6 +1587,18 @@ final class ArchiveModel: ObservableObject {
                     level: level,
                     onProgress: onProgress
                 )
+            } else if prefersSevenZip {
+                try SevenZip.create(
+                    at: staged, from: items,
+                    format: format.ext,
+                    password: nil,
+                    volume: nil,
+                    level: level,
+                    onProgress: onProgress
+                )
+            } else if format == .zip, items.count == 1 {
+                // 没有 7zz 时退回 ditto：会 deflate，但选不了级别
+                try Tar.createZip(at: staged, from: items[0])
             } else {
                 try Tar.create(at: staged, from: items, format: format.ext)
             }

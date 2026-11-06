@@ -473,6 +473,11 @@ enum SevenZip {
         level: Int? = nil,
         onProgress: ((Double) -> Void)? = nil
     ) throws {
+        // 7-Zip 按文件基名入包，两个不同目录下的同名文件会直接失败：
+        // "Duplicate filename on disk / errno=2"。提前拦成人话，
+        // 别让用户对着 errno 发懵——反正这类选择也没法塞进同一个包。
+        try ensureUniqueNames(items)
+
         var args = ["a", "-t\(format)", "-y"]
         // -mx=0 存而不压，9 是极限；不传则用 7zz 默认（5）
         if let level { args.append("-mx=\(level)") }
@@ -485,6 +490,24 @@ enum SevenZip {
         args.append(output.path)
         args.append(contentsOf: items.map(\.path))
         try run(args, onProgress: onProgress)
+    }
+
+    /// 不同目录下的同名项：7-Zip 会拒绝，提前给可读的提示。
+    /// 同一目录不可能有两个同名文件，所以冲突必然来自跨目录多选。
+    private static func ensureUniqueNames(_ items: [URL]) throws {
+        var seen: [String: URL] = [:]
+        for item in items {
+            let key = item.lastPathComponent.lowercased()
+            if let previous = seen[key] {
+                throw ArchiveError.tool(
+                    "有两个「\(item.lastPathComponent)」在不同目录下：\n"
+                    + "\(previous.deletingLastPathComponent().path)\n"
+                    + "\(item.deletingLastPathComponent().path)\n"
+                    + "请分开压缩，或先改掉其中一个的名字。"
+                )
+            }
+            seen[key] = item
+        }
     }
 
     // MARK: - 原地编辑

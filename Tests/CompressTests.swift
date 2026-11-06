@@ -19,6 +19,96 @@ func testCompressLevel() {
     }
 }
 
+/// 四档级别必须真的改变产物体积。
+///
+/// 之前只测了「0/1/5/9 映射到 -mx」，结果主程序压普通 ZIP 走的是 bsdtar，
+/// 那一路根本不认 -mx，选「极限」和「存储」压出来一样大，测试却全绿。
+/// 这里用真实产物说话。
+func testCompressLevelEffect() {
+    do {
+        print("压缩级别真的生效")
+        guard SevenZip.isAvailable else {
+            print("  - 跳过：7zz 不可用")
+            return
+        }
+
+        let dir = fixtures.appendingPathComponent("level-src", isDirectory: true)
+        try? FileManager.default.removeItem(at: dir)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // 可压缩内容：2 MB 重复文本，store 与 max 的体积差会非常明显
+        let text = String(repeating: "rrzip compress level check 0123456789\n", count: 60_000)
+        try text.write(to: dir.appendingPathComponent("big.txt"), atomically: true, encoding: .utf8)
+
+        func makeZip(_ level: CompressLevel, name: String) throws -> URL {
+            let out = fixtures.appendingPathComponent(name)
+            try? FileManager.default.removeItem(at: out)
+            try SevenZip.create(at: out, from: [dir], format: "zip",
+                                password: nil, volume: nil, level: level.argument)
+            return out
+        }
+
+        func size(_ url: URL) -> Int {
+            (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+        }
+
+        let store = try makeZip(.store, name: "level-store.zip")
+        let maxed = try makeZip(.max, name: "level-max.zip")
+        expect(size(store) > size(maxed) * 3,
+               "存储档远大于极限档", "store=\(size(store)) max=\(size(maxed))")
+
+        // 包内路径不能因为换引擎又变成绝对路径
+        let paths = (try? Tar.list(maxed).map(\.path)) ?? []
+        expect(!paths.isEmpty, "7zz 压的 zip 能列出来")
+        expect(paths.allSatisfy { !$0.hasPrefix("Users/") && !$0.contains("var/folders") },
+               "ZIP 走 7zz 也不带绝对路径", paths.prefix(2).joined(separator: ","))
+
+        // 端到端：主程序的 ZIP 也必须接级别（旧实现走 bsdtar，级别是摆设）
+        let viaArchive = fixtures.appendingPathComponent("level-app.zip")
+        try? FileManager.default.removeItem(at: viaArchive)
+        try ArchiveModel.writeArchive(at: viaArchive, from: [dir], format: .zip,
+                                      password: "", volume: nil, level: CompressLevel.max.argument)
+        expect(size(viaArchive) < size(store),
+               "主程序压 ZIP 时级别生效", "app=\(size(viaArchive)) store=\(size(store))")
+    } catch {
+        expect(false, "压缩级别真的生效 抛出异常", "\(error)")
+    }
+}
+
+/// 跨目录同名：7-Zip 会报 errno=2，提前换成能照着做的提示
+func testDuplicateNames() {
+    do {
+        print("跨目录同名")
+        guard SevenZip.isAvailable else {
+            print("  - 跳过：7zz 不可用")
+            return
+        }
+        let a = fixtures.appendingPathComponent("dup-a", isDirectory: true)
+        let b = fixtures.appendingPathComponent("dup-b", isDirectory: true)
+        for dir in [a, b] {
+            try? FileManager.default.removeItem(at: dir)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try "x".write(to: dir.appendingPathComponent("same.txt"), atomically: true, encoding: .utf8)
+        }
+        let out = fixtures.appendingPathComponent("dup.7z")
+        try? FileManager.default.removeItem(at: out)
+
+        var message = ""
+        do {
+            try SevenZip.create(at: out, from: [a.appendingPathComponent("same.txt"),
+                                               b.appendingPathComponent("same.txt")],
+                                format: "7z", password: nil, volume: nil)
+            expect(false, "同名应被拦下")
+        } catch {
+            message = error.localizedDescription
+        }
+        expect(message.contains("same.txt"), "提示里带文件名", message)
+        expect(message.contains("分开压缩"), "提示里给出做法", message)
+        expect(!FileManager.default.fileExists(atPath: out.path), "失败不留半个包")
+    } catch {
+        expect(false, "跨目录同名 抛出异常", "\(error)")
+    }
+}
+
 /// 进度回调
 func testProgress() {
     do {
@@ -95,6 +185,8 @@ func testCompressPaths() {
 
 func runCompressTests() {
     testCompressLevel()
+    testCompressLevelEffect()
+    testDuplicateNames()
     testProgress()
     testCompressPaths()
 }
