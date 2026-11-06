@@ -3,9 +3,9 @@
 //
 import SwiftUI
 
-/// 统一的配色：品牌紫 + 按文件类型区分的色板。
+/// 统一的配色：品牌青绿 + 按文件类型区分的色板。
 /// 品牌色只用在「主操作 / 选中 / 强调」，其余一律走系统语义色，
-/// 否则整条工具栏都是紫的，层次会糊在一起。
+/// 否则整条工具栏都是青的，层次会糊在一起。
 extension AppearanceMode {
     /// 弹窗、小窗这些独立窗口读不到主窗口的 preferredColorScheme，只能自己读一次
     static var stored: AppearanceMode {
@@ -14,9 +14,19 @@ extension AppearanceMode {
     }
 }
 
+extension Color {
+    /// 按设计稿写色值：#00CFC3 比 Color(red: 0, green: 0.81, blue: 0.76) 好核对
+    init(hex: UInt32) {
+        self.init(.sRGB,
+                  red: Double((hex >> 16) & 0xFF) / 255,
+                  green: Double((hex >> 8) & 0xFF) / 255,
+                  blue: Double(hex & 0xFF) / 255)
+    }
+}
+
 enum Palette {
-    /// 品牌色：选中、强调、徽标统一用它
-    static let brand = Color(red: 0.45, green: 0.34, blue: 0.94)
+    /// 品牌色：选中、强调、徽标统一用它（取自 app 图标 #00CFC3）
+    static let brand = Color(hex: 0x00CFC3)
     /// 选中底色浓度，深浅色一致，避免深色下发灰
     static let selectionFill = 0.14
     static let selectionStroke = 0.24
@@ -161,7 +171,7 @@ enum FileKind {
         case .image: return Color(red: 0.98, green: 0.57, blue: 0.18)
         case .pdf: return Color(red: 0.93, green: 0.29, blue: 0.32)
         case .video: return Color(red: 0.93, green: 0.34, blue: 0.62)
-        case .audio: return Color(red: 0.10, green: 0.68, blue: 0.66)
+        case .audio: return Color(hex: 0x06B6D4)
         case .code: return Color(red: 0.18, green: 0.67, blue: 0.40)
         case .text: return Color(red: 0.40, green: 0.49, blue: 0.62)
         case .disk: return Color(red: 0.36, green: 0.43, blue: 0.80)
