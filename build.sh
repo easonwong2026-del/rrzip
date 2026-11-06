@@ -98,6 +98,11 @@ if [ -f Assets/AppIcon.icns ]; then
     cp Assets/AppIcon.icns "$BUNDLE/Contents/Resources/AppIcon.icns"
 fi
 
+# 设置里的「查看版本说明」直接读包内这份，不联网
+if [ -f RELEASE_NOTES.md ]; then
+    cp RELEASE_NOTES.md "$BUNDLE/Contents/Resources/RELEASE_NOTES.md"
+fi
+
 echo "==> 构建快速查看扩展"
 APEXPATH="$BUNDLE/Contents/PlugIns/ArchivePreview.appex"
 mkdir -p "$APEXPATH/Contents/MacOS"

@@ -171,6 +171,7 @@
 | `EmptyState` | 虚线拖放卡片（hero 18）+ 品牌图标 + display 标题 + 格式胶囊 + 主按钮 |
 | `HoverCard` | 280pt 宽，材质底 + 0.5pt 描边，1 秒延迟，移开即消 |
 | `BatchSheet` | 主按钮最右，分段控件与主按钮同 tint，底部操作区带分隔线 |
+| `SettingsWindow` | 560×600，TabView 五个分页，`Form(.grouped)`；跟随主窗口外观；不放品牌色，不堆开关墙 |
 
 ---
 

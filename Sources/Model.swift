@@ -577,6 +577,33 @@ final class ArchiveModel: ObservableObject {
         return url
     }
 
+    /// 缓存与临时目录占用，设置页显示
+    func cacheSizeOnDisk() -> Int64 {
+        Self.directorySize(workspace)
+    }
+
+    /// 清掉缩略图、预览临时副本与解压缓存；不动任何压缩包
+    func clearCaches() {
+        ThumbnailStore.shared.clear()
+        payloadCache.removeAll()
+        try? FileManager.default.removeItem(at: workspace)
+        try? FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        status = "缓存已清理"
+    }
+
+    private static func directorySize(_ url: URL) -> Int64 {
+        guard let enumerator = FileManager.default.enumerator(
+            at: url, includingPropertiesForKeys: [.fileSizeKey]
+        ) else { return 0 }
+        var total: Int64 = 0
+        for case let file as URL in enumerator {
+            let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            total += Int64(size)
+        }
+        return total
+    }
+
     // MARK: - 打开
 
     func open(url: URL) {
@@ -1038,15 +1065,31 @@ final class ArchiveModel: ObservableObject {
 
     // MARK: - 解压
 
+    /// 设置里选了固定目录就直接用；没选才弹面板
+    private var fixedExtractDestination: URL? {
+        let path = UserDefaults.standard.string(forKey: "rrzip.extractDestination") ?? ""
+        guard !path.isEmpty else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
     func extractAll() {
         guard let frame = current else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "解压到此处"
-        panel.message = "选择解压目标文件夹"
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        let destination: URL
+        if let fixed = fixedExtractDestination {
+            destination = fixed
+        } else {
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.canCreateDirectories = true
+            panel.prompt = "解压到此处"
+            panel.message = "选择解压目标文件夹"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            destination = url
+        }
         extract(entries: [], from: frame, to: destination)
     }
 
@@ -1054,13 +1097,19 @@ final class ArchiveModel: ObservableObject {
         guard let frame = current else { return }
         let chosen = entries.filter { selection.contains($0.id) }
         guard !chosen.isEmpty else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "解压到此处"
-        panel.message = "解压选中的 \(chosen.count) 个项目"
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        let destination: URL
+        if let fixed = fixedExtractDestination {
+            destination = fixed
+        } else {
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.canCreateDirectories = true
+            panel.prompt = "解压到此处"
+            panel.message = "解压选中的 \(chosen.count) 个项目"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            destination = url
+        }
         extract(entries: chosen.map(\.path), from: frame, to: destination)
     }
 
@@ -1082,7 +1131,10 @@ final class ArchiveModel: ObservableObject {
                     }.value
                     status = "已解压到 \(destination.lastPathComponent)"
                     isLoading = false
-                    NSWorkspace.shared.activateFileViewerSelecting([destination])
+                    // 设置里可以关掉「解压后在访达中显示」
+                    if UserDefaults.standard.object(forKey: "rrzip.revealAfterExtract") as? Bool ?? true {
+                        NSWorkspace.shared.activateFileViewerSelecting([destination])
+                    }
                     return
                 } catch let ArchiveError.tool(message) where Tar.looksEncrypted(message) {
                     guard attempt == 0, let typed = askPassword(for: frame.archive, wrong: passphrase != nil) else {
@@ -1289,6 +1341,10 @@ final class ArchiveModel: ObservableObject {
         formatLabel.frame = NSRect(x: 0, y: 88, width: 60, height: 18)
         let formatPopup = NSPopUpButton(frame: NSRect(x: 68, y: 83, width: 268, height: 26))
         formatPopup.addItems(withTitles: CreateFormat.allCases.map(\.title))
+        // 设置里选的默认格式
+        let preferred = UserDefaults.standard.string(forKey: "rrzip.defaultCreateFormat")
+            .flatMap(CreateFormat.init(rawValue:)) ?? .zip
+        formatPopup.selectItem(at: CreateFormat.allCases.firstIndex(of: preferred) ?? 0)
 
         let passwordLabel = NSTextField(labelWithString: "密码")
         passwordLabel.frame = NSRect(x: 0, y: 54, width: 60, height: 18)

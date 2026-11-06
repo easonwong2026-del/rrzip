@@ -183,8 +183,7 @@ struct RrzipApp: App {
                 .onAppear { AppDelegate.model = model }
         }
         .defaultSize(width: 720, height: 520)
-        .commands {
-            CommandGroup(replacing: .newItem) {
+        .commands {            CommandGroup(replacing: .newItem) {
                 Button("打开压缩包…") { model.openWithPanel() }
                     .keyboardShortcut("o")
                 Button("新建压缩包…") { model.createArchive() }
@@ -234,6 +233,11 @@ struct RrzipApp: App {
                 }
                 .keyboardShortcut("m", modifiers: [.command, .control])
             }
+        }
+
+        // 设置中心：⌘, 由系统菜单自动提供
+        Settings {
+            SettingsView(model: model)
         }
     }
 }
@@ -416,11 +420,43 @@ struct ContentView: View {
         }
         .task {
 #if DEBUG
+            // 排查用：把启动参数落一份，确认 --settings 这类调试开关有没有进来
+            try? CommandLine.arguments.joined(separator: " ")
+                .write(toFile: "/tmp/rrzip-argv.txt", atomically: true, encoding: .utf8)
             // 便于截图/调试：--icons 初始图标视图，--search xxx 预填搜索
             if CommandLine.arguments.contains("--icons") { model.viewMode = .icons }
             // 便于截图：--compact / --full 指定起始工作模式
             if CommandLine.arguments.contains("--compact") { model.setWorkspaceMode(.compact, manual: false) }
             if CommandLine.arguments.contains("--full") { model.setWorkspaceMode(.full, manual: false) }
+            // 便于截图：--settings 直接打开设置窗口
+            // （`open --args` 在本机不传参，所以同时支持 defaults 开关）
+            if CommandLine.arguments.contains("--settings")
+                || UserDefaults.standard.bool(forKey: "rrzip.openSettings") {
+                UserDefaults.standard.set(false, forKey: "rrzip.openSettings")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    NSApp.activate(ignoringOtherApps: true)
+                    // 先把菜单结构写出来，便于确认「设置…」到底在不在
+                    let dump = (NSApp.mainMenu?.items ?? []).map { item in
+                        "\(item.title) -> " + (item.submenu?.items.map(\.title).joined(separator: " | ") ?? "")
+                    }.joined(separator: "\n")
+                    try? dump.write(toFile: "/tmp/rrzip-menu.txt", atomically: true, encoding: .utf8)
+
+                    var opened = false
+                    for menu in NSApp.mainMenu?.items ?? [] {
+                        guard let submenu = menu.submenu,
+                              let item = submenu.items.first(where: {
+                                  $0.title.contains("设置") || $0.title.contains("Settings")
+                              }),
+                              let action = item.action else { continue }
+                        NSApp.sendAction(action, to: item.target, from: item)
+                        opened = true
+                        break
+                    }
+                    if !opened {
+                        _ = NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    }
+                }
+            }
             if let i = CommandLine.arguments.firstIndex(of: "--search"), i + 1 < CommandLine.arguments.count {
                 model.searchText = CommandLine.arguments[i + 1]
             }
