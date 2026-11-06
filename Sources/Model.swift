@@ -399,22 +399,70 @@ final class ArchiveModel: ObservableObject {
         activate(entry)
     }
 
+    /// 最近一次单击的锚点，⇧ 连选以它为起点
+    private var selectionAnchor: String?
+
     /// 单击：选中并刷新预览
     func select(_ entry: ArchiveEntry) {
+        select(entry, modifiers: [])
+    }
+
+    /// 带修饰键的选中：⌘ 反选、⇧ 连选，跟访达的习惯一致
+    func select(_ entry: ArchiveEntry, modifiers: NSEvent.ModifierFlags) {
+        let list = isSearching ? displayEntries : visibleEntries
+
+        if modifiers.contains(.command) {
+            if selection.contains(entry.id) { selection.remove(entry.id) } else { selection.insert(entry.id) }
+            selectionAnchor = entry.id
+            previewToken &+= 1
+            return
+        }
+
+        if modifiers.contains(.shift),
+           let anchor = selectionAnchor,
+           let from = list.firstIndex(where: { $0.id == anchor }),
+           let to = list.firstIndex(where: { $0.id == entry.id }) {
+            let range = from <= to ? from...to : to...from
+            selection = Set(list[range].map(\.id))
+            previewToken &+= 1
+            return
+        }
+
         if selection == [entry.id] {
             previewToken &+= 1      // 重复点同一条也要重新加载
         } else {
             selection = [entry.id]
         }
+        selectionAnchor = entry.id
     }
 
-    /// 双击：目录进入下一层，嵌套包展开，其余不动
+    /// 双击：目录进入下一层，嵌套包展开，普通文件交给默认程序打开
     func activate(_ entry: ArchiveEntry) {
         if entry.isDirectory {
             pushFolder(entry)
         } else if entry.isArchive {
             enter(entry)
+        } else {
+            openEntry(entry)
         }
+    }
+
+    /// 双击 / 回车打开普通文件：先按需解到临时目录，再交给系统默认程序
+    func openEntry(_ entry: ArchiveEntry) {
+        payloadURL(for: entry) { url in
+            guard let url else { return }
+            NSWorkspace.shared.open(url)
+            // 打开的是按需解出的临时副本，编辑不会写回包里，必须在状态栏说清楚
+            self.status = "已打开 \(entry.name)：临时副本，修改不会写回压缩包"
+        }
+    }
+
+    /// ⌘A：把当前这一层全选（搜索状态下选搜索结果）
+    func selectAll() {
+        let list = isSearching ? displayEntries : visibleEntries
+        selection = Set(list.map(\.id))
+        selectionAnchor = list.first?.id
+        previewToken &+= 1
     }
 
     /// 侧栏跳转：从根重建目录栈
