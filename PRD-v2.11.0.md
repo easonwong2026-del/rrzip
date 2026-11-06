@@ -51,7 +51,7 @@ v2.8.0–v2.10.0 四批改造把架构立住了：双模式共用 `ArchiveModel`
 | 无进度 / 结果反馈 | `FinderSync.swift:103-109` | 「点了没反应」 | → 模块 A（⬜ P0） |
 | 多选只处理第一个 | `FinderSync.swift:54`、`openSelection` | 多选打开丢文件 | → 模块 A（⬜） |
 | 直接用 7zz 绕过 ArchiveService | `FinderSync.swift:24-27` | 加密包、DMG 行为不一致 | → 模块 A（⬜） |
-| 双模式 minSize / 阈值冲突 | `ContentView.swift:654-656`、`840-842` 与 `Model.swift:667` | 自动收起不可达 | → 模块 B（⬜ P1） |
+| 双模式 minSize / 阈值冲突 | `ContentView.swift:654-656`、`840-842` 与 `Model.swift:667` | 自动收起不可达 | ✅ PR3 已修（下限解耦 560，阈值改推导） |
 | 设置中心无 FinderSync 状态与菜单配置 | `SettingsView.swift:206-213` 文案仍是「2 个服务」 | 功能已上线，设置页没跟上 | → 模块 D（⬜ P1） |
 | PRD 标注 2.10.0「待发」 | `PRD-v2.8.0.md:332` | 文档与发布脱节 | → 模块 E（⬜） |
 | FinderSync 直推 main 无 PR | `b5de5d2` 单提交 | 破坏 PR + CI 纪律 | → 模块 E（⬜） |
@@ -310,7 +310,7 @@ enum Layout {
 }
 ```
 
-现在的推导值约 1000 / 1080。外观改版若调整侧栏或详情栏宽度，只改 `Metrics` 三个常量，阈值自动跟随，不用再回来改 `autoMode`。这是本版唯一为下一版预留的结构。
+推导值（2026-11-06 实测）：`fullModeMinWidth` = 172 + 360 + 250 + 14×2 + 8 = **818**；收起 **998**，展开 **1078**。外观改版若调整侧栏或详情栏宽度，只改 `Metrics` 三个常量，阈值自动跟随，不用再回来改 `autoMode`。
 
 旧口径的处理：`SettingsView.swift:55` 的开关副标题不再写具体数字（改为「窗口变窄时自动切换」）；`DESIGN.md` 的窗口与切换段同步。
 `RELEASE_NOTES.md:31` 是 v2.8.0 的历史记录，**不改**——新阈值写进 2.11.0 的新段落（PR5 补），改历史发布说明等于篡改记录。
@@ -320,14 +320,24 @@ enum Layout {
 新增 5 项（阈值改为从 `Layout` 取，不再写死数字，断言也按推导值写）：
 
 ```swift
-let collapse = Layout.autoCollapseWidth   // ≈ 1000
-let expand = Layout.autoExpandWidth       // ≈ 1080
-expect(model.autoMode(forWidth: collapse - 1) == .compact, "低于收起阈值切简化")
-expect(model.autoMode(forWidth: collapse + 1) == nil,     "滞回区内不动")
-expect(model.autoMode(forWidth: expand + 1) == .full,     "高于展开阈值切完整")
-expect(model.autoMode(forWidth: expand + 1) == nil,       "冷却期内不自动切")   // 需先 toggle
-expect(Layout.fullModeMinWidth <= 1020, "推导值与旧 minSize 不矛盾")
+let collapse = Layout.autoCollapseWidth   // 998
+let expand = Layout.autoExpandWidth       // 1078
+expect(model.autoMode(forWidth: expand + 10) == .full, "超过展开阈值自动展开")
+expect(model.autoMode(forWidth: collapse + 10) == nil, "滞回区内不切换")
+expect(model.autoMode(forWidth: collapse - 10) == nil, "简化模式下更窄也不再重复切")
+
+// 阈值自洽：上一版的 bug 就是判据低于窗口最小宽度
+expect(collapse > Layout.fullModeMinWidth, "收起阈值高于三栏几何下限")
+expect(expand > collapse, "展开阈值高于收起阈值（留滞回）")
+expect(collapse <= 1020, "收起阈值不超过旧版窗口最小宽度，否则又会不可达")
+
+// 完整模式被拖窄必须能收起（旧版这条永远返回 nil）
+model.setWorkspaceMode(.full, manual: false)
+expect(model.autoMode(forWidth: collapse - 1) == .compact, "完整模式变窄自动收起")
+expect(model.autoMode(forWidth: collapse + 1) == nil, "留在滞回区内不来回弹")
 ```
+
+第 6 条是关键回归锁：只要有人再把窗口下限调到阈值以上，这条立刻红。
 
 ### 4.4 边界
 
@@ -534,10 +544,10 @@ spctl -a -vv build/rrzip.app     # 必须 accepted / Notarized Developer ID
 | T17 | 加密 7z 右键解压 | 通知「需要密码」，**不产生空目录** | 自动化（`needsPassword` 分支）+ 人工 |
 | T18 | 右键解压 1.2 GB 包 | 开始有「正在…」，完成有通知 +「在访达中显示」 | 人工 |
 | T19 | 关闭通知权限后右键解压 | 任务正常完成，设置页显示「未授权」+ 请求按钮 | 人工 |
-| T20 | 完整模式拖窄到 990 | 自动切简化（此前不可能） | 自动化（`autoMode` 断言）+ 人工 |
-| T21 | 简化模式拖宽到 1090 | 自动切完整，窗口不被放大 | 自动化 + 人工 |
-| T22 | 手动展开后 5 分钟内拖宽窄 | 不自动切 | 自动化（冷却） |
-| T23 | 完整模式启动 → 一路拉窄 | 一次切换，无抖动、无回弹 | 人工 |
+| T20 | 完整模式拖窄到 990 | 自动切简化（此前不可能） | ✅ 断言通过（`autoCollapseWidth`≈998）· 实机待拖 |
+| T21 | 简化模式拖宽到 1090 | 自动切完整，窗口不被放大 | ✅ 断言通过（≈1078）· 实机待拖 |
+| T22 | 手动展开后 5 分钟内拖宽窄 | 不自动切 | ✅ 断言通过（冷却） |
+| T23 | 完整模式启动 → 一路拉窄 | 一次切换，无抖动、无回弹 | ⬜ 实机（100ms 防抖已加） |
 | T24 | 双击访达里改名为 `.bin` 的 zip | 正常打开（此前静默无反应） | ✅ 逻辑已修（PR1）· 实机待验 |
 | T25 | 8000 条目包，切 10 次 | 无卡顿（<300ms），选中与滚动保留 | 人工压测 |
 | T26 | 设置里关「解压到此处」→ 重启访达 | 菜单少一项 | 人工 |
@@ -582,7 +592,7 @@ spctl -a -vv build/rrzip.app     # 必须 accepted / Notarized Developer ID
 |---|---|---|---|---|
 | 1 | `feat/finder-menu-core` | `FinderMenuBuilder` + `OpenGate` 编入扩展 + 6 组矩阵测试 + 模块 C 主入口收口 | — | 🔄 代码完成（测试 70→89），待 PR |
 | 2 | `feat/finder-exec` | `FinderJob` + 防覆盖策略 + `ArchiveService` 冲突参数 + 通知 + 日志 | 1 | ⬜ |
-| 3 | `fix/mode-autoresize` | 模块 B：minSize 解耦、阈值 1000/1080、防抖、文案与 DESIGN 同步 | — | ⬜ |
+| 3 | `fix/mode-autoresize` | 模块 B：minSize 解耦、阈值从 token 推导、100ms 防抖、文案与 DESIGN 同步 | — | 🔄 代码完成（测试 89→95），待 PR |
 | 4 | `feat/settings-finder` | 模块 D：Finder 分页重做、共享 `finder.json`、通知权限 | 1、2 | ⬜ |
 | 5 | `chore/release-ready` | 模块 E：签名 POC、`notarize.sh`、CI 补强、文档清账 | 1–4 | ⬜ |
 | 6 | `feat/quality-polish` | 模块 F：不含外层压缩（先测后改）、列显示管理、设计 token 审计（§8.3） | 3 | ⬜ 余量 |
