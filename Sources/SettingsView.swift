@@ -224,8 +224,12 @@ private struct IntegrationSettingsView: View {
                 Toggle("放进 rrzip 二级菜单", isOn: $settings.secondLevel)
                 ForEach(FinderAction.allCases, id: \.self) { action in
                     Toggle(action.title, isOn: binding(for: action))
+                        .disabled(action == .compressSevenZip)
                 }
-                Text("改动后需重启访达生效；全部关掉就不显示菜单。")
+                Text("访达扩展是沙盒进程，压不了 7Z（用不了包内 7zz），这一项先在右键里停用；7Z 请在主程序里新建。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("其余项改动后需重启访达生效；全部关掉就不显示菜单。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -32,9 +32,11 @@ final class FinderSync: FIFinderSync {
         guard !urls.isEmpty else { return nil }
 
         let selection = FinderSelection.inspect(urls)
-        // 设置里勾掉的项不出现；全关掉就连菜单一起不显示
+        // 设置里勾掉的项不出现；全关掉就连菜单一起不显示。
+        // 沙盒扩展压不了 7Z（没有 7zz），这一项直接不摆出来
         let config = FinderSettings.load()
-        let actions = config.filtered(FinderMenuBuilder.actions(for: selection))
+        let actions = config.filtered(
+            FinderMenuBuilder.actions(for: selection, canCreate7z: SevenZip.isAvailable))
         let note = FinderMenuBuilder.unsupportedNote(for: selection)
         guard !actions.isEmpty || note != nil else { return nil }
 

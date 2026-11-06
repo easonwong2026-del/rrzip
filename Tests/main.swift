@@ -482,6 +482,9 @@ do {
     expect(oneFile.archives.isEmpty && oneFile.plain.count == 1, "普通文件归到 plain")
     expect(FinderMenuBuilder.actions(for: oneFile) == [.compressZip, .compressSevenZip],
            "单个普通文件不给「分别压缩」")
+    // 沙盒扩展里没有 7zz，7Z 那一项不能摆出来
+    expect(FinderMenuBuilder.actions(for: oneFile, canCreate7z: false) == [.compressZip],
+           "没有 7zz 时去掉「压缩为 7Z」")
 
     let twoItems = FinderSelection.inspect([text, folder])
     expect(twoItems.plain.count == 2, "目录算普通项目")

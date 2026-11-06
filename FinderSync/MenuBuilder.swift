@@ -65,28 +65,33 @@ enum FinderMenuBuilder {
 
     /// 选择 → 该出现的动作，顺序固定（解压在前，压缩在后）。
     /// 单个普通文件不出现「分别压缩」——那个动作只在多选时才有意义。
-    static func actions(for selection: FinderSelection) -> [FinderAction] {
+    ///
+    /// `canCreate7z`：沙盒扩展里没有 7zz，压不了 7Z。传 false 就把这一项去掉，
+    /// 不要摆一个点了必然报错的菜单项。
+    static func actions(for selection: FinderSelection, canCreate7z: Bool = true) -> [FinderAction] {
         let hasArchive = !selection.archives.isEmpty
         let hasPlain = !selection.plain.isEmpty
 
+        let raw: [FinderAction]
         switch (hasArchive, hasPlain) {
         case (true, false):
-            return [.open, .extractHere, .extractToFolder]
+            raw = [.open, .extractHere, .extractToFolder]
         case (true, true):
-            return selection.plain.count > 1
+            raw = selection.plain.count > 1
                 ? [.extractHere, .compressZip, .compressEach]
                 : [.extractHere, .compressZip]
         case (false, true):
-            return selection.plain.count > 1
+            raw = selection.plain.count > 1
                 ? [.compressZip, .compressSevenZip, .compressEach]
                 : [.compressZip, .compressSevenZip]
         case (false, false):
-            return []
+            raw = []
         }
+        return canCreate7z ? raw : raw.filter { $0 != .compressSevenZip }
     }
 
-    static func actions(for urls: [URL]) -> [FinderAction] {
-        actions(for: FinderSelection.inspect(urls))
+    static func actions(for urls: [URL], canCreate7z: Bool = true) -> [FinderAction] {
+        actions(for: FinderSelection.inspect(urls), canCreate7z: canCreate7z)
     }
 
     /// 菜单标题。带数量是刻意的：让用户一眼看出系统识别对了几个。
