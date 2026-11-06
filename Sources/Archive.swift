@@ -399,9 +399,12 @@ enum SevenZip {
         from items: [URL],
         format: String,
         password: String?,
-        volume: String?
+        volume: String?,
+        level: Int? = nil
     ) throws {
         var args = ["a", "-t\(format)", "-y"]
+        // -mx=0 存而不压，9 是极限；不传则用 7zz 默认（5）
+        if let level { args.append("-mx=\(level)") }
         if let password, !password.isEmpty {
             args.append("-p\(password)")
             if format == "zip" { args.append("-mem=AES256") }

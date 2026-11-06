@@ -642,6 +642,13 @@ do {
     expect(false, "访达任务执行", "\(error)")
 }
 
+// 压缩级别映射：UI 的四档必须对上 7zz 的 -mx
+print("压缩级别")
+expect(CompressLevel.allCases.count == 4, "四档级别")
+expect(CompressLevel.store.argument == 0, "存储 = -mx=0")
+expect(CompressLevel.normal.argument == 5, "标准 = -mx=5")
+expect(CompressLevel.max.argument == 9, "极限 = -mx=9")
+
 // 压缩产物的包内路径：不能带绝对路径前缀
 print("压缩路径")
 do {

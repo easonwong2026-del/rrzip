@@ -932,6 +932,15 @@ struct ContentView: View {
                     showInspector.toggle()
                 }
             }
+            SettingsLink {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .frame(width: 27, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("设置（⌘,）")
+
             overflowMenu
             ToolButton(symbol: model.workspaceMode.toggleSymbol,
                        help: model.workspaceMode.toggleHelp,

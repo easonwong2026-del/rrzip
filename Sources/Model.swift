@@ -32,6 +32,30 @@ enum CreateFormat: String, CaseIterable, Identifiable {
     var usesSevenZip: Bool { self == .sevenZip }
 }
 
+/// 压缩级别。7zz 的 -mx 取值，数字越大越慢越小
+enum CompressLevel: String, CaseIterable, Identifiable {
+    case store, fast, normal, max
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .store: return "存储（不压缩）"
+        case .fast: return "快速"
+        case .normal: return "标准（推荐）"
+        case .max: return "极限"
+        }
+    }
+
+    var argument: Int {
+        switch self {
+        case .store: return 0
+        case .fast: return 1
+        case .normal: return 5
+        case .max: return 9
+        }
+    }
+}
+
 enum CreateVolume: String, CaseIterable, Identifiable {
     case none, m100, m700, g1, g4
     var id: String { rawValue }
@@ -150,10 +174,17 @@ struct RecentArchive: Identifiable, Codable, Hashable {
     var exists: Bool { FileManager.default.fileExists(atPath: path) }
 }
 
+/// 选完文件、等 sheet 确认参数的那一批
+struct PendingCreate: Identifiable {
+    let id = UUID()
+    let items: [URL]
+}
+
 struct CreateOptions {
     var format: CreateFormat = .zip
     var password: String = ""
     var volume: CreateVolume = .none
+    var level: CompressLevel = .normal
 }
 
 /// 列表排序：点表头切换，目录永远在前，组内按这一列排
@@ -1295,6 +1326,8 @@ final class ArchiveModel: ObservableObject {
     }
 
     @Published var passwordRequest: PasswordRequest?
+    /// 非 nil 时主界面弹「创建压缩包」sheet
+    @Published var pendingCreate: PendingCreate?
     private var passwordContinuation: CheckedContinuation<String?, Never>?
 
     private func askPassword(for archive: URL, wrong: Bool) async -> String? {
@@ -1507,7 +1540,8 @@ final class ArchiveModel: ObservableObject {
         from items: [URL],
         format: CreateFormat,
         password: String,
-        volume: String?
+        volume: String?,
+        level: Int = 5
     ) throws {
         let fm = FileManager.default
         let folder = output.deletingLastPathComponent()
@@ -1533,7 +1567,8 @@ final class ArchiveModel: ObservableObject {
                     at: staged, from: items,
                     format: format == .sevenZip ? "7z" : format.ext,
                     password: password.isEmpty ? nil : password,
-                    volume: volume
+                    volume: volume,
+                    level: level
                 )
             } else {
                 try Tar.create(at: staged, from: items, format: format.ext)
@@ -1582,9 +1617,13 @@ final class ArchiveModel: ObservableObject {
         picker.message = "选择要打包的文件或文件夹"
         picker.prompt = "下一步"
         guard picker.runModal() == .OK, !picker.urls.isEmpty else { return }
-        let items = picker.urls
+        // 参数交给 SwiftUI sheet；确认后由 finishCreate 选落点并写盘
+        pendingCreate = PendingCreate(items: picker.urls)
+    }
 
-        guard let options = askCreateOptions(itemCount: items.count) else { return }
+    /// sheet 确认后：选保存位置并写盘（items 由调用方带过来，此时 sheet 已关）
+    func finishCreate(_ options: CreateOptions, items: [URL]) {
+        guard !items.isEmpty else { return }
 
         let save = NSSavePanel()
         save.message = "保存压缩包"
@@ -1596,9 +1635,13 @@ final class ArchiveModel: ObservableObject {
         }
         let output = target
 
+        // tar / tgz 不支持密码与分卷，选项里先关掉了，这里再兜一层
+        let plain = options.format == .tar || options.format == .tgz
+        let password = plain ? "" : options.password
+        let volume = plain ? nil : options.volume.argument
+
         isLoading = true
         status = "正在压缩…"
-        let volume = options.volume.argument
 
         Task {
             do {
@@ -1606,7 +1649,8 @@ final class ArchiveModel: ObservableObject {
                     // 先写临时文件，成功后才替换同名旧包：失败时原文件不动
                     try Self.writeArchive(
                         at: output, from: items, format: options.format,
-                        password: options.password, volume: volume
+                        password: password, volume: volume,
+                        level: options.level.argument
                     )
                 }.value
                 status = "已创建 \(output.lastPathComponent)"
@@ -1627,63 +1671,7 @@ final class ArchiveModel: ObservableObject {
         return "\(base).\(format.ext)"
     }
 
-    private func askCreateOptions(itemCount: Int) -> CreateOptions? {
-        let alert = NSAlert()
-        alert.messageText = "压缩选项"
-        alert.informativeText = "共 \(itemCount) 个项目"
-
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 116))
-
-        let formatLabel = NSTextField(labelWithString: "格式")
-        formatLabel.frame = NSRect(x: 0, y: 88, width: 60, height: 18)
-        let formatPopup = NSPopUpButton(frame: NSRect(x: 68, y: 83, width: 268, height: 26))
-        formatPopup.addItems(withTitles: CreateFormat.allCases.map(\.title))
-        // 设置里选的默认格式
-        let preferred = UserDefaults.standard.string(forKey: "rrzip.defaultCreateFormat")
-            .flatMap(CreateFormat.init(rawValue:)) ?? .zip
-        formatPopup.selectItem(at: CreateFormat.allCases.firstIndex(of: preferred) ?? 0)
-
-        let passwordLabel = NSTextField(labelWithString: "密码")
-        passwordLabel.frame = NSRect(x: 0, y: 54, width: 60, height: 18)
-        let passwordField = NSSecureTextField(frame: NSRect(x: 68, y: 49, width: 268, height: 24))
-        passwordField.placeholderString = "留空则不加密"
-
-        let volumeLabel = NSTextField(labelWithString: "分卷")
-        volumeLabel.frame = NSRect(x: 0, y: 20, width: 60, height: 18)
-        let volumePopup = NSPopUpButton(frame: NSRect(x: 68, y: 15, width: 170, height: 26))
-        volumePopup.addItems(withTitles: CreateVolume.allCases.map(\.title))
-
-        for label in [formatLabel, passwordLabel, volumeLabel] {
-            label.font = .systemFont(ofSize: 12)
-            label.textColor = .secondaryLabelColor
-            container.addSubview(label)
-        }
-        container.addSubview(formatPopup)
-        container.addSubview(passwordField)
-        container.addSubview(volumePopup)
-
-        alert.accessoryView = container
-        alert.addButton(withTitle: "下一步")
-        alert.addButton(withTitle: "取消")
-        NSApp.activate(ignoringOtherApps: true)
-        alert.window.initialFirstResponder = formatPopup
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-
-        var options = CreateOptions()
-        options.format = CreateFormat.allCases[max(0, formatPopup.indexOfSelectedItem)]
-        options.password = passwordField.stringValue
-        options.volume = CreateVolume.allCases[max(0, volumePopup.indexOfSelectedItem)]
-
-        if options.format == .tar || options.format == .tgz {
-            options.password = ""
-            options.volume = .none
-        }
-        return options
-    }
-
-    func revealInFinder() {
-        guard let frame = current else { return }
+    func revealInFinder() {        guard let frame = current else { return }
         NSWorkspace.shared.activateFileViewerSelecting([frame.archive])
     }
 
