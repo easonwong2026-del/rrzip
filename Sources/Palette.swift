@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 rrzip contributors
 //
+import AppKit
 import SwiftUI
 
 /// 统一的配色：品牌青绿 + 按文件类型区分的色板。
@@ -24,9 +25,28 @@ extension Color {
     }
 }
 
+extension Color {
+    /// 深/浅两套动态色：一处定义同时覆盖两种外观，调用方不用再读 colorScheme
+    static func adaptive(dark: UInt32, light: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let hex = isDark ? dark : light
+            return NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
+                           green: CGFloat((hex >> 8) & 0xFF) / 255,
+                           blue: CGFloat(hex & 0xFF) / 255,
+                           alpha: 1)
+        })
+    }
+}
+
 enum Palette {
     /// 品牌色：选中、强调、徽标统一用它（取自 app 图标 #00CFC3）
     static let brand = Color(hex: 0x00CFC3)
+    /// 窗口底 / 工具栏 / 输入框 / 卡片，取自设计稿
+    static let window = Color.adaptive(dark: 0x263135, light: 0xFDFDFD)
+    static let chrome = Color.adaptive(dark: 0x2F393B, light: 0xF5F6F7)
+    static let field  = Color.adaptive(dark: 0x384547, light: 0xEDEFF1)
+    static let card   = Color.adaptive(dark: 0x313C40, light: 0xFFFFFF)
     /// 选中底色浓度，深浅色一致，避免深色下发灰
     static let selectionFill = 0.14
     static let selectionStroke = 0.24
@@ -77,7 +97,7 @@ enum Metrics {
     static let toolbarHeight: CGFloat = 44
     static let breadcrumbHeight: CGFloat = 32
     static let statusHeight: CGFloat = 26
-    static let rowHeight: CGFloat = 28
+    static let rowHeight: CGFloat = 32
     static let rowHeightWide: CGFloat = 38
     static let gutter: CGFloat = Space.xxl
     static let radiusPill: CGFloat = 4

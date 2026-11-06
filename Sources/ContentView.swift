@@ -511,6 +511,7 @@ struct ContentView: View {
             Hairline()
             statusBar
         }
+        .background(Palette.window)
         .overlay { dropOverlay }
         .overlay(alignment: .bottom) { noticeBar }
         .animation(.easeOut(duration: 0.18), value: model.notice)
@@ -941,7 +942,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, Metrics.gutter)
         .frame(height: Metrics.toolbarHeight)
-        .background(.bar)
+        .background(Palette.chrome)
     }
 
     private var groupDivider: some View {
@@ -1021,11 +1022,10 @@ struct ContentView: View {
             }
         }
         .padding(.horizontal, 8)
-        .frame(height: 24)
-        .background(Color.primary.opacity(0.05),
-                    in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .frame(height: 26)
+        .background(Palette.field, in: Capsule())
         .overlay(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
+            Capsule()
                 .strokeBorder(searchFocused ? Palette.brand.opacity(0.55) : Color.primary.opacity(0.06),
                               lineWidth: 1)
         )
@@ -1794,7 +1794,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, Metrics.gutter)
         .frame(height: Metrics.statusHeight)
-        .background(.bar)
+        .background(Palette.chrome)
     }
 
     private var statusDot: some View {
