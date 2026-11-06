@@ -9,7 +9,7 @@ on:
 jobs:
   build-test:
     # 需要 arm64 的 macOS runner：内置 7zz 是 arm64 构建，构建脚本也按 arm64 出包
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 20
 
     steps:
