@@ -20,8 +20,8 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>${APP_NAME}</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.9.0</string>
-    <key>CFBundleVersion</key><string>19</string>
+    <key>CFBundleShortVersionString</key><string>2.10.0</string>
+    <key>CFBundleVersion</key><string>20</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSHighResolutionCapable</key><true/>
@@ -127,8 +127,8 @@ cat > "$APEXPATH/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>ArchivePreview</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac.preview</string>
     <key>CFBundlePackageType</key><string>XPC!</string>
-    <key>CFBundleShortVersionString</key><string>2.9.0</string>
-    <key>CFBundleVersion</key><string>19</string>
+    <key>CFBundleShortVersionString</key><string>2.10.0</string>
+    <key>CFBundleVersion</key><string>20</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSExtension</key>
     <dict>
@@ -174,6 +174,42 @@ xcrun swiftc \
     Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift Sources/ArchiveService.swift QuickLook/PreviewProvider.swift
 
 codesign --force --sign - --entitlements /tmp/rrzip-appex.entitlements "$APEXPATH" >/dev/null 2>&1
+
+echo "==> 构建访达扩展"
+FSXPATH="$BUNDLE/Contents/PlugIns/ArchiveFinder.appex"
+mkdir -p "$FSXPATH/Contents/MacOS"
+FSXV=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$BUNDLE/Contents/Info.plist")
+FSXB=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$BUNDLE/Contents/Info.plist")
+cat > "$FSXPATH/Contents/Info.plist" <<FPLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>ArchiveFinder</string>
+    <key>CFBundleIdentifier</key><string>com.rrzip.mac.finder</string>
+    <key>CFBundleName</key><string>ArchiveFinder</string>
+    <key>CFBundlePackageType</key><string>XPC!</string>
+    <key>CFBundleShortVersionString</key><string>${FSXV}</string>
+    <key>CFBundleVersion</key><string>${FSXB}</string>
+    <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key><string>com.apple.FinderSync</string>
+        <key>NSExtensionPrincipalClass</key><string>ArchiveFinder.FinderSync</string>
+    </dict>
+</dict>
+</plist>
+FPLIST
+
+xcrun swiftc \
+    -O -swift-version 5 -parse-as-library \
+    -target arm64-apple-macos${MIN_MACOS} \
+    -module-name ArchiveFinder \
+    -framework Cocoa -framework FinderSync \
+    -Xlinker -e -Xlinker _NSExtensionMain \
+    -o "$FSXPATH/Contents/MacOS/ArchiveFinder" \
+    FinderSync/FinderSync.swift
+codesign --force --sign - "$FSXPATH" >/dev/null 2>&1
 
 echo "==> 签名（ad-hoc）"
 codesign --force --sign - "$BUNDLE" >/dev/null 2>&1  # 不用 --deep，避免覆盖扩展的 entitlements
