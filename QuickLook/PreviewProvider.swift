@@ -76,10 +76,16 @@ final class PreviewProvider: NSViewController, QLPreviewingController {
         titleLabel?.stringValue = url.lastPathComponent
 
         do {
-            let entries = try Tar.list(url)
+            // 走统一入口：7z / dmg 这类 libarchive 读不了的也能列
+            let entries = try ArchiveService.list(url, password: nil)
             rows = entries.prefix(300).map { ($0.name, $0.isDirectory ? "—" : $0.displaySize) }
             let suffix = entries.count > 300 ? "（仅显示前 300 项）" : ""
             subtitleLabel?.stringValue = "\(entries.count) 个项目 \(suffix)"
+            tableView?.reloadData()
+            handler(nil)
+        } catch ArchiveError.needsPassword {
+            rows = []
+            subtitleLabel?.stringValue = "已加密：这里看不到内容，请在 rrzip 里输入密码"
             tableView?.reloadData()
             handler(nil)
         } catch {

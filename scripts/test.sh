@@ -27,7 +27,7 @@ mkdir -p build
 xcrun swiftc -O -swift-version 5 \
     -target arm64-apple-macos14.0 \
     -o build/rrzip-tests \
-    Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift Sources/Model.swift Sources/Palette.swift Sources/Batch.swift Sources/Thumbnails.swift Tests/main.swift
+    Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift Sources/ArchiveService.swift Sources/Model.swift Sources/Palette.swift Sources/Batch.swift Sources/Thumbnails.swift Tests/main.swift
 
 if [ -x "$ROOT/Assets/7zz" ]; then cp "$ROOT/Assets/7zz" build/7zz; fi
 

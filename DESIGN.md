@@ -204,7 +204,7 @@
 1. 截图：列表 / 图标 / 分栏 × 浅色深色 + 空状态 + 选中态，确认**无斑马纹、无溢出、无贴边**。
 2. 表头与数据列对齐；窗口在默认与最小宽度下都不裁切。
 3. 8000 条目包：打开、目录树、搜索平铺列表正常。
-4. `./scripts/test.sh` 56 项通过；`-strict-concurrency=complete` typecheck 通过。
+4. `./scripts/test.sh` 63 项通过；`-strict-concurrency=complete` typecheck 通过。
 5. 新增颜色 / 字号 / 间距已写进 token 和本文件，否则退回。
 
 ---

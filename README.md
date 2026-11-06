@@ -120,6 +120,7 @@ rrzip/
 ├── DESIGN.md                # 界面设计标准：原则 / 配色 / 字号 / 间距 / 组件 / 交互 / 验收清单
 ├── Sources/
 │   ├── Archive.swift          # 条目模型 + bsdtar / 7zz 双引擎封装（含增删）
+│   ├── ArchiveService.swift   # 统一入口：按格式选引擎 + 失败回退（打开/批量/暂存/QL 共用）
 │   ├── FormatCatalog.swift    # 格式目录（数据来自 MacPacker，生成文件）
 │   ├── FormatDetector.swift   # 后缀 + 魔数识别
 │   ├── Palette.swift          # 品牌色 + 文件类型色板
@@ -135,7 +136,7 @@ rrzip/
 ├── QuickLook/
 │   └── PreviewProvider.swift  # 快速查看扩展（QLPreviewingController）
 ├── Tests/
-│   └── main.swift             # 56 项断言（解析 / 转义 / 加密 / 识别 / 编辑 / 索引性能）
+│   └── main.swift             # 63 项断言（解析 / 转义 / 加密 / 识别 / 编辑 / 索引性能）
 ├── Assets/
 │   ├── AppIcon.icns
 │   └── 7zz                    # 不入库，构建时下载
@@ -162,7 +163,7 @@ rrzip/
 ./scripts/test.sh
 ```
 
-自动生成带中文名、含空格、嵌套目录、加密 7z 的样例包，断言 56 项：八进制转义还原、zip/tgz 列表、目录折叠、加密包识别与 7-Zip 回退、后缀与魔数识别、原地增删、子项索引一致性与 10 万条目性能。
+自动生成带中文名、含空格、嵌套目录、加密 7z 的样例包，断言 63 项：八进制转义还原、zip/tgz 列表、目录折叠、加密包识别与 7-Zip 回退、后缀与魔数识别、原地增删、子项索引一致性与 10 万条目性能。
 
 ## 许可
 
