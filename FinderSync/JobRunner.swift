@@ -34,8 +34,7 @@ struct JobRecord: Codable, Sendable {
 /// 通知被系统关掉时，这里至少还能看到「刚才那两个包解到哪了」。
 enum FinderJobLog {
     static var fileURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/rrzip/finder-jobs.log")
+        SharedPaths.support.appendingPathComponent("finder-jobs.log")
     }
 
     static func append(_ record: JobRecord, limit: Int = 200) {
@@ -180,8 +179,16 @@ enum FinderJobRunner {
             .appendingPathExtension(format.rawValue))
 
         do {
-            try SevenZip.create(at: output, from: urls, format: format.rawValue,
-                                password: nil, volume: nil)
+            // 沙盒扩展里没有 7zz（spawn 不了），ZIP 退回系统 libarchive；
+            // 7Z 只能由主程序创建，这里给一句明确提示而不是静默失败
+            if SevenZip.isAvailable {
+                try SevenZip.create(at: output, from: urls, format: format.rawValue,
+                                    password: nil, volume: nil)
+            } else if format == .zip {
+                try Tar.create(at: output, from: urls, format: "zip")
+            } else {
+                throw ArchiveError.tool("右键只能压 ZIP；7Z 请在 rrzip 里新建")
+            }
             outcome.succeeded = urls.count == 1 ? [first.lastPathComponent] : [output.lastPathComponent]
             outcome.destination = folder
         } catch {

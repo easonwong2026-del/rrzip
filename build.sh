@@ -104,6 +104,9 @@ fi
 cp Assets/7zz "$BUNDLE/Contents/Resources/7zz"
 chmod +x "$BUNDLE/Contents/Resources/7zz"
 xattr -cr "$BUNDLE/Contents/Resources/7zz" 2>/dev/null || true
+# 注意：这里**不要**给 7zz 签 app-sandbox —— 签了之后非沙盒的主程序 spawn 它会直接
+# exit 133（实测），整个解压链路全废。两个扩展是沙盒进程，它们用不了这份二进制，
+# 编译时定义 ARCHIVE_EXTENSION，SevenZip.binary 返回 nil，只用系统 libarchive。
 
 if [ -f Assets/AppIcon.icns ]; then
     echo "==> 复制图标"
@@ -168,6 +171,7 @@ xcrun swiftc \
     -O -swift-version 5 -parse-as-library \
     -target arm64-apple-macos${MIN_MACOS} \
     -module-name ArchivePreview \
+    -DARCHIVE_EXTENSION \
     -framework AppKit -framework QuickLookUI \
     -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$APEXPATH/Contents/MacOS/ArchivePreview" \
@@ -205,6 +209,7 @@ xcrun swiftc \
     -O -swift-version 5 -parse-as-library \
     -target arm64-apple-macos${MIN_MACOS} \
     -module-name ArchiveFinder \
+    -DARCHIVE_EXTENSION \
     -framework Cocoa -framework FinderSync -framework UserNotifications \
     -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$FSXPATH/Contents/MacOS/ArchiveFinder" \
@@ -212,7 +217,25 @@ xcrun swiftc \
     Sources/ArchiveService.swift Sources/FinderSettings.swift \
     FinderSync/MenuBuilder.swift FinderSync/JobKit.swift FinderSync/JobRunner.swift \
     FinderSync/FinderSync.swift
-codesign --force --sign - "$FSXPATH" >/dev/null 2>&1
+
+# 访达扩展必须是沙盒进程，否则 pluginkit 根本不登记它（系统设置里看不到「访达扩展」）。
+# temporary-exception：沙盒里读不到真实的 ~/Library/Application Support，
+# 用它把主程序写的 finder.json 与任务日志放进来；ad-hoc 下生效，上 App Group 后可撤。
+cat > /tmp/rrzip-finder.entitlements <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key><true/>
+    <key>com.apple.security.files.user-selected.read-write</key><true/>
+    <key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+    <array>
+        <string>/Library/Application Support/rrzip/</string>
+    </array>
+</dict>
+</plist>
+PLIST
+codesign --force --sign - --entitlements /tmp/rrzip-finder.entitlements "$FSXPATH" >/dev/null 2>&1
 
 echo "==> 签名（ad-hoc）"
 codesign --force --sign - "$BUNDLE" >/dev/null 2>&1  # 不用 --deep，避免覆盖扩展的 entitlements

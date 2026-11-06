@@ -11,6 +11,26 @@
 
 import Foundation
 
+/// 主程序与访达扩展共用的落盘位置。
+///
+/// 沙盒扩展里 `FileManager.homeDirectoryForCurrentUser` 指向
+/// `~/Library/Containers/<bundle-id>/Data`，读不到主程序写的配置。
+/// 用 `getpwuid` 取真实 home（沙盒不拦截这个 C 接口），
+/// 再靠扩展 entitlements 里的 temporary-exception 获得该目录的读写权。
+enum SharedPaths {
+    static var home: URL {
+        if let entry = getpwuid(getuid()), let dir = entry.pointee.pw_dir {
+            return URL(fileURLWithPath: String(cString: dir), isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    /// ~/Library/Application Support/rrzip
+    static var support: URL {
+        home.appendingPathComponent("Library/Application Support/rrzip", isDirectory: true)
+    }
+}
+
 /// 右键菜单里的动作。rawValue 同时是 finder.json 里开关键的取值。
 enum FinderAction: String, CaseIterable, Codable, Sendable {
     case open
@@ -80,8 +100,7 @@ struct FinderSettings: Codable, Equatable, Sendable {
     }
 
     static var fileURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/rrzip/finder.json")
+        SharedPaths.support.appendingPathComponent("finder.json")
     }
 
     static func load(from url: URL = FinderSettings.fileURL) -> FinderSettings {

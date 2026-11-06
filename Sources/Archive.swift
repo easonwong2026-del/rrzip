@@ -229,10 +229,20 @@ enum SevenZip {
         return list
     }()
 
-    /// 找一次就记住：每次解压都 stat 两个路径没必要
-    private static let resolved: URL? = candidates.first {
-        FileManager.default.isExecutableFile(atPath: $0.path)
-    }
+    /// 找一次就记住：每次解压都 stat 两个路径没必要。
+    /// 两个扩展（快速查看 / 访达）是沙盒进程，spawn 包内 7zz 会被系统拒绝，
+    /// 编译时用 ARCHIVE_EXTENSION 直接返回 nil，让 ArchiveService 只用 libarchive。
+    /// zip / tar / rar / 非加密 7z 都读得动；dmg、加密 7z 在扩展里会明确报错，
+    /// 而不是「菜单点了没反应」。
+    private static let resolved: URL? = {
+        #if ARCHIVE_EXTENSION
+        return nil
+        #else
+        return candidates.first {
+            FileManager.default.isExecutableFile(atPath: $0.path)
+        }
+        #endif
+    }()
 
     static var binary: URL? { resolved }
 
