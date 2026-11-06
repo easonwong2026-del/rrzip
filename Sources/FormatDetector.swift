@@ -34,6 +34,21 @@ struct FormatDetection: Hashable {
     }
 }
 
+/// 打开前的统一判定：识别格式 → 判断本机能不能开。
+/// 所有入口（⌘O、拖放、访达打开、命令行）都必须走这里，不允许再按后缀前置拦截。
+enum OpenGate {
+    enum Decision: Equatable {
+        case open(FormatDetection)
+        case unrecognized
+        case unsupported(FormatDetection)
+    }
+
+    static func decide(_ url: URL) -> Decision {
+        guard let detection = FormatDetector.detect(url) else { return .unrecognized }
+        return detection.format.isOpenable ? .open(detection) : .unsupported(detection)
+    }
+}
+
 enum FormatDetector {
     /// 这些格式交给系统 bsdtar（libarchive）更快更稳；其余走内置 7-Zip
     static let libarchiveFormats: Set<String> = [

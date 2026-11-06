@@ -5,7 +5,7 @@ import AppKit
 import UniformTypeIdentifiers
 
 /// 统一的拖拽载荷：给访达的是解出来的文件，给暂存区的是「包 + 包内路径」。
-/// 主窗口和 Mini 共用这一份，避免两处实现走样。
+/// 条目拖出到访达与拖进暂存区共用这一份实现，避免两处走样。
 enum EntryDrag {
     @MainActor
     static func provider(for entry: ArchiveEntry, model: ArchiveModel) -> NSItemProvider {

@@ -19,6 +19,11 @@ final class ThumbnailStore: ObservableObject {
     }
 
     private let cache = NSCache<NSString, CGImageBox>()
+
+    /// 设置里的「清理缓存」：缩略图不必留着
+    func clear() {
+        cache.removeAllObjects()
+    }
     private var inFlight = Set<String>()
     /// 渲染失败的键：避免滚动回来时反复解压同一个坏文件
     private var failed = Set<String>()

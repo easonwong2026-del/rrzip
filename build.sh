@@ -20,8 +20,8 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>${APP_NAME}</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.7.0</string>
-    <key>CFBundleVersion</key><string>15</string>
+    <key>CFBundleShortVersionString</key><string>2.8.0</string>
+    <key>CFBundleVersion</key><string>17</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSHighResolutionCapable</key><true/>
@@ -98,6 +98,11 @@ if [ -f Assets/AppIcon.icns ]; then
     cp Assets/AppIcon.icns "$BUNDLE/Contents/Resources/AppIcon.icns"
 fi
 
+# 设置里的「查看版本说明」直接读包内这份，不联网
+if [ -f RELEASE_NOTES.md ]; then
+    cp RELEASE_NOTES.md "$BUNDLE/Contents/Resources/RELEASE_NOTES.md"
+fi
+
 echo "==> 构建快速查看扩展"
 APEXPATH="$BUNDLE/Contents/PlugIns/ArchivePreview.appex"
 mkdir -p "$APEXPATH/Contents/MacOS"
@@ -110,8 +115,8 @@ cat > "$APEXPATH/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>ArchivePreview</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac.preview</string>
     <key>CFBundlePackageType</key><string>XPC!</string>
-    <key>CFBundleShortVersionString</key><string>2.7.0</string>
-    <key>CFBundleVersion</key><string>15</string>
+    <key>CFBundleShortVersionString</key><string>2.8.0</string>
+    <key>CFBundleVersion</key><string>17</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSExtension</key>
     <dict>

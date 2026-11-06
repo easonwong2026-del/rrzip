@@ -112,6 +112,21 @@ enum ArchiveViewMode: String, CaseIterable, Identifiable {
     }
 }
 
+/// 主窗口的两种工作模式：简化模式只做「打开 → 看 → 解压」，完整模式是工作台。
+/// 两种模式共用同一个 ArchiveModel，切换时目录层级、选中项、预览都不重置。
+enum WorkspaceMode: String, CaseIterable, Identifiable {
+    case compact, full
+    var id: String { rawValue }
+    var title: String { self == .compact ? "简化模式" : "完整模式" }
+    /// 工具栏按钮的图标：当前在简化模式，就给「展开」
+    var toggleSymbol: String {
+        self == .compact ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left"
+    }
+    var toggleHelp: String {
+        self == .compact ? "展开为完整模式（⌃⌘M）" : "收起为简化模式（⌃⌘M）"
+    }
+}
+
 /// 应用内拖拽使用的自定义类型：暂存区靠它拿到「包 + 包内路径」，不必先解压
 let rrzipEntryType = UTType(exportedAs: "com.rrzip.entry")
 
@@ -123,6 +138,16 @@ struct StashItem: Identifiable, Hashable {
     let size: Int64
     var name: String { (path as NSString).lastPathComponent.isEmpty ? path : (path as NSString).lastPathComponent }
     var displaySize: String { ByteFormatter.string(size) }
+}
+
+/// 首页「最近打开」的一条。非沙盒应用按路径记就够，失效时置灰提示。
+struct RecentArchive: Identifiable, Codable, Hashable {
+    var id: String { path }
+    let path: String
+    let name: String
+    let openedAt: Date
+    var url: URL { URL(fileURLWithPath: path) }
+    var exists: Bool { FileManager.default.fileExists(atPath: path) }
 }
 
 struct CreateOptions {
@@ -165,6 +190,13 @@ final class ArchiveModel: ObservableObject {
     @Published var appearance: AppearanceMode = .system {
         didSet { UserDefaults.standard.set(appearance.rawValue, forKey: "rrzip.appearance") }
     }
+    /// 简化 / 完整模式。放在 model 里而不是视图里，切换模式不会重建状态机
+    @Published var workspaceMode: WorkspaceMode = .compact {
+        didSet { UserDefaults.standard.set(workspaceMode.rawValue, forKey: "rrzip.workspaceMode") }
+    }
+    /// 最近一次「手动」切模式的时刻。自适应布局在这之后 5 分钟内不抢控制权
+    private(set) var modePinnedAt: Date = .distantPast
+    var isCompactMode: Bool { workspaceMode == .compact }
     /// 每次重新点同一行就自增，强制预览刷新
     @Published private(set) var previewToken: Int = 0
     @Published private(set) var isLoading = false
@@ -177,6 +209,9 @@ final class ArchiveModel: ObservableObject {
     /// 暂存区：跨层、跨包攒起来，最后一次性导出
     @Published private(set) var stash: [StashItem] = []
     @Published var isStashVisible = false
+
+    /// 首页「最近打开」，最多 8 条
+    @Published private(set) var recentArchives: [RecentArchive] = []
 
     var current: Frame? { trail.last }
     /// 当前层是不是嵌套包里的临时副本
@@ -502,12 +537,124 @@ final class ArchiveModel: ObservableObject {
            let parsed = AppearanceMode(rawValue: mode) {
             appearance = parsed
         }
+        if let mode = UserDefaults.standard.string(forKey: "rrzip.workspaceMode"),
+           let parsed = WorkspaceMode(rawValue: mode) {
+            workspaceMode = parsed
+        }
         if let keyword = UserDefaults.standard.string(forKey: "rrzip.search") {
             searchText = keyword
         }
+        loadRecentArchives()
     }
     /// 预览/导出缓存：key = 归档路径 + 修改时间 + 条目路径
     private var payloadCache: [String: URL] = [:]
+
+    // MARK: - 工作模式
+    /// 用户主动展开 / 收起：记下时刻，冷却期内不再自动切换
+    func toggleWorkspaceMode() {
+        setWorkspaceMode(workspaceMode == .compact ? .full : .compact, manual: true)
+    }
+
+    func setWorkspaceMode(_ mode: WorkspaceMode, manual: Bool) {
+        if manual { modePinnedAt = Date() }
+        guard workspaceMode != mode else { return }
+        workspaceMode = mode
+    }
+
+    /// 窗口宽度变化时该不该跟着换模式；nil = 不动。
+    /// 手动切过之后 5 分钟内不抢控制权，避免「刚展开又被弹回去」。
+    func autoMode(forWidth width: Double) -> WorkspaceMode? {
+        guard Date().timeIntervalSince(modePinnedAt) > 300 else { return nil }
+        if width < 760, workspaceMode == .full { return .compact }
+        if width > 900, workspaceMode == .compact { return .full }
+        return nil
+    }
+
+    // MARK: - 最近打开（首页）
+
+    private static let recentKey = "rrzip.recentArchives"
+
+    private func loadRecentArchives() {
+        guard let data = UserDefaults.standard.data(forKey: Self.recentKey),
+              let list = try? JSONDecoder().decode([RecentArchive].self, from: data)
+        else { return }
+        recentArchives = list
+    }
+
+    /// 打开成功后记一笔；同一个包只保留最新一条
+    func recordRecent(_ url: URL) {
+        var list = recentArchives.filter { $0.path != url.path }
+        list.insert(RecentArchive(path: url.path, name: url.lastPathComponent, openedAt: Date()), at: 0)
+        recentArchives = Array(list.prefix(8))
+        saveRecentArchives()
+    }
+
+    func removeRecent(_ item: RecentArchive) {
+        recentArchives.removeAll { $0.path == item.path }
+        saveRecentArchives()
+    }
+
+    func clearRecentArchives() {
+        recentArchives = []
+        saveRecentArchives()
+    }
+
+    private func saveRecentArchives() {
+        guard let data = try? JSONEncoder().encode(recentArchives) else { return }
+        UserDefaults.standard.set(data, forKey: Self.recentKey)
+    }
+
+    // MARK: - 快速压缩（首页）
+
+    /// 首页拖入：不弹选项，直接在同目录生成 ZIP。重名自动加序号。
+    func quickCompress(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let folder = urls[0].deletingLastPathComponent()
+        let base: String
+        if urls.count == 1 {
+            let name = urls[0].deletingPathExtension().lastPathComponent
+            base = name.isEmpty ? "归档" : name
+        } else {
+            let name = folder.lastPathComponent
+            base = name.isEmpty ? "归档" : name
+        }
+        let output = Self.uniqueOutput(folder.appendingPathComponent(base)
+            .appendingPathExtension("zip"))
+        isLoading = true
+        status = "正在压缩 \(urls.count) 项…"
+        Task {
+            do {
+                let items = urls
+                try await Task.detached(priority: .userInitiated) {
+                    try Self.writeArchive(at: output, from: items, format: .zip,
+                                           password: "", volume: nil)
+                }.value
+                isLoading = false
+                status = "已生成 \(output.lastPathComponent)"
+                NSWorkspace.shared.activateFileViewerSelecting([output])
+            } catch {
+                isLoading = false
+                status = "压缩失败"
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// 目标已存在时找下一个可用名字，绝不覆盖
+    nonisolated static func uniqueOutput(_ url: URL) -> URL {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return url }
+        let folder = url.deletingLastPathComponent()
+        let base = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension
+        var index = 2
+        while true {
+            let candidate = folder.appendingPathComponent("\(base) \(index)")
+                .appendingPathExtension(ext)
+            if !fm.fileExists(atPath: candidate.path) { return candidate }
+            index += 1
+        }
+    }
 
     // MARK: - 工作目录
 
@@ -529,14 +676,54 @@ final class ArchiveModel: ObservableObject {
         return url
     }
 
+    /// 缓存与临时目录占用，设置页显示
+    func cacheSizeOnDisk() -> Int64 {
+        Self.directorySize(workspace)
+    }
+
+    /// 清掉缩略图、预览临时副本与解压缓存；不动任何压缩包
+    func clearCaches() {
+        ThumbnailStore.shared.clear()
+        payloadCache.removeAll()
+        try? FileManager.default.removeItem(at: workspace)
+        try? FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        status = "缓存已清理"
+    }
+
+    private static func directorySize(_ url: URL) -> Int64 {
+        guard let enumerator = FileManager.default.enumerator(
+            at: url, includingPropertiesForKeys: [.fileSizeKey]
+        ) else { return 0 }
+        var total: Int64 = 0
+        for case let file as URL in enumerator {
+            let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            total += Int64(size)
+        }
+        return total
+    }
+
     // MARK: - 打开
 
     func open(url: URL) {
-        guard ArchiveKind.isArchive(ext: url.pathExtension.lowercased()) else {
-            errorMessage = "不支持的格式：.\(url.pathExtension)"
-            return
+        // 统一走格式识别：后缀说不清时读魔数，改过名 / 没后缀的包也能打开。
+        // 这里不能再按后缀前置拦截，否则拖入、⌘O、访达打开三条路径都和 README 的承诺不一致。
+        switch OpenGate.decide(url) {
+        case .open:
+            loadFrame(url: url, resetTrail: true)
+        case .unrecognized:
+            errorMessage = "无法识别这个文件：\(url.lastPathComponent)\n后缀不认识，内容也不像已知的压缩包。"
+        case .unsupported(let detection):
+            errorMessage = "\(detection.displayName) 目前只能识别，打不开（本机引擎不支持）。"
         }
-        loadFrame(url: url, resetTrail: true)
+    }
+
+    /// 右键准备：点中已选中的条目时保留整组选择（跟访达一致），点未选中的条目才改成单选
+    func prepareContextSelection(_ entry: ArchiveEntry) {
+        guard !selection.contains(entry.id) else { return }
+        selection = [entry.id]
+        selectionAnchor = entry.id
+        previewToken &+= 1
     }
 
     func openWithPanel() {
@@ -670,7 +857,12 @@ final class ArchiveModel: ObservableObject {
             archiveSize: attrs?[.size] as? Int64,
             archiveModified: attrs?[.modificationDate] as? Date
         )
-        if resetTrail { trail = [frame] } else { trail.append(frame) }
+        if resetTrail {
+            trail = [frame]
+            recordRecent(url)
+        } else {
+            trail.append(frame)
+        }
         selection = []
         isLoading = false
         if let prefix = restorePrefix, !prefix.isEmpty {
@@ -962,7 +1154,7 @@ final class ArchiveModel: ObservableObject {
         }
     }
 
-    /// 返回上一级（Mini 窗口的返回键）
+    /// 返回上一级（⌘[ / ⌘↑）
     func goBack() {
         guard trail.count > 1 else { return }
         trail.removeLast()
@@ -977,15 +1169,31 @@ final class ArchiveModel: ObservableObject {
 
     // MARK: - 解压
 
+    /// 设置里选了固定目录就直接用；没选才弹面板
+    private var fixedExtractDestination: URL? {
+        let path = UserDefaults.standard.string(forKey: "rrzip.extractDestination") ?? ""
+        guard !path.isEmpty else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
     func extractAll() {
         guard let frame = current else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "解压到此处"
-        panel.message = "选择解压目标文件夹"
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        let destination: URL
+        if let fixed = fixedExtractDestination {
+            destination = fixed
+        } else {
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.canCreateDirectories = true
+            panel.prompt = "解压到此处"
+            panel.message = "选择解压目标文件夹"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            destination = url
+        }
         extract(entries: [], from: frame, to: destination)
     }
 
@@ -993,13 +1201,19 @@ final class ArchiveModel: ObservableObject {
         guard let frame = current else { return }
         let chosen = entries.filter { selection.contains($0.id) }
         guard !chosen.isEmpty else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "解压到此处"
-        panel.message = "解压选中的 \(chosen.count) 个项目"
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        let destination: URL
+        if let fixed = fixedExtractDestination {
+            destination = fixed
+        } else {
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.canCreateDirectories = true
+            panel.prompt = "解压到此处"
+            panel.message = "解压选中的 \(chosen.count) 个项目"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            destination = url
+        }
         extract(entries: chosen.map(\.path), from: frame, to: destination)
     }
 
@@ -1021,7 +1235,10 @@ final class ArchiveModel: ObservableObject {
                     }.value
                     status = "已解压到 \(destination.lastPathComponent)"
                     isLoading = false
-                    NSWorkspace.shared.activateFileViewerSelecting([destination])
+                    // 设置里可以关掉「解压后在访达中显示」
+                    if UserDefaults.standard.object(forKey: "rrzip.revealAfterExtract") as? Bool ?? true {
+                        NSWorkspace.shared.activateFileViewerSelecting([destination])
+                    }
                     return
                 } catch let ArchiveError.tool(message) where Tar.looksEncrypted(message) {
                     guard attempt == 0, let typed = askPassword(for: frame.archive, wrong: passphrase != nil) else {
@@ -1228,6 +1445,10 @@ final class ArchiveModel: ObservableObject {
         formatLabel.frame = NSRect(x: 0, y: 88, width: 60, height: 18)
         let formatPopup = NSPopUpButton(frame: NSRect(x: 68, y: 83, width: 268, height: 26))
         formatPopup.addItems(withTitles: CreateFormat.allCases.map(\.title))
+        // 设置里选的默认格式
+        let preferred = UserDefaults.standard.string(forKey: "rrzip.defaultCreateFormat")
+            .flatMap(CreateFormat.init(rawValue:)) ?? .zip
+        formatPopup.selectItem(at: CreateFormat.allCases.firstIndex(of: preferred) ?? 0)
 
         let passwordLabel = NSTextField(labelWithString: "密码")
         passwordLabel.frame = NSRect(x: 0, y: 54, width: 60, height: 18)

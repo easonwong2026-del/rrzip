@@ -267,6 +267,87 @@ do {
     expect(false, "批量目标目录", "\(error)")
 }
 
+// 12. 打开入口：改名 / 没有后缀的包必须和普通包一样能打开
+print("打开入口判定")
+do {
+    let original = try Data(contentsOf: fixtures.appendingPathComponent("basic.zip"))
+
+    let bare = fixtures.appendingPathComponent("noext-\(UUID().uuidString.prefix(4))")
+    try original.write(to: bare)
+    if case .open(let detection) = OpenGate.decide(bare) {
+        expect(detection.source == .magic, "无后缀 zip 按内容识别", "实际 \(detection.source)")
+    } else {
+        expect(false, "无后缀 zip 应判定为可打开")
+    }
+
+    let disguised = fixtures.appendingPathComponent("disguised-\(UUID().uuidString.prefix(4)).bin")
+    try original.write(to: disguised)
+    if case .open(let detection) = OpenGate.decide(disguised) {
+        expect(detection.source == .magic, "改名成 .bin 仍可打开", "实际 \(detection.source)")
+    } else {
+        expect(false, "改名成 .bin 应判定为可打开")
+    }
+
+    let plain = fixtures.appendingPathComponent("plain-\(UUID().uuidString.prefix(4)).txt")
+    try "hello\n".write(to: plain, atomically: true, encoding: .utf8)
+    if case .unrecognized = OpenGate.decide(plain) {
+        expect(true, "普通文本判定为无法识别")
+    } else {
+        expect(false, "普通文本不应被当成归档")
+    }
+} catch {
+    expect(false, "打开入口判定", "\(error)")
+}
+
+// 13. 工作模式：切换不动选中项，手动切换后有冷却期
+print("工作模式")
+MainActor.assumeIsolated {
+    // 测试不受本机偏好影响
+    UserDefaults.standard.removeObject(forKey: "rrzip.workspaceMode")
+    let model = ArchiveModel()
+    expect(model.workspaceMode == .compact, "默认简化模式")
+
+    // 冷却期外（刚启动）的自动判据
+    expect(model.autoMode(forWidth: 950) == .full, "窗口够宽自动展开")
+    expect(model.autoMode(forWidth: 700) == nil, "简化模式下窄窗口不再重复切")
+
+    model.selection = ["a", "b"]
+    model.setWorkspaceMode(.full, manual: true)
+    expect(model.selection == ["a", "b"], "切模式不动选中项")
+    expect(model.autoMode(forWidth: 600) == nil, "手动切换后冷却期内不自动回简化")
+
+    model.toggleWorkspaceMode()
+    expect(model.workspaceMode == .compact, "再切回简化")
+}
+
+// 14. 首页：最近打开与快速压缩的命名
+print("首页")
+MainActor.assumeIsolated {
+    UserDefaults.standard.removeObject(forKey: "rrzip.recentArchives")
+    let model = ArchiveModel()
+    model.recordRecent(URL(fileURLWithPath: "/tmp/a.zip"))
+    model.recordRecent(URL(fileURLWithPath: "/tmp/b.7z"))
+    model.recordRecent(URL(fileURLWithPath: "/tmp/a.zip"))
+    expect(model.recentArchives.count == 2, "同一个包不重复记", "实际 \(model.recentArchives.count)")
+    expect(model.recentArchives.first?.path == "/tmp/a.zip", "最近打开的排最前")
+    model.clearRecentArchives()
+    expect(model.recentArchives.isEmpty, "可以清空")
+}
+
+do {
+    let folder = fixtures.appendingPathComponent("quick", isDirectory: true)
+    try? FileManager.default.removeItem(at: folder)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let first = folder.appendingPathComponent("demo.zip")
+    try "x".write(to: first, atomically: true, encoding: .utf8)
+    expect(ArchiveModel.uniqueOutput(first).lastPathComponent == "demo 2.zip",
+           "重名自动加序号", ArchiveModel.uniqueOutput(first).lastPathComponent)
+    let fresh = folder.appendingPathComponent("fresh.zip")
+    expect(ArchiveModel.uniqueOutput(fresh).lastPathComponent == "fresh.zip", "不重名用原名")
+} catch {
+    expect(false, "快速压缩命名", "\(error)")
+}
+
 print("")
 print(failures == 0 ? "全部通过（\(checks) 项）" : "失败 \(failures)/\(checks)")
 exit(failures == 0 ? 0 : 1)
