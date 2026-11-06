@@ -47,10 +47,10 @@ v2.8.0–v2.10.0 四批改造把架构立住了：双模式共用 `ArchiveModel`
 |---|---|---|---|
 | 右键菜单固定 4 项 | `FinderSync.swift:35-43` 无条件构造 | 选文件也显示「解压到此处」 | ✅ PR1 已改动态菜单 |
 | 后缀硬编码 10 个 | `FinderSync.swift:12-14` | 与 `FormatDetector` 双份真相 | ✅ PR1 已删，改走 `OpenGate` |
-| `-y` 静默覆盖 | `FinderSync.swift:62` | **可能丢用户文件** | → 模块 A（⬜ P0） |
-| 无进度 / 结果反馈 | `FinderSync.swift:103-109` | 「点了没反应」 | → 模块 A（⬜ P0） |
-| 多选只处理第一个 | `FinderSync.swift:54`、`openSelection` | 多选打开丢文件 | → 模块 A（⬜） |
-| 直接用 7zz 绕过 ArchiveService | `FinderSync.swift:24-27` | 加密包、DMG 行为不一致 | → 模块 A（⬜） |
+| `-y` 静默覆盖 | `FinderSync.swift:62` | **可能丢用户文件** | ✅ PR2 已改 `-aos` / `--keep-old-files`，解压前统计冲突 |
+| 无进度 / 结果反馈 | `FinderSync.swift:103-109` | 「点了没反应」 | ✅ PR2 已加通知 + JSONL 任务日志 |
+| 多选只处理第一个 | `FinderSync.swift:54`、`openSelection` | 多选打开丢文件 | ✅ PR1 已改多选传递 + 主界面提示 |
+| 直接用 7zz 绕过 ArchiveService | `FinderSync.swift:24-27` | 加密包、DMG 行为不一致 | ✅ PR2 已走 `ArchiveService`，并修好扩展内 7zz 定位 |
 | 双模式 minSize / 阈值冲突 | `ContentView.swift:654-656`、`840-842` 与 `Model.swift:667` | 自动收起不可达 | ✅ PR3 已修（下限解耦 560，阈值改推导） |
 | 设置中心无 FinderSync 状态与菜单配置 | `SettingsView.swift:206-213` 文案仍是「2 个服务」 | 功能已上线，设置页没跟上 | → 模块 D（⬜ P1） |
 | PRD 标注 2.10.0「待发」 | `PRD-v2.8.0.md:332` | 文档与发布脱节 | → 模块 E（⬜） |
@@ -61,7 +61,7 @@ v2.8.0–v2.10.0 四批改造把架构立住了：双模式共用 `ArchiveModel`
 | # | 发现 | 证据 | 严重度 |
 |---|---|---|---|
 | N1 | `application(_:open:)` 用 `ArchiveKind.isArchive(ext:)` 前置过滤；不匹配直接 `return`，无提示 | `ContentView.swift:368-372` | **P0**：这是 v2.8.0 修过的同一类问题在另一入口复发 · ✅ PR1 已改走 `OpenGate`，Services 同步 |
-| N2 | 右键解压加密包：`-y` 无法回答密码，7zz 在无 tty 下失败，进程退出码无人读 | `FinderSync.swift:62,103` | P0：静默失败 |
+| N2 | 右键解压加密包：`-y` 无法回答密码，7zz 在无 tty 下失败，进程退出码无人读 | `FinderSync.swift:62,103` | P0：静默失败 · ✅ PR2 已改为解压前 `list` 预判，直接报「需要密码」 |
 | N3 | 跨目录多选压缩：输出目录取 `selected.first` 的父目录，其余文件被搬进第一个文件所在目录 | `FinderSync.swift:67-75` | P1：落点不可预期 |
 | N4 | 扩展把整个 `/` 挂进 `directoryURLs` | `FinderSync.swift:32` | P1：每个目录都问菜单，含外置卷/网络卷 |
 | N5 | CI 产物校验只验 `ArchivePreview.appex`，没验 `ArchiveFinder.appex` | `.github/workflows/ci.yml` 校验产物步骤 | P1：扩展构建坏了 CI 不红 |
@@ -146,55 +146,63 @@ menu(for:)  →  FinderMenuBuilder.actions(for: [URL])     ← 纯逻辑，编�
 
 | 策略 | 行为 | 默认 |
 |---|---|---|
-| 新建文件夹 | `包名 2`、`包名 3`…（与 `uniqueOutput` 同规则） | ✅ |
-| 合并并改名 | 解进已有目录，同名文件自动 `名称 2.ext` | ⬜ 可选 |
+| 新建文件夹 | `包名 2`、`包名 3`…（与 `uniqueOutput` 同规则） | ✅ 已实现（PR2） |
+| 目录内同名跳过 | `-aos` / `--keep-old-files`，跳过数进通知 | ✅ 已实现（PR2） |
+| 合并并改名 | 解进已有目录，同名文件自动 `名称 2.ext` | ⬜ v2.12（需先解到临时目录再合并，成本高） |
 | 逐个询问 | 拉起主 app 显示冲突清单 | ⬜ v2.12 |
 
-`-y` 从扩展里彻底移除。若必须兜底（目录内仍出现同名），改用 `-aos`（跳过已存在），并在通知里报「跳过 N 个同名文件」——**跳过可解释，覆盖不可逆**。
+`-y` 已从扩展里移除。兜底用 `-aos`（跳过已存在），并在通知里报「跳过 N 个同名文件」——**跳过可解释，覆盖不可逆**。
 
 `ArchiveService.extract` 增加参数：
 
 ```swift
-enum ConflictPolicy { case skip, rename, overwrite }
+enum ArchiveConflictPolicy { case overwrite, skip }
 static func extract(_ url: URL, entries: [String], to destination: URL,
-                    password: String?, onConflict: ConflictPolicy = .skip) throws
+                    password: String?,
+                    onConflict: ArchiveConflictPolicy = .overwrite) throws
 ```
 
-批量、暂存导出也复用这个参数，避免两套冲突逻辑。
+默认 `.overwrite` 保持主程序现有行为（用户主动解压，语义不变）；访达右键一律传 `.skip`。
+批量、暂存导出将来复用同一参数，避免出现第二套冲突逻辑。
 
 ### 3.5 结果反馈：三种结局都要出声
 
+已实现（PR2）：
+
 ```swift
-struct FinderJob: Codable {
-    enum Op: String, Codable { case extract, extractEach, compress, compressEach }
-    let id: UUID
-    let op: Op
-    let sources: [String]
-    let destination: String?
-    let startedAt: Date
+struct JobOutcome {                    // 一次任务的结果，纯数据
+    var succeeded: [String]
+    var skippedFiles: Int              // 因同名被跳过的文件数，不是包数
+    var needsPassword: [String]
+    var failed: [Failure]              // name + reason
+    var destination: URL?
 }
 
-struct JobResult: Codable {
-    let jobID: UUID
-    let succeeded: [String]
-    let skipped: [(String, String)]   // 文件, 原因
-    let failed: [(String, String)]
+struct JobRecord: Codable {            // 落日志的一行
+    let id: String
+    let op: String                     // extractHere / extractToFolder / compressZip…
+    let startedAt: Date
     let finishedAt: Date
+    let payload: Payload               // 上面五个字段的扁平化
 }
 ```
 
-通知（`UNUserNotificationCenter`，主 app 申请授权，扩展共享）：
+通知（`UNUserNotificationCenter`，主 app 申请授权，扩展只投递）：
 
-| 结局 | 文案 | 动作按钮 |
+| 结局 | 标题（实际文案） | 副标题 |
 |---|---|---|
-| 全部成功 | 「已解压 3 个压缩包到『下载』」 | 在访达中显示 |
-| 部分成功 | 「2 个完成，1 个跳过（已存在同名文件）」 | 查看详情 |
-| 全部失败 | 「无法解压 X.7z：需要密码」 | 用 rrzip 打开 |
-| 无权限 | 不通知，设置页显示「通知未授权」+ 跳转按钮 | — |
+| 全部成功 | `解压完成 · 3 个` | `位置：下载/` |
+| 有跳过 | `解压完成 2 个，跳过 3 个同名文件` | `位置：下载/` |
+| 需要密码 | `需要密码 · secret.7z` | `加密包需要在 rrzip 里输入密码后再解压` |
+| 全部失败 | `解压失败 · bad.zip` | 失败原因 |
+| 部分失败 | `解压完成 1 个，1 个失败` | 失败原因 |
 
-任务开始时（>1 秒的活）先发一条即时通知「正在解压 X.7z…」，避免长任务期间用户重复点击。这是权宜做法：真正的进度条需要 XPC 任务服务，见 §13 风险 1。
+未做（写进 PRD 但不进本版）：
+- 通知按钮（「在访达中显示」）：需要注册 `UNNotificationAction` 并在主程序处理回调，留 v2.12。
+- 长任务开始时的「正在解压…」即时通知：会在大包解压时刷屏，等 XPC 任务服务一起做（§13 风险 1）。
 
-`JobResult` 同时追加写入 `~/Library/Application Support/rrzip/finder-jobs.log`（JSONL，保留 200 条），设置页「高级 → 访达任务记录」可查看最近 20 条。
+`JobRecord` 追加写入 `~/Library/Application Support/rrzip/finder-jobs.log`（JSONL，保留 200 条）；
+设置页「访达任务记录」在 PR4 读 `FinderJobLog.recent(20)` 展示。
 
 ### 3.6 统一格式识别（编译期共享）
 
@@ -209,7 +217,6 @@ xcrun swiftc ... -module-name ArchiveFinder ... \
 - 删除 `archiveExts` 硬编码，判定全部走 `OpenGate.decide(url)`。
 - 这四份文件已在 QuickLook appex 里编过，只依赖 Foundation，可复用。若编译报 AppKit 依赖，`Archive.swift` 带头拆分，不复制代码。
 - 新增 `FinderMenuBuilder`（`FinderSync/MenuBuilder.swift`），纯函数、无 AppKit：
-
 ```swift
 enum FinderAction: String, CaseIterable, Codable {
     case open, extractHere, extractToFolder
@@ -253,12 +260,11 @@ App Group 在 ad-hoc 签名下不可用（无 Team ID，`com.apple.security.appl
 
 上 Developer ID（模块 E）之后迁到 App Group + `UserDefaults(suiteName:)`，读取接口不变，只换存储层。
 
-> **已知待办（PR2 必须先处理）**：`SevenZip.binary` 用 `Bundle.main.url(forResource:)` 找 7zz。
-> 在 appex 里 `Bundle.main` 是扩展自身，找不到主 app 的 `Contents/Resources/7zz`，`SevenZip.isAvailable` 会返回 false。
-> PR1 的判定层不受影响（`OpenGate` 只读格式元数据，不查引擎）。
-> 但 PR2 一旦让扩展走 `ArchiveService.extract`，就会在 dmg / 加密 7z 上报 `engineUnavailable`。
-> 修法：给 `SevenZip` 加资源根注入口（扩展 init 时指向主 app 的 `Contents/Resources`），
-> 不要在 `Archive.swift` 里判断「自己是不是在扩展里」。
+> **已修（PR2）**：`SevenZip.binary` 原来是 `Bundle.main.url(forResource:)`，在 appex 里 `Bundle.main` 是扩展自身，
+> 找不到主 app 的 `Contents/Resources/7zz`，`isAvailable` 恒为 false。
+> 现在改成候选路径列表：主 bundle 的 Resources + 「自己是 appex 时」上级 app 的 `Contents/Resources`。
+> 快速查看扩展一并修好（它之前读 dmg 也会因为同样的原因失败）。
+> 用 `static let` 缓存解析结果，不再每次解压都 stat 两条路径。
 
 ### 3.9 验收
 
@@ -540,10 +546,10 @@ spctl -a -vv build/rrzip.app     # 必须 accepted / Notarized Developer ID
 | T13 | 把 7z 改名成 `.bin`，访达右键 | 出「解压到此处」，能解开 | ✅ 自动化（PR1，`FinderMenuBuilder` 12 项） |
 | T14 | 选 3 个包 + 2 张图，右键 | 混合态菜单 3 项，标题带数量 | ✅ 自动化（PR1） |
 | T15 | 多选 3 个包点「用 rrzip 打开」 | 只开第一个，主界面浮条提示「另有 2 个」 | 人工 |
-| T16 | 已存在 `包名/` 时右键解压 | 生成 `包名 2`，原目录一个字节不动 | 自动化（策略函数）+ 人工 |
-| T17 | 加密 7z 右键解压 | 通知「需要密码」，**不产生空目录** | 自动化（`needsPassword` 分支）+ 人工 |
-| T18 | 右键解压 1.2 GB 包 | 开始有「正在…」，完成有通知 +「在访达中显示」 | 人工 |
-| T19 | 关闭通知权限后右键解压 | 任务正常完成，设置页显示「未授权」+ 请求按钮 | 人工 |
+| T16 | 已存在 `包名/` 时右键解压 | 生成 `包名 2`，原目录一个字节不动 | ✅ 自动化（PR2 端到端：解两次，原 `说明.txt` 内容仍是 ADMIN） |
+| T17 | 加密 7z 右键解压 | 通知「需要密码」，**不产生空目录** | ✅ 自动化（PR2） |
+| T18 | 右键解压 1.2 GB 包 | 完成后有通知，标题带数量与落点 | ⬜ 实机（通知按钮留 v2.12） |
+| T19 | 关闭通知权限后右键解压 | 任务正常完成，设置页显示「未授权」+ 请求按钮 | ⬜ 实机（设置页状态在 PR4） |
 | T20 | 完整模式拖窄到 990 | 自动切简化（此前不可能） | ✅ 断言通过（`autoCollapseWidth`≈998）· 实机待拖 |
 | T21 | 简化模式拖宽到 1090 | 自动切完整，窗口不被放大 | ✅ 断言通过（≈1078）· 实机待拖 |
 | T22 | 手动展开后 5 分钟内拖宽窄 | 不自动切 | ✅ 断言通过（冷却） |
@@ -556,7 +562,9 @@ spctl -a -vv build/rrzip.app     # 必须 accepted / Notarized Developer ID
 | T3/T4 | 承接：简化→完整→简化 | 目录、选中、滚动位置全保留 | 人工（v2.8.0 遗留） |
 | T8 | 承接：批量 4 包对照单包 | 条目数一致，加密包标记跳过 | 人工（遗留） |
 
-自动化落点：`Tests/main.swift`。PR1 已加 **19 项**（70 → 89），PR2/PR3 再补 8–10 项，收尾目标 **≥ 92**。
+自动化落点：`Tests/main.swift`。进度：PR1 +19（70→89）、PR3 +6（89→95）、PR2 +27（95→**122**）。
+其中 PR2 的 7 项是端到端——真的解压两次，验证已存在的 `说明.txt` 内容仍是 `ADMIN`、跳过数 = 4。
+收尾目标 ≥ 92 已提前达成，剩余给 PR4/PR5 留余量。
 
 ---
 
@@ -591,7 +599,7 @@ spctl -a -vv build/rrzip.app     # 必须 accepted / Notarized Developer ID
 | 批次 | 分支 / PR | 内容 | 依赖 | 状态 |
 |---|---|---|---|---|
 | 1 | `feat/finder-menu-core` | `FinderMenuBuilder` + `OpenGate` 编入扩展 + 6 组矩阵测试 + 模块 C 主入口收口 | — | 🔄 代码完成（测试 70→89），待 PR |
-| 2 | `feat/finder-exec` | `FinderJob` + 防覆盖策略 + `ArchiveService` 冲突参数 + 通知 + 日志 | 1 | ⬜ |
+| 2 | `feat/finder-exec` | `FinderJob` + 防覆盖策略 + `ArchiveService` 冲突参数 + 通知 + 日志 | 1 | 🔄 代码完成（测试 95→122），待 PR |
 | 3 | `fix/mode-autoresize` | 模块 B：minSize 解耦、阈值从 token 推导、100ms 防抖、文案与 DESIGN 同步 | — | 🔄 代码完成（测试 89→95），待 PR |
 | 4 | `feat/settings-finder` | 模块 D：Finder 分页重做、共享 `finder.json`、通知权限 | 1、2 | ⬜ |
 | 5 | `chore/release-ready` | 模块 E：签名 POC、`notarize.sh`、CI 补强、文档清账 | 1–4 | ⬜ |
@@ -623,7 +631,7 @@ spctl -a -vv build/rrzip.app     # 必须 accepted / Notarized Developer ID
 v2.11.0 可以发布，当且仅当：
 
 1. §2.1 / §2.2 的 P0、P1 项全部关闭，P2 项有明确去向（做或写明推迟理由）。
-2. §9 的 T13–T28 全绿，其中自动化 ≥ 22 项，测试总数 ≥ 92。
+2. §9 的 T13–T28 全绿，其中自动化 ≥ 22 项（当前 122 项全通过），测试总数 ≥ 92。
 3. 承接项 T3/T4、T8、T12 有实机记录（截图或录屏，不留「逻辑上应该」）。
 4. 一次完整走查：找一台没装过 rrzip 的机器，只给「右键解压这 3 个包」一句指令，不丢文件、不需要看文档。
 5. 文档四件套（README / RELEASE_NOTES / DESIGN / 本 PRD）与代码状态一致。
