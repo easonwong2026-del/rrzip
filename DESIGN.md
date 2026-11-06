@@ -172,6 +172,7 @@
 | `HoverCard` | 280pt 宽，材质底 + 0.5pt 描边，1 秒延迟，移开即消 |
 | `BatchSheet` | 主按钮最右，分段控件与主按钮同 tint，底部操作区带分隔线 |
 | `SettingsWindow` | 560×600，TabView 五个分页，`Form(.grouped)`；跟随主窗口外观；不放品牌色，不堆开关墙 |
+| `HomeView` | 内容最大宽 860 居中；入口卡 62pt（主操作品牌紫，次操作 3.5% 底）；最近行 30pt，失效置灰；快速压缩虚线区 108pt |
 
 ---
 
@@ -202,7 +203,7 @@
 1. 截图：列表 / 图标 / 分栏 × 浅色深色 + 空状态 + 选中态，确认**无斑马纹、无溢出、无贴边**。
 2. 表头与数据列对齐；窗口在默认与最小宽度下都不裁切。
 3. 8000 条目包：打开、目录树、搜索平铺列表正常。
-4. `./scripts/test.sh` 51 项通过；`-strict-concurrency=complete` typecheck 通过。
+4. `./scripts/test.sh` 56 项通过；`-strict-concurrency=complete` typecheck 通过。
 5. 新增颜色 / 字号 / 间距已写进 token 和本文件，否则退回。
 
 ---

@@ -350,7 +350,7 @@ struct ContentView: View {
             Hairline()
 
             if model.current == nil {
-                emptyState
+                HomeView(model: model)
             } else if model.isCompactMode {
                 compactWorkspace
             } else {
@@ -1406,72 +1406,6 @@ struct ContentView: View {
             try? FileManager.default.removeItem(at: destination)
             try? FileManager.default.copyItem(at: url, to: destination)
         }
-    }
-
-    // MARK: 空状态
-
-    private var emptyState: some View {
-        VStack(spacing: 0) {
-            Spacer()
-
-            VStack(spacing: 16) {
-                ZStack {
-                    Circle()
-                        .fill(LinearGradient(colors: [Palette.brand.opacity(0.18), Palette.brand.opacity(0.04)],
-                                             startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: 82, height: 82)
-                    Image(systemName: "shippingbox")
-                        .font(.system(size: 33, weight: .light))
-                        .foregroundStyle(Palette.brand)
-                }
-
-                VStack(spacing: 5) {
-                    Text("把压缩包拖进来")
-                        .font(TypeScale.display)
-                    Text("也可以 ⌘O 选择文件，或从访达右键「用 rrzip 打开」")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                }
-
-                HStack(spacing: 5) {
-                    ForEach(["ZIP", "7Z", "RAR", "TAR", "GZ", "ISO", "DMG"], id: \.self) { name in
-                        Text(name)
-                            .font(.system(size: 9, weight: .semibold))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2.5)
-                            .background(Color.primary.opacity(0.05),
-                                        in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Button("选择压缩包…") { model.openWithPanel() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Palette.brand)
-                    .controlSize(.large)
-                    .padding(.top, 2)
-
-                Text("加密包会提示输入密码")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 38)
-            .padding(.vertical, 28)
-            .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.primary.opacity(0.02))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(Palette.brand.opacity(0.16),
-                                  style: StrokeStyle(lineWidth: 1.5, dash: [7, 5]))
-            )
-            .frame(maxWidth: 420)
-
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(Rectangle())
     }
 
     // MARK: 暂存区

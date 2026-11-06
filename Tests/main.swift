@@ -320,6 +320,34 @@ MainActor.assumeIsolated {
     expect(model.workspaceMode == .compact, "再切回简化")
 }
 
+// 14. 首页：最近打开与快速压缩的命名
+print("首页")
+MainActor.assumeIsolated {
+    UserDefaults.standard.removeObject(forKey: "rrzip.recentArchives")
+    let model = ArchiveModel()
+    model.recordRecent(URL(fileURLWithPath: "/tmp/a.zip"))
+    model.recordRecent(URL(fileURLWithPath: "/tmp/b.7z"))
+    model.recordRecent(URL(fileURLWithPath: "/tmp/a.zip"))
+    expect(model.recentArchives.count == 2, "同一个包不重复记", "实际 \(model.recentArchives.count)")
+    expect(model.recentArchives.first?.path == "/tmp/a.zip", "最近打开的排最前")
+    model.clearRecentArchives()
+    expect(model.recentArchives.isEmpty, "可以清空")
+}
+
+do {
+    let folder = fixtures.appendingPathComponent("quick", isDirectory: true)
+    try? FileManager.default.removeItem(at: folder)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let first = folder.appendingPathComponent("demo.zip")
+    try "x".write(to: first, atomically: true, encoding: .utf8)
+    expect(ArchiveModel.uniqueOutput(first).lastPathComponent == "demo 2.zip",
+           "重名自动加序号", ArchiveModel.uniqueOutput(first).lastPathComponent)
+    let fresh = folder.appendingPathComponent("fresh.zip")
+    expect(ArchiveModel.uniqueOutput(fresh).lastPathComponent == "fresh.zip", "不重名用原名")
+} catch {
+    expect(false, "快速压缩命名", "\(error)")
+}
+
 print("")
 print(failures == 0 ? "全部通过（\(checks) 项）" : "失败 \(failures)/\(checks)")
 exit(failures == 0 ? 0 : 1)

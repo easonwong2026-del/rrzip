@@ -140,6 +140,16 @@ struct StashItem: Identifiable, Hashable {
     var displaySize: String { ByteFormatter.string(size) }
 }
 
+/// 首页「最近打开」的一条。非沙盒应用按路径记就够，失效时置灰提示。
+struct RecentArchive: Identifiable, Codable, Hashable {
+    var id: String { path }
+    let path: String
+    let name: String
+    let openedAt: Date
+    var url: URL { URL(fileURLWithPath: path) }
+    var exists: Bool { FileManager.default.fileExists(atPath: path) }
+}
+
 struct CreateOptions {
     var format: CreateFormat = .zip
     var password: String = ""
@@ -199,6 +209,9 @@ final class ArchiveModel: ObservableObject {
     /// 暂存区：跨层、跨包攒起来，最后一次性导出
     @Published private(set) var stash: [StashItem] = []
     @Published var isStashVisible = false
+
+    /// 首页「最近打开」，最多 8 条
+    @Published private(set) var recentArchives: [RecentArchive] = []
 
     var current: Frame? { trail.last }
     /// 当前层是不是嵌套包里的临时副本
@@ -531,12 +544,12 @@ final class ArchiveModel: ObservableObject {
         if let keyword = UserDefaults.standard.string(forKey: "rrzip.search") {
             searchText = keyword
         }
+        loadRecentArchives()
     }
     /// 预览/导出缓存：key = 归档路径 + 修改时间 + 条目路径
     private var payloadCache: [String: URL] = [:]
 
     // MARK: - 工作模式
-
     /// 用户主动展开 / 收起：记下时刻，冷却期内不再自动切换
     func toggleWorkspaceMode() {
         setWorkspaceMode(workspaceMode == .compact ? .full : .compact, manual: true)
@@ -555,6 +568,92 @@ final class ArchiveModel: ObservableObject {
         if width < 760, workspaceMode == .full { return .compact }
         if width > 900, workspaceMode == .compact { return .full }
         return nil
+    }
+
+    // MARK: - 最近打开（首页）
+
+    private static let recentKey = "rrzip.recentArchives"
+
+    private func loadRecentArchives() {
+        guard let data = UserDefaults.standard.data(forKey: Self.recentKey),
+              let list = try? JSONDecoder().decode([RecentArchive].self, from: data)
+        else { return }
+        recentArchives = list
+    }
+
+    /// 打开成功后记一笔；同一个包只保留最新一条
+    func recordRecent(_ url: URL) {
+        var list = recentArchives.filter { $0.path != url.path }
+        list.insert(RecentArchive(path: url.path, name: url.lastPathComponent, openedAt: Date()), at: 0)
+        recentArchives = Array(list.prefix(8))
+        saveRecentArchives()
+    }
+
+    func removeRecent(_ item: RecentArchive) {
+        recentArchives.removeAll { $0.path == item.path }
+        saveRecentArchives()
+    }
+
+    func clearRecentArchives() {
+        recentArchives = []
+        saveRecentArchives()
+    }
+
+    private func saveRecentArchives() {
+        guard let data = try? JSONEncoder().encode(recentArchives) else { return }
+        UserDefaults.standard.set(data, forKey: Self.recentKey)
+    }
+
+    // MARK: - 快速压缩（首页）
+
+    /// 首页拖入：不弹选项，直接在同目录生成 ZIP。重名自动加序号。
+    func quickCompress(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let folder = urls[0].deletingLastPathComponent()
+        let base: String
+        if urls.count == 1 {
+            let name = urls[0].deletingPathExtension().lastPathComponent
+            base = name.isEmpty ? "归档" : name
+        } else {
+            let name = folder.lastPathComponent
+            base = name.isEmpty ? "归档" : name
+        }
+        let output = Self.uniqueOutput(folder.appendingPathComponent(base)
+            .appendingPathExtension("zip"))
+        isLoading = true
+        status = "正在压缩 \(urls.count) 项…"
+        Task {
+            do {
+                let items = urls
+                try await Task.detached(priority: .userInitiated) {
+                    try Self.writeArchive(at: output, from: items, format: .zip,
+                                           password: "", volume: nil)
+                }.value
+                isLoading = false
+                status = "已生成 \(output.lastPathComponent)"
+                NSWorkspace.shared.activateFileViewerSelecting([output])
+            } catch {
+                isLoading = false
+                status = "压缩失败"
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// 目标已存在时找下一个可用名字，绝不覆盖
+    nonisolated static func uniqueOutput(_ url: URL) -> URL {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return url }
+        let folder = url.deletingLastPathComponent()
+        let base = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension
+        var index = 2
+        while true {
+            let candidate = folder.appendingPathComponent("\(base) \(index)")
+                .appendingPathExtension(ext)
+            if !fm.fileExists(atPath: candidate.path) { return candidate }
+            index += 1
+        }
     }
 
     // MARK: - 工作目录
@@ -758,7 +857,12 @@ final class ArchiveModel: ObservableObject {
             archiveSize: attrs?[.size] as? Int64,
             archiveModified: attrs?[.modificationDate] as? Date
         )
-        if resetTrail { trail = [frame] } else { trail.append(frame) }
+        if resetTrail {
+            trail = [frame]
+            recordRecent(url)
+        } else {
+            trail.append(frame)
+        }
         selection = []
         isLoading = false
         if let prefix = restorePrefix, !prefix.isEmpty {
