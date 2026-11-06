@@ -649,6 +649,30 @@ expect(CompressLevel.store.argument == 0, "存储 = -mx=0")
 expect(CompressLevel.normal.argument == 5, "标准 = -mx=5")
 expect(CompressLevel.max.argument == 9, "极限 = -mx=9")
 
+// 7zz 的 -bsp1 进度：回调必须真的来，且落在 0–1
+print("进度回调")
+do {
+    let dir = fixtures.appendingPathComponent("progress-src", isDirectory: true)
+    try? FileManager.default.removeItem(at: dir)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let blob = Data(count: 8 * 1024 * 1024)
+    try blob.write(to: dir.appendingPathComponent("big.bin"))
+
+    let out = fixtures.appendingPathComponent("progress.7z")
+    try? FileManager.default.removeItem(at: out)
+
+    final class Box: @unchecked Sendable { var values: [Double] = [] }
+    let box = Box()
+    try SevenZip.create(at: out, from: [dir], format: "7z", password: nil,
+                        volume: nil, level: 9, onProgress: { box.values.append($0) })
+    expect(!box.values.isEmpty, "收到进度回调", "\(box.values.count) 次")
+    expect(box.values.allSatisfy { $0 >= 0 && $0 <= 1 }, "进度在 0–1 之间",
+           "\(box.values.min() ?? -1)…\(box.values.max() ?? -1)")
+    // 8 MB 零填充压得太快，7zz 可能只来得及刷一个 0%，不追最后值
+} catch {
+    expect(false, "进度回调", "\(error)")
+}
+
 // 压缩产物的包内路径：不能带绝对路径前缀
 print("压缩路径")
 do {

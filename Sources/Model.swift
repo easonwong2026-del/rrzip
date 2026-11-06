@@ -174,6 +174,14 @@ struct RecentArchive: Identifiable, Codable, Hashable {
     var exists: Bool { FileManager.default.fileExists(atPath: path) }
 }
 
+/// 一次长任务的对外状态。fraction 为 nil 表示拿不到真实百分比（tar 就没有），
+/// 界面显示不确定进度，不编数字。
+struct TaskProgress {
+    var title: String
+    var detail: String
+    var fraction: Double?
+}
+
 /// 选完文件、等 sheet 确认参数的那一批
 struct PendingCreate: Identifiable {
     let id = UUID()
@@ -1328,6 +1336,13 @@ final class ArchiveModel: ObservableObject {
     @Published var passwordRequest: PasswordRequest?
     /// 非 nil 时主界面弹「创建压缩包」sheet
     @Published var pendingCreate: PendingCreate?
+    /// 非 nil 时主界面显示进度卡片
+    @Published var task: TaskProgress?
+
+    func cancelTask() {
+        TaskRegistry.cancel()
+        status = "已取消"
+    }
     private var passwordContinuation: CheckedContinuation<String?, Never>?
 
     private func askPassword(for archive: URL, wrong: Bool) async -> String? {
@@ -1446,17 +1461,26 @@ final class ArchiveModel: ObservableObject {
     private func extract(entries paths: [String], from frame: Frame, to destination: URL) {
         isLoading = true
         status = "正在解压…"
+        task = TaskProgress(title: "正在解压", detail: frame.archive.lastPathComponent, fraction: nil)
         Task {
+            defer { task = nil }
             var passphrase = passwords[frame.archive.path]
             for attempt in 0..<2 {
                 do {
                     let currentPassphrase = passphrase
+                    let onProgress: @Sendable (Double) -> Void = { [weak self] value in
+                        Task { @MainActor in self?.task?.fraction = value }
+                    }
                     try await Task.detached {
                         switch frame.engine {
                         case .libarchive:
-                            try Tar.extract(frame.archive, entries: paths, to: destination, passphrase: currentPassphrase)
+                            // tar 没有进度输出，界面保持不确定态
+                            try Tar.extract(frame.archive, entries: paths, to: destination,
+                                            passphrase: currentPassphrase)
                         case .sevenZip:
-                            try SevenZip.extract(frame.archive, entries: paths, to: destination, password: currentPassphrase)
+                            try SevenZip.extract(frame.archive, entries: paths, to: destination,
+                                                 password: currentPassphrase,
+                                                 onProgress: onProgress)
                         }
                     }.value
                     status = "已解压到 \(destination.lastPathComponent)"
@@ -1541,7 +1565,8 @@ final class ArchiveModel: ObservableObject {
         format: CreateFormat,
         password: String,
         volume: String?,
-        level: Int = 5
+        level: Int = 5,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) throws {
         let fm = FileManager.default
         let folder = output.deletingLastPathComponent()
@@ -1568,7 +1593,8 @@ final class ArchiveModel: ObservableObject {
                     format: format == .sevenZip ? "7z" : format.ext,
                     password: password.isEmpty ? nil : password,
                     volume: volume,
-                    level: level
+                    level: level,
+                    onProgress: onProgress
                 )
             } else {
                 try Tar.create(at: staged, from: items, format: format.ext)
@@ -1642,15 +1668,21 @@ final class ArchiveModel: ObservableObject {
 
         isLoading = true
         status = "正在压缩…"
+        task = TaskProgress(title: "正在压缩", detail: output.lastPathComponent, fraction: nil)
 
         Task {
+            defer { task = nil }
             do {
+                let onProgress: @Sendable (Double) -> Void = { [weak self] value in
+                    Task { @MainActor in self?.task?.fraction = value }
+                }
                 try await Task.detached {
                     // 先写临时文件，成功后才替换同名旧包：失败时原文件不动
                     try Self.writeArchive(
                         at: output, from: items, format: options.format,
                         password: password, volume: volume,
-                        level: options.level.argument
+                        level: options.level.argument,
+                        onProgress: onProgress
                     )
                 }.value
                 status = "已创建 \(output.lastPathComponent)"

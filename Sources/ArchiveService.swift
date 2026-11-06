@@ -54,7 +54,8 @@ enum ArchiveService {
     /// 右键动作没有进度与确认，静默覆盖等于让用户丢文件。
     static func extract(_ url: URL, entries: [String], to destination: URL,
                         password: String?,
-                        onConflict: ArchiveConflictPolicy = .overwrite) throws {
+                        onConflict: ArchiveConflictPolicy = .overwrite,
+                        onProgress: (@Sendable (Double) -> Void)? = nil) throws {
         var lastError: Error?
         for engine in engineOrder(for: url) {
             do {
@@ -64,7 +65,8 @@ enum ArchiveService {
                                      passphrase: password, keepExisting: onConflict == .skip)
                 case .sevenZip:
                     try SevenZip.extract(url, entries: entries, to: destination,
-                                         password: password, skipExisting: onConflict == .skip)
+                                         password: password, skipExisting: onConflict == .skip,
+                                         onProgress: onProgress)
                 }
                 return
             } catch ArchiveError.needsPassword {
