@@ -1254,7 +1254,7 @@ final class ArchiveModel: ObservableObject {
     private var passwordContinuation: CheckedContinuation<String?, Never>?
 
     private func askPassword(for archive: URL, wrong: Bool) async -> String? {
-        await withCheckedContinuation { continuation in
+        return await withCheckedContinuation { continuation in
             passwordContinuation = continuation
             passwordRequest = PasswordRequest(archive: archive, isRetry: wrong)
         }

@@ -777,24 +777,28 @@ struct ContentView: View {
         }
         // 加密包的密码询问。用 SwiftUI alert 而不是 NSAlert.runModal：
         // 后者在 async 上下文里会跑嵌套 runloop，偶尔根本不显示。
-        .alert(model.passwordRequest?.isRetry == true ? "密码不正确" : "该压缩包已加密",
-               isPresented: Binding(
-                get: { model.passwordRequest != nil },
-                set: { if !$0 { model.submitPassword(nil) } }
-               )) {
-            TextField("密码", text: $passwordInput)
-            Button("解锁") {
-                let value = passwordInput
-                passwordInput = ""
-                model.submitPassword(value.isEmpty ? nil : value)
+        // 挂到 background 的隐藏视图上：同一个视图链上两个 .alert 只会生效一个，
+        // 「出错了」那个会把这个吃掉。
+        .background(
+            Color.clear.alert(model.passwordRequest?.isRetry == true ? "密码不正确" : "该压缩包已加密",
+                              isPresented: Binding(
+                                get: { model.passwordRequest != nil },
+                                set: { if !$0 { model.submitPassword(nil) } }
+                              )) {
+                TextField("密码", text: $passwordInput)
+                Button("解锁") {
+                    let value = passwordInput
+                    passwordInput = ""
+                    model.submitPassword(value.isEmpty ? nil : value)
+                }
+                Button("取消", role: .cancel) {
+                    passwordInput = ""
+                    model.submitPassword(nil)
+                }
+            } message: {
+                Text("\(model.passwordRequest?.archive.lastPathComponent ?? "")\n输入密码后即可浏览与解压。")
             }
-            Button("取消", role: .cancel) {
-                passwordInput = ""
-                model.submitPassword(nil)
-            }
-        } message: {
-            Text("\(model.passwordRequest?.archive.lastPathComponent ?? "")\n输入密码后即可浏览与解压。")
-        }
+        )
     }
 
     // MARK: 一次性提示
