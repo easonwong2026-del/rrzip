@@ -34,6 +34,13 @@ jobs:
             done
             exit "$status"
           fi
+          # 防「测试被悄悄删掉」：只增不减，数量掉了就红
+          count=$(grep -o '全部通过（[0-9]* 项）' /tmp/test.log | grep -o '[0-9]*' | head -1)
+          echo "测试通过 $count 项"
+          if [ "${count:-0}" -lt 120 ]; then
+            echo "::error::测试数 $count 低于基线 120（v2.11.0 应为 124）"
+            exit 1
+          fi
 
       - name: 并发严格检查
         run: |
@@ -53,10 +60,22 @@ jobs:
 
       - name: 校验产物
         run: |
-          test -x build/rrzip.app/Contents/MacOS/rrzip
-          test -x build/rrzip.app/Contents/Resources/7zz
-          test -d build/rrzip.app/Contents/PlugIns/ArchivePreview.appex
-          codesign --verify --deep --strict build/rrzip.app
+          set -e
+          APP=build/rrzip.app
+          test -x "$APP/Contents/MacOS/rrzip"
+          test -x "$APP/Contents/Resources/7zz"
+          test -d "$APP/Contents/PlugIns/ArchivePreview.appex"
+          # 访达扩展必须一起验：v2.10.0 只验了快速查看，扩展构建坏了 CI 也不会红
+          test -d "$APP/Contents/PlugIns/ArchiveFinder.appex"
+          test -x "$APP/Contents/PlugIns/ArchiveFinder.appex/Contents/MacOS/ArchiveFinder"
+          plutil -lint "$APP/Contents/Info.plist"
+          plutil -lint "$APP/Contents/PlugIns/ArchivePreview.appex/Contents/Info.plist"
+          plutil -lint "$APP/Contents/PlugIns/ArchiveFinder.appex/Contents/Info.plist"
+          # 扩展版本号必须跟着主 app 走
+          main=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+          finder=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/PlugIns/ArchiveFinder.appex/Contents/Info.plist")
+          [ "$main" = "$finder" ] || { echo "::error::访达扩展版本 $finder 与主 app $main 不一致"; exit 1; }
+          codesign --verify --deep --strict "$APP"
 
       - name: 上传 app
         uses: actions/upload-artifact@v4

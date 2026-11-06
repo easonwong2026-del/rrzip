@@ -64,7 +64,7 @@ v2.8.0–v2.10.0 四批改造把架构立住了：双模式共用 `ArchiveModel`
 | N2 | 右键解压加密包：`-y` 无法回答密码，7zz 在无 tty 下失败，进程退出码无人读 | `FinderSync.swift:62,103` | P0：静默失败 · ✅ PR2 已改为解压前 `list` 预判，直接报「需要密码」 |
 | N3 | 跨目录多选压缩：输出目录取 `selected.first` 的父目录，其余文件被搬进第一个文件所在目录 | `FinderSync.swift:67-75` | P1：落点不可预期 |
 | N4 | 扩展把整个 `/` 挂进 `directoryURLs` | `FinderSync.swift:32` | P1：每个目录都问菜单，含外置卷/网络卷 |
-| N5 | CI 产物校验只验 `ArchivePreview.appex`，没验 `ArchiveFinder.appex` | `.github/workflows/ci.yml` 校验产物步骤 | P1：扩展构建坏了 CI 不红 |
+| N5 | CI 产物校验只验 `ArchivePreview.appex`，没验 `ArchiveFinder.appex` | `.github/workflows/ci.yml` 校验产物步骤 | P1：扩展构建坏了 CI 不红 · ✅ PR5 已补两个 appex + plist + 版本一致 + 测试数下限 |
 | N6 | 完整模式窗口内容侧 `.frame(minWidth: 360)`，三栏在 1000 宽时已开始挤压 | `ContentView.swift:434-440` | P2：与模块 B 阈值确定相关 |
 
 ### 2.3 承接 v2.8.0 未闭环项
@@ -456,6 +456,11 @@ T19、T26。另加 2 项自动化：设置写盘读回、临时文件不残留�
 
 ## 7. 模块 E：发布就绪（P1）
 
+> **E1 已完成（2026-11-06）**：`scripts/poc-sandbox.sh`、`scripts/notarize.sh`、CI 补强
+> （校验两个 appex + `plutil -lint` + 扩展版本一致 + 测试数下限 120）、版本号 2.11.0 / build 21、
+> README 与 RELEASE_NOTES 清账。
+> **E2 仍阻塞**：需要 Apple Developer 账号，见 §13 风险 1 与 §14 的发布口径。
+
 ### 7.1 签名分级
 
 | 级别 | 用途 | 前置 | 现状 |
@@ -612,7 +617,7 @@ spctl -a -vv build/rrzip.app     # 必须 accepted / Notarized Developer ID
 | 2 | `feat/finder-exec` | `FinderJob` + 防覆盖策略 + `ArchiveService` 冲突参数 + 通知 + 日志 | 1 | 🔄 代码完成（测试 95→122），待 PR |
 | 3 | `fix/mode-autoresize` | 模块 B：minSize 解耦、阈值从 token 推导、100ms 防抖、文案与 DESIGN 同步 | — | 🔄 代码完成（测试 89→95），待 PR |
 | 4 | `feat/settings-finder` | 模块 D：访达分页重做、共享 `finder.json`、通知权限、二级菜单 | 1、2 | 🔄 代码完成（测试 122→124），待 PR |
-| 5a | `chore/release-ready` | **E1**：签名 POC 脚本 + `notarize.sh` 就绪、CI 补强、文档清账 | 1–4 | ⬜ |
+| 5a | `chore/release-ready` | **E1**：签名 POC 脚本 + `notarize.sh` 就绪、CI 补强、版本号、文档清账 | 1–4 | 🔄 代码完成（测试 124），待 PR |
 | 5b | — | **E2**：证书 POC → Developer ID 签名 → 公证 → 分发说明（**需要 Apple Developer 账号；无证书时本版以 ad-hoc 内测版发布**） | 5a + 证书 | ⬜ 阻塞 |
 | 6 | `feat/quality-polish` | 模块 F：不含外层压缩（先测后改）、列显示管理、设计 token 审计（§8.3） | 3 | ⬜ 余量 |
 
