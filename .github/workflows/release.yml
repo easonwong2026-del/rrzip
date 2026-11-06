@@ -35,6 +35,13 @@ jobs:
           echo "asset=build/${NAME}" >> "$GITHUB_OUTPUT"
           echo "sha=build/${NAME}.sha256" >> "$GITHUB_OUTPUT"
 
+      # 只取当前版本那段。以前直接 --notes-file RELEASE_NOTES.md，
+      # 把 2.12.0 到 2.0.0 的全部历史都贴进 Release（9000 字）。
+      - name: 取发布说明
+        run: |
+          ./scripts/release-notes.sh "$GITHUB_REF_NAME" > build/notes.md
+          cat build/notes.md
+
       - name: 发布
         env:
           GH_TOKEN: ${{ github.token }}
@@ -43,5 +50,5 @@ jobs:
             "${{ steps.pack.outputs.asset }}" \
             "${{ steps.pack.outputs.sha }}" \
             --title "rrzip $GITHUB_REF_NAME" \
-            --notes-file RELEASE_NOTES.md \
+            --notes-file build/notes.md \
             --verify-tag
