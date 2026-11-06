@@ -318,10 +318,13 @@ MainActor.assumeIsolated {
     expect(model.autoMode(forWidth: collapse - 10) == nil, "简化模式下更窄也不再重复切")
 
     // 阈值本身要自洽：这是上一版的 bug——判据低于窗口最小宽度，分支永远走不到
-    expect(collapse > Layout.fullModeMinWidth, "收起阈值高于三栏几何下限")
+    expect(collapse >= Layout.fullModeMinWidth, "收起阈值不低于三栏几何下限",
+           "collapse=\(collapse)")
     expect(expand > collapse, "展开阈值高于收起阈值（留滞回）")
     expect(collapse <= 1020, "收起阈值不超过旧版窗口最小宽度，否则又会不可达",
            "collapse=\(collapse)")
+    // 体感锁：阈值一旦被推到用户够不到的宽度，自动切换就等于不存在
+    expect(expand < 950, "展开阈值要落在 800 多，不能推高", "expand=\(expand)")
 
     // 完整模式被拖窄必须能收起（旧版这条永远返回 nil）
     model.setWorkspaceMode(.full, manual: false)
