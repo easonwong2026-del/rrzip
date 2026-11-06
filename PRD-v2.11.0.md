@@ -459,6 +459,10 @@ T26、T19。
 
 ad-hoc 的两个硬限制必须写进 README，别再让用户以为是 bug：扩展注册偶发失效、Gatekeeper 首次打开需右键。
 
+**POC 结论（2026-11-06，`scripts/poc-sandbox.sh`）**：脚本已就位并能跑出三种组合，但 ad-hoc 签名下沙盒进程**连 hello 都起不来**（exit 133 / SIGTRAP）——
+不是「沙盒拒绝了 spawn」，是「沙盒根本没启用」。也就是说「沙盒扩展能否执行 7zz」在当前环境**无法验证**，
+既不能判可行、也不能判不可行。结论必须等 Developer ID。这直接改变了模块 E 的排期，见 §13 风险 1 与 §12 的 E1 / E2 拆分。
+
 ### 7.2 `scripts/notarize.sh`
 
 ```bash
@@ -602,7 +606,8 @@ spctl -a -vv build/rrzip.app     # 必须 accepted / Notarized Developer ID
 | 2 | `feat/finder-exec` | `FinderJob` + 防覆盖策略 + `ArchiveService` 冲突参数 + 通知 + 日志 | 1 | 🔄 代码完成（测试 95→122），待 PR |
 | 3 | `fix/mode-autoresize` | 模块 B：minSize 解耦、阈值从 token 推导、100ms 防抖、文案与 DESIGN 同步 | — | 🔄 代码完成（测试 89→95），待 PR |
 | 4 | `feat/settings-finder` | 模块 D：Finder 分页重做、共享 `finder.json`、通知权限 | 1、2 | ⬜ |
-| 5 | `chore/release-ready` | 模块 E：签名 POC、`notarize.sh`、CI 补强、文档清账 | 1–4 | ⬜ |
+| 5a | `chore/release-ready` | **E1**：签名 POC 脚本 + `notarize.sh` 就绪、CI 补强、文档清账 | 1–4 | ⬜ |
+| 5b | — | **E2**：证书 POC → Developer ID 签名 → 公证 → 分发说明（**需要 Apple Developer 账号；无证书时本版以 ad-hoc 内测版发布**） | 5a + 证书 | ⬜ 阻塞 |
 | 6 | `feat/quality-polish` | 模块 F：不含外层压缩（先测后改）、列显示管理、设计 token 审计（§8.3） | 3 | ⬜ 余量 |
 
 1、2 必须串行（判定层先立，执行层才能测）；3 可并行；4 依赖 2 的 `finder.json`；5 收尾；6 有空才做。
@@ -615,7 +620,7 @@ spctl -a -vv build/rrzip.app     # 必须 accepted / Notarized Developer ID
 
 | # | 风险 | 影响 | 对策 | 状态 |
 |---|---|---|---|---|
-| 1 | **沙盒化后扩展能否执行包内 7zz** | 公证的前置条件直接卡死 | 第一批就做 POC：Developer ID 签名 + `app-sandbox` entitlement 的扩展跑一次「解压到此处」。可行 → 按 §7 走；不可行 → 扩展只发命令，实际执行回到主 app（XPC + URL scheme），模块 A 的执行层提前拆分 | ⬜ **最高优先验证** |
+| 1 | **沙盒化后扩展能否执行包内 7zz** | 公证的前置条件卡在这里 | POC 脚本已就位（`scripts/poc-sandbox.sh`，三种组合 + hello 诊断），但 **ad-hoc 签名开不了沙盒**（exit 133），必须拿到 Developer ID 才能验。本版按「不阻塞」处理：E1 先做完，E2 等证书 | 🔄 方法就绪，等证书 |
 | 2 | 动态菜单在 `menu(for:)` 里读选择有延迟 | 菜单与实际选择不同步 | 只用同步 API，不缓存、不异步 | ⬜ |
 | 3 | 通知权限被拒 | 反馈缺失回到原点 | 设置页显式状态 + 主 app 首次启动请求；任务日志兜底 | ⬜ |
 | 4 | 阈值从 760/900 改到 1000/1080 | 老用户感觉「更容易被切模式」 | 保留 5 分钟冷却 + 开关；文案不写死数字 | ⬜ |
@@ -637,6 +642,9 @@ v2.11.0 可以发布，当且仅当：
 5. 文档四件套（README / RELEASE_NOTES / DESIGN / 本 PRD）与代码状态一致。
 
 第 4 条是这版真正的主验收：**前三个版本证明了 rrzip 能打开很多格式；这一版要证明它不会弄坏用户的东西。**
+
+**无 Developer ID 时的发布口径**：以 ad-hoc 内测版发布，README 明确写「未签名未公证，首次打开需右键」，
+不把「正式发布能力」算作已完成。拿到证书后补 E2（§12-5b），不改代码——只改签名与分发流程。
 
 ---
 
