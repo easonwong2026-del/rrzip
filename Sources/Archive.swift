@@ -94,9 +94,12 @@ enum Tar {
         process.standardOutput = out
         process.standardError = errHandle
         try process.run()
+        // 也要注册：2026-11-06 审计发现只有 7zz 注册了，zip/tar 的「取消」点了没用
+        TaskRegistry.current = process
 
         let outData = out.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        TaskRegistry.current = nil
         try? errHandle.close()
         let errData = (try? Data(contentsOf: errFile)) ?? Data()
         try? FileManager.default.removeItem(at: errFile)

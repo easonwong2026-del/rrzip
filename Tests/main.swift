@@ -649,6 +649,26 @@ expect(CompressLevel.store.argument == 0, "存储 = -mx=0")
 expect(CompressLevel.normal.argument == 5, "标准 = -mx=5")
 expect(CompressLevel.max.argument == 9, "极限 = -mx=9")
 
+// 访达转交给主程序的两种记录：写进去要能原样读回来，读一次就清掉
+print("访达转交")
+do {
+    let noticeURL = fixtures.appendingPathComponent("pending-notice.json")
+    PendingNotice.write(title: "跳过 3 个", message: "已存在", to: noticeURL)
+    let notice = PendingNotice.take(from: noticeURL)
+    expect(notice?.title == "跳过 3 个", "提示能读回")
+    expect(notice?.message == "已存在", "正文能读回")
+    expect(PendingNotice.take(from: noticeURL) == nil, "读一次就清掉")
+
+    let extractURL = fixtures.appendingPathComponent("pending-extract.json")
+    PendingExtraction.write(archives: [URL(fileURLWithPath: "/tmp/a.7z")],
+                            mode: .newFolder, to: extractURL)
+    let pending = PendingExtraction.read(from: extractURL)
+    expect(pending?.mode == .newFolder, "解压意图能读回")
+    expect(pending?.archives.first?.hasSuffix("a.7z") == true, "包路径能读回")
+    PendingExtraction.clear(extractURL)
+    expect(PendingExtraction.read(from: extractURL) == nil, "清掉后读不到")
+}
+
 // 7zz 的 -bsp1 进度：回调必须真的来，且落在 0–1
 print("进度回调")
 do {

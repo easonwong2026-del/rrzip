@@ -24,20 +24,20 @@ struct PendingNotice: Codable, Sendable {
         SharedPaths.support.appendingPathComponent("pending-notice.json")
     }
 
-    static func write(title: String, message: String) {
+    static func write(title: String, message: String, to url: URL = fileURL) {
         let notice = PendingNotice(title: title, message: message, createdAt: Date())
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(notice) else { return }
-        try? FileManager.default.createDirectory(at: SharedPaths.support,
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                  withIntermediateDirectories: true)
-        try? data.write(to: fileURL, options: .atomic)
+        try? data.write(to: url, options: .atomic)
     }
 
     /// 读一次就清掉，同一条提示不会反复弹
-    static func take() -> PendingNotice? {
-        guard let data = try? Data(contentsOf: fileURL) else { return nil }
-        try? FileManager.default.removeItem(at: fileURL)
+    static func take(from url: URL = fileURL) -> PendingNotice? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        try? FileManager.default.removeItem(at: url)
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601

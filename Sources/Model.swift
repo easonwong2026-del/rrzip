@@ -271,13 +271,13 @@ final class ArchiveModel: ObservableObject {
     @Published var sortKey: SortKey = .name {
         didSet {
             UserDefaults.standard.set(sortKey.rawValue, forKey: "rrzip.sortKey")
-            searchCache = nil
+            listCache = nil
         }
     }
     @Published var sortAscending = true {
         didSet {
             UserDefaults.standard.set(sortAscending, forKey: "rrzip.sortAscending")
-            searchCache = nil
+            listCache = nil
         }
     }
     @Published var appearance: AppearanceMode = .system {
@@ -333,7 +333,9 @@ final class ArchiveModel: ObservableObject {
     }
 
     private var frameCache: FrameCache?
-    private var searchCache: (frameID: UUID, keyword: String, result: [ArchiveEntry])?
+    /// 列表结果缓存。键里带 frame / 前缀 / 排序 / 关键词，
+    /// 任何一项变了就重算——无搜索时也走缓存，否则每次重绘都要重排。
+    private var listCache: (key: String, result: [ArchiveEntry])?
 
     private func cachedFrame() -> FrameCache? {
         guard let frame = current else { return nil }
@@ -369,16 +371,14 @@ final class ArchiveModel: ObservableObject {
     var displayEntries: [ArchiveEntry] {
         guard let frame = current else { return [] }
         let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !keyword.isEmpty else {
-            return sortEntries(cachedFrame()?.childIndex[frame.prefix] ?? [])
-        }
-        if let cached = searchCache, cached.frameID == frame.id, cached.keyword == keyword {
-            return cached.result
-        }
-        let result = sortEntries(frame.entries.filter {
-            $0.path.localizedCaseInsensitiveContains(keyword)
-        })
-        searchCache = (frame.id, keyword, result)
+        let key = "\(frame.id)|\(frame.prefix)|\(sortKey.rawValue)|\(sortAscending)|\(keyword)"
+        if let cached = listCache, cached.key == key { return cached.result }
+
+        let base = keyword.isEmpty
+            ? (cachedFrame()?.childIndex[frame.prefix] ?? [])
+            : frame.entries.filter { $0.path.localizedCaseInsensitiveContains(keyword) }
+        let result = sortEntries(base)
+        listCache = (key, result)
         return result
     }
 
@@ -783,35 +783,11 @@ final class ArchiveModel: ObservableObject {
         }
     }
 
-    /// 目标已存在时找下一个可用名字，绝不覆盖
-    nonisolated static func uniqueOutput(_ url: URL) -> URL {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return url }
-        let folder = url.deletingLastPathComponent()
-        let base = url.deletingPathExtension().lastPathComponent
-        let ext = url.pathExtension
-        var index = 2
-        while true {
-            let candidate = folder.appendingPathComponent("\(base) \(index)")
-                .appendingPathExtension(ext)
-            if !fm.fileExists(atPath: candidate.path) { return candidate }
-            index += 1
-        }
-    }
+    /// 目标已存在时找下一个可用名字，绝不覆盖（实现见 UniquePath）
+    nonisolated static func uniqueOutput(_ url: URL) -> URL { UniquePath.file(url) }
 
     /// 目录版：不拼扩展名
-    nonisolated static func uniqueDirectory(_ url: URL) -> URL {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return url }
-        let parent = url.deletingLastPathComponent()
-        let base = url.lastPathComponent
-        var index = 2
-        while true {
-            let candidate = parent.appendingPathComponent("\(base) \(index)", isDirectory: true)
-            if !fm.fileExists(atPath: candidate.path) { return candidate }
-            index += 1
-        }
-    }
+    nonisolated static func uniqueDirectory(_ url: URL) -> URL { UniquePath.directory(url) }
 
     // MARK: - 工作目录
 

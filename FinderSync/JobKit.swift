@@ -22,19 +22,10 @@ struct PlannedExtraction: Equatable, Sendable {
 
 enum FinderJobPlanner {
 
-    /// 目标目录重名就递增：包名 2、包名 3…
+    /// 目标目录重名就递增：包名 2、包名 3…（实现见 UniquePath）
     /// `avoiding` 用来在同一次多选里预留位置——两个包都叫 a，不能都解到 a/
     static func uniqueDirectory(_ url: URL, avoiding reserved: Set<String> = []) -> URL {
-        let fm = FileManager.default
-        let parent = url.deletingLastPathComponent()
-        let base = url.lastPathComponent
-        var candidate = url
-        var index = 2
-        while fm.fileExists(atPath: candidate.path) || reserved.contains(candidate.path) {
-            candidate = parent.appendingPathComponent("\(base) \(index)", isDirectory: true)
-            index += 1
-        }
-        return candidate
+        UniquePath.directory(url, avoiding: reserved)
     }
 
     static func planExtraction(of archives: [URL], mode: FinderSettings.ExtractStrategy)

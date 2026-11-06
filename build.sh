@@ -20,8 +20,8 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>${APP_NAME}</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.11.1</string>
-    <key>CFBundleVersion</key><string>22</string>
+    <key>CFBundleShortVersionString</key><string>2.12.0</string>
+    <key>CFBundleVersion</key><string>23</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSHighResolutionCapable</key><true/>
@@ -130,8 +130,8 @@ cat > "$APEXPATH/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>ArchivePreview</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac.preview</string>
     <key>CFBundlePackageType</key><string>XPC!</string>
-    <key>CFBundleShortVersionString</key><string>2.11.1</string>
-    <key>CFBundleVersion</key><string>22</string>
+    <key>CFBundleShortVersionString</key><string>2.12.0</string>
+    <key>CFBundleVersion</key><string>23</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSExtension</key>
     <dict>
@@ -215,6 +215,7 @@ xcrun swiftc \
     -o "$FSXPATH/Contents/MacOS/ArchiveFinder" \
     Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift \
     Sources/ArchiveService.swift Sources/FinderSettings.swift Sources/PendingExtraction.swift \
+    Sources/UniquePath.swift \
     Sources/PendingNotice.swift \
     FinderSync/MenuBuilder.swift FinderSync/JobKit.swift FinderSync/JobRunner.swift \
     FinderSync/FinderSync.swift

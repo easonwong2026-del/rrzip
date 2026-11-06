@@ -40,16 +40,21 @@ extension Color {
 }
 
 enum Palette {
-    /// 品牌色：选中、强调、徽标统一用它（取自 app 图标 #00CFC3）
-    static let brand = Color(hex: 0x00CFC3)
-    /// 窗口底 / 工具栏 / 输入框 / 卡片，取自设计稿
-    static let window = Color.adaptive(dark: 0x263135, light: 0xFDFDFD)
-    static let chrome = Color.adaptive(dark: 0x2F393B, light: 0xF5F6F7)
-    static let field  = Color.adaptive(dark: 0x384547, light: 0xEDEFF1)
-    static let card   = Color.adaptive(dark: 0x313C40, light: 0xFFFFFF)
-    /// 选中底色浓度，深浅色一致，避免深色下发灰
-    static let selectionFill = 0.14
-    static let selectionStroke = 0.24
+    /// 品牌色：选中、强调、徽标统一用它。
+    /// 深色下提亮一档——#00CFC3 压在深底上会发闷；浅色下压深一档，白底上更清楚。
+    static let brand = Color.adaptive(dark: 0x2FD3C5, light: 0x00C4B8)
+
+    /// 窗口底 / 工具栏 / 输入框 / 卡片。
+    /// 深色不用设计稿那套偏绿的灰（#263135 那几个）：四个色都在同一色相、
+    /// 明度只差 10 出头，叠在一起整屏发绿灰、卡片浮不出来。
+    /// 改成中性冷灰 + 逐级拉开明度，青绿只留给品牌色。
+    static let window = Color.adaptive(dark: 0x1C1F21, light: 0xFDFDFD)
+    static let chrome = Color.adaptive(dark: 0x232729, light: 0xF5F6F7)
+    static let card   = Color.adaptive(dark: 0x282D30, light: 0xFFFFFF)
+    static let field  = Color.adaptive(dark: 0x333A3D, light: 0xEDEFF1)
+    /// 选中底色浓度。深色下同浓度会糊掉，由调用方按外观取值
+    static var selectionFill: Double { 0.14 }
+    static var selectionStroke: Double { 0.24 }
     /// 卡片 / 分组底色
     static let surface = 0.035
 }
