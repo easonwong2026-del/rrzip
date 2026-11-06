@@ -5,6 +5,9 @@ import PDFKit
 import QuickLook
 import SwiftUI
 import UniformTypeIdentifiers
+// UNUserNotificationCenter 没标 Sendable，但它的方法本身就是线程安全的；
+// 用 @preconcurrency 压掉严格并发下的误报，不绕过检查本身
+@preconcurrency import UserNotifications
 
 @main
 struct RrzipApp: App {
@@ -177,9 +180,9 @@ struct RrzipApp: App {
     var body: some Scene {
         Window("rrzip", id: "main") {
             ContentView(model: model)
-                // 最小尺寸按简化模式给，完整模式下由 applyModeWindowSize 提高下限，
-                // 否则窗口永远缩不进 720 宽，「简化」就是句空话
-                .frame(minWidth: 560, minHeight: 420)
+                // 最小尺寸与模式无关：简化与完整共用同一个下限，
+                // 否则窗口永远缩不进触发自动收起的宽度
+                .frame(minWidth: Layout.minWindowWidth, minHeight: Layout.minWindowHeight)
                 .onAppear { AppDelegate.model = model }
         }
         .defaultSize(width: 720, height: 520)
@@ -255,6 +258,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
+        requestNotificationPermissionIfNeeded()
+    }
+
+    /// 访达扩展只能投递通知、不能申请授权，所以授权这件事只能由主程序做。
+    /// 晚 2.5 秒，避开首帧窗口与首次引导。
+    private func requestNotificationPermissionIfNeeded() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            let center = UNUserNotificationCenter.current()
+            center.getNotificationSettings { settings in
+                guard settings.authorizationStatus == .notDetermined else { return }
+                center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+            }
+        }
     }
 
     // MARK: - 访达右键「服务」
@@ -264,8 +280,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                              error: AutoreleasingUnsafeMutablePointer<NSString>) {
         let urls = readURLs(from: pboard)
         guard let first = urls.first else { return }
-        if let archive = urls.first(where: { ArchiveKind.isArchive(ext: $0.pathExtension.lowercased()) }) {
+        // 与 application(_:open:) 同一条判定，不在这里另设后缀白名单
+        let archives = urls.filter {
+            if case .open = OpenGate.decide($0) { return true }
+            return false
+        }
+        if let archive = archives.first {
             AppDelegate.model?.open(url: archive)
+            if archives.count > 1 {
+                AppDelegate.model?.notice = "另有 \(archives.count - 1) 个压缩包未打开"
+            }
         } else {
             AppDelegate.model?.open(url: first)
         }
@@ -366,9 +390,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        guard let url = urls.first(where: { ArchiveKind.isArchive(ext: $0.pathExtension.lowercased()) })
-        else { return }
-        Task { @MainActor in AppDelegate.model?.open(url: url) }
+        guard !urls.isEmpty else { return }
+        // 统一走 OpenGate：后缀说不清就读魔数，改过名的包也要能打开。
+        // 这里如果按后缀前置拦截，访达双击和右键「用 rrzip 打开」就会静默丢文件。
+        Task { @MainActor in
+            let archives = urls.filter {
+                if case .open = OpenGate.decide($0) { return true }
+                return false
+            }
+            if let first = archives.first {
+                AppDelegate.model?.open(url: first)
+                if archives.count > 1 {
+                    AppDelegate.model?.notice = "另有 \(archives.count - 1) 个压缩包未打开"
+                }
+            } else if let first = urls.first {
+                // 交回 model 走 unrecognized 分支，给出真实提示而不是静默返回
+                AppDelegate.model?.open(url: first)
+            }
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -406,6 +446,8 @@ struct ContentView: View {
     /// 窗口变窄自动进简化模式。手动切过之后有冷却期，见 ArchiveModel.autoMode
     @AppStorage("rrzip.autoWorkspaceMode") private var autoWorkspaceMode = true
     @State private var windowWidth: Double = 1180
+    /// 宽度变化的防抖任务：拖动过程中只认最后一次
+    @State private var autoModeTask: Task<Void, Never>?
     /// 启动阶段先按记住的模式摆好窗口，再让宽度自适应接管，
     /// 否则「上次窗口 1180 宽」会在第一帧把简化模式弹成完整模式
     @State private var autoModeReady = false
@@ -431,13 +473,13 @@ struct ContentView: View {
                     HSplitView {
                         if showSidebar {
                             sidebar
-                                .frame(minWidth: 172, idealWidth: 198, maxWidth: 280)
+                                .frame(minWidth: Metrics.sidebarMin, idealWidth: 198, maxWidth: 280)
                         }
                         entryList
-                            .frame(minWidth: 360)
+                            .frame(minWidth: Metrics.contentMin)
                         if showInspector {
                             detailPane
-                                .frame(minWidth: 250, idealWidth: 288, maxWidth: 340)
+                                .frame(minWidth: Metrics.inspectorMin, idealWidth: 288, maxWidth: 340)
                         }
                     }
                     .frame(width: proxy.size.width, height: proxy.size.height)
@@ -455,6 +497,16 @@ struct ContentView: View {
             statusBar
         }
         .overlay { dropOverlay }
+        .overlay(alignment: .bottom) { noticeBar }
+        .animation(.easeOut(duration: 0.18), value: model.notice)
+        .onChange(of: model.notice) { _, newValue in
+            guard let newValue else { return }
+            Task {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                // 期间又来了新提示就别清，让新提示自己走完
+                if model.notice == newValue { model.notice = nil }
+            }
+        }
         .background(
             // 量一次窗口宽度：简化 / 完整模式的自动切换只看它，不猜窗口尺寸
             GeometryReader { proxy in
@@ -464,9 +516,16 @@ struct ContentView: View {
             }
         )
         .onChange(of: windowWidth) { _, width in
-            guard autoModeReady, autoWorkspaceMode,
-                  let next = model.autoMode(forWidth: width) else { return }
-            model.setWorkspaceMode(next, manual: false)
+            guard autoModeReady, autoWorkspaceMode else { return }
+            // 拖动窗口时宽度是连续变化的，合并 100ms 再判定，
+            // 否则会在阈值附近反复切模式
+            autoModeTask?.cancel()
+            autoModeTask = Task {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                guard !Task.isCancelled else { return }
+                guard let next = model.autoMode(forWidth: width) else { return }
+                model.setWorkspaceMode(next, manual: false)
+            }
         }
         .preferredColorScheme(model.appearance.scheme)
         .onDrop(of: [.fileURL], isTargeted: $isDropTarget) { providers in
@@ -651,9 +710,11 @@ struct ContentView: View {
                 guard let window = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 400 })
                 else { return }
                 let compact = model.isCompactMode
-                window.minSize = compact
-                    ? NSSize(width: 560, height: 420)
-                    : NSSize(width: 1020, height: 600)
+                // 最小尺寸与模式解耦：完整模式也允许缩到简化尺寸。
+                // 旧版在这里把完整模式锁到 1020 宽，而自动收起判据是 < 760，
+                // 窗口根本窄不下去，那条分支一整版都没被触发过。
+                window.minSize = NSSize(width: Layout.minWindowWidth,
+                                       height: Layout.minWindowHeight)
                 var frame = window.frame
                 if compact {
                     // 上次在完整模式留下的宽窗口，进简化模式后收回来
@@ -698,6 +759,27 @@ struct ContentView: View {
             Button("好", role: .cancel) { model.errorMessage = nil }
         } message: {
             Text(model.errorMessage ?? "")
+        }
+    }
+
+    // MARK: 一次性提示
+
+    /// 不与 alert 争焦点的轻提示：贴在状态栏上方，3 秒后自动消失。
+    /// 只做「告知」，不带按钮——要用户做决定的场景一律走 alert。
+    @ViewBuilder
+    private var noticeBar: some View {
+        if let notice = model.notice {
+            Text(notice)
+                .font(TypeScale.bodySmall)
+                .foregroundStyle(.primary)
+                .padding(.horizontal, Space.xl)
+                .padding(.vertical, Space.m)
+                .background(.regularMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+                .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                .padding(.bottom, Metrics.statusHeight + Space.l)
+                .allowsHitTesting(false)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
 
@@ -837,9 +919,9 @@ struct ContentView: View {
                 ?? NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain })
         else { return }
         let compact = model.isCompactMode
-        window.minSize = compact
-            ? NSSize(width: 560, height: 420)
-            : NSSize(width: 1020, height: 600)
+        // 下限恒定，不随模式抬高；抬高就等于禁止用户把完整模式拉窄到自动收起阈值以下
+        window.minSize = NSSize(width: Layout.minWindowWidth,
+                               height: Layout.minWindowHeight)
         var frame = window.frame
         let target = compact
             ? NSSize(width: 720, height: 520)
@@ -1211,7 +1293,7 @@ struct ContentView: View {
                 .frame(width: proxy.size.width, height: proxy.size.height)
                 .overlay(alignment: .trailing) {
                     // 太窄时浮层会把列表压没，此时只保留空格快速查看
-                    if proxy.size.width >= 620,
+                    if proxy.size.width >= Layout.overlayPreviewMinWidth,
                        let entry = model.selectedEntry, !entry.isDirectory {
                         compactPreview
                             .padding(.trailing, Space.l)

@@ -2,16 +2,14 @@
 // Copyright (C) 2026 rrzip contributors
 //
 //  FinderSync.swift
-//  访达右键菜单。动作直接调包内 7zz，不唤起主窗口，省一次进程切换。
+//  访达右键菜单。菜单内容由 FinderMenuBuilder 决定，执行交给 FinderJobRunner。
+//  这里只做三件事：建菜单、取选择、把任务丢到后台。
 //
 
 import Cocoa
 import FinderSync
 
 final class FinderSync: FIFinderSync {
-    private let archiveExts: Set<String> = [
-        "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "dmg", "iso"
-    ]
 
     /// appex 在 app/Contents/PlugIns/…，往上三层就是 .app
     private var appURL: URL {
@@ -21,11 +19,6 @@ final class FinderSync: FIFinderSync {
             .deletingLastPathComponent()
     }
 
-    private var archiveTool: URL? {
-        let tool = appURL.appendingPathComponent("Contents/Resources/7zz")
-        return FileManager.default.isExecutableFile(atPath: tool.path) ? tool : nil
-    }
-
     override init() {
         super.init()
         // 整个磁盘都挂菜单，比只挂用户目录更省事
@@ -33,78 +26,137 @@ final class FinderSync: FIFinderSync {
     }
 
     override func menu(for menuKind: FIMenuKind) -> NSMenu? {
-        let menu = NSMenu(title: "rrzip")
-        menu.addItem(withTitle: "用 rrzip 打开", action: #selector(openSelection), keyEquivalent: "")
-        menu.addItem(withTitle: "解压到此处", action: #selector(extractHere), keyEquivalent: "")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "压缩为 ZIP", action: #selector(compressZip), keyEquivalent: "")
-        menu.addItem(withTitle: "分别压缩", action: #selector(compressEach), keyEquivalent: "")
-        return menu
+        // 空白处右键没有选择项，不占位
+        guard menuKind == .contextualMenuForItems else { return nil }
+        let urls = selected
+        guard !urls.isEmpty else { return nil }
+
+        let selection = FinderSelection.inspect(urls)
+        // 设置里勾掉的项不出现；全关掉就连菜单一起不显示。
+        // 沙盒扩展压不了 7Z（没有 7zz），这一项直接不摆出来
+        let config = FinderSettings.load()
+        let actions = config.filtered(
+            FinderMenuBuilder.actions(for: selection, canCreate7z: SevenZip.isAvailable))
+        let note = FinderMenuBuilder.unsupportedNote(for: selection)
+        guard !actions.isEmpty || note != nil else { return nil }
+
+        let root = NSMenu(title: "rrzip")
+        // 默认收进 rrzip 二级菜单，不污染访达右键一级；设置里可以改成直接展开
+        let host: NSMenu
+        if config.secondLevel {
+            let parent = NSMenuItem(title: "rrzip", action: nil, keyEquivalent: "")
+            let submenu = NSMenu(title: "rrzip")
+            parent.submenu = submenu
+            root.addItem(parent)
+            host = submenu
+        } else {
+            host = root
+        }
+
+        for action in actions {
+            let item = NSMenuItem(title: FinderMenuBuilder.title(for: action, in: selection),
+                                  action: selector(for: action), keyEquivalent: "")
+            item.target = self
+            host.addItem(item)
+        }
+        if let note {
+            if !actions.isEmpty { host.addItem(.separator()) }
+            let item = NSMenuItem(title: note, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            host.addItem(item)
+        }
+        return root
+    }
+
+    private func selector(for action: FinderAction) -> Selector {
+        switch action {
+        case .open: return #selector(openSelection)
+        case .extractHere: return #selector(extractHere)
+        case .extractToFolder: return #selector(extractToFolder)
+        case .compressZip: return #selector(compressZip)
+        case .compressSevenZip: return #selector(compressSevenZip)
+        case .compressEach: return #selector(compressEach)
+        }
     }
 
     private var selected: [URL] {
         FIFinderSyncController.default().selectedItemURLs() ?? []
     }
 
-    private func isArchive(_ url: URL) -> Bool {
-        archiveExts.contains(url.pathExtension.lowercased())
-    }
-
+    /// 多选时全部交给主程序，由它决定打开第一个并在界面上提示其余未打开。
+    /// 认不认得出由 OpenGate 说了算，这里不再有第二份后缀表。
     @objc private func openSelection() {
-        guard let first = selected.first else { return }
-        NSWorkspace.shared.open([first], withApplicationAt: appURL,
+        let archives = FinderSelection.inspect(selected).archives
+        guard !archives.isEmpty else { return }
+        NSWorkspace.shared.open(archives, withApplicationAt: appURL,
                                 configuration: NSWorkspace.OpenConfiguration())
     }
 
+    // MARK: - 解压
+
     @objc private func extractHere() {
-        let archives = selected.filter(isArchive)
-        for url in archives {
-            run(["x", "-y", "-o" + url.deletingLastPathComponent().path, url.path])
+        startExtraction(mode: .here, op: "extractHere")
+    }
+
+    @objc private func extractToFolder() {
+        startExtraction(mode: .newFolder, op: "extractToFolder")
+    }
+
+    private func startExtraction(mode: FinderSettings.ExtractStrategy, op: String) {
+        let archives = FinderSelection.inspect(selected).archives
+        guard !archives.isEmpty else { return }
+
+        // 选择必须在主线程拿完；解压本身放到后台，右键菜单不能卡住
+        DispatchQueue.global(qos: .userInitiated).async {
+            let started = Date()
+            let outcome = FinderJobRunner.extract(archives, mode: mode)
+            FinderJobLog.append(.init(id: UUID().uuidString,
+                                      op: op,
+                                      startedAt: started,
+                                      finishedAt: Date(),
+                                      payload: .init(succeeded: outcome.succeeded,
+                                                     failed: outcome.failed.map(\.name),
+                                                     needsPassword: outcome.needsPassword,
+                                                     skippedFiles: outcome.skippedFiles,
+                                                     destination: outcome.destination?.path)))
+            // 「解压到此处」的产物就是当前目录，跳过去没意义，只发通知
+            FinderNotifier.report(outcome, verb: "解压",
+                                  reveal: mode == .newFolder ? outcome.destination : nil)
         }
     }
 
+    // MARK: - 压缩
+
     @objc private func compressZip() {
-        guard let first = selected.first else { return }
-        let folder = first.deletingLastPathComponent()
-        let base = selected.count == 1
-            ? first.deletingPathExtension().lastPathComponent
-            : folder.lastPathComponent
-        let output = uniqueOutput(folder.appendingPathComponent(base.isEmpty ? "归档" : base)
-            .appendingPathExtension("zip"))
-        run(["a", "-tzip", "-y", output.path] + selected.map(\.path))
+        startCompression(format: .zip, each: false, op: "compressZip")
+    }
+
+    @objc private func compressSevenZip() {
+        startCompression(format: .sevenZip, each: false, op: "compressSevenZip")
     }
 
     @objc private func compressEach() {
-        for url in selected {
-            let folder = url.deletingLastPathComponent()
-            let base = url.deletingPathExtension().lastPathComponent
-            let output = uniqueOutput(folder.appendingPathComponent(base.isEmpty ? "归档" : base)
-                .appendingPathExtension("zip"))
-            run(["a", "-tzip", "-y", output.path, url.path])
-        }
+        startCompression(format: .zip, each: true, op: "compressEach")
     }
 
-    /// 同名就加序号，不覆盖。与 ArchiveModel.uniqueOutput 同规则——
-    /// 扩展不能链主 target，只能各留一份
-    private func uniqueOutput(_ url: URL) -> URL {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return url }
-        let folder = url.deletingLastPathComponent()
-        let base = url.deletingPathExtension().lastPathComponent
-        let ext = url.pathExtension
-        var index = 2
-        while true {
-            let candidate = folder.appendingPathComponent("\(base) \(index)").appendingPathExtension(ext)
-            if !fm.fileExists(atPath: candidate.path) { return candidate }
-            index += 1
-        }
-    }
+    private func startCompression(format: FinderJobRunner.CompressionFormat,
+                                  each: Bool, op: String) {
+        let urls = FinderSelection.inspect(selected).plain
+        guard !urls.isEmpty else { return }
 
-    private func run(_ arguments: [String]) {
-        guard let tool = archiveTool else { return }
-        let process = Process()
-        process.executableURL = tool
-        process.arguments = arguments
-        try? process.run()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let started = Date()
+            let outcome = FinderJobRunner.compress(urls, format: format, each: each)
+            FinderJobLog.append(.init(id: UUID().uuidString,
+                                      op: op,
+                                      startedAt: started,
+                                      finishedAt: Date(),
+                                      payload: .init(succeeded: outcome.succeeded,
+                                                     failed: outcome.failed.map(\.name),
+                                                     needsPassword: outcome.needsPassword,
+                                                     skippedFiles: outcome.skippedFiles,
+                                                     destination: outcome.destination?.path)))
+            FinderNotifier.report(outcome, verb: "压缩", reveal: outcome.destination)
+        }
     }
 }

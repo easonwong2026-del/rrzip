@@ -12,6 +12,14 @@
 
 import Foundation
 
+/// 目标已存在同名文件时的处理方式。
+/// 只有「跳过」和「覆盖」两档：访达右键没有确认界面，
+/// 自动改名需要先解到临时目录再合并，成本高，留给主程序的选择性解压去做。
+enum ArchiveConflictPolicy: String, Codable, Sendable {
+    case overwrite
+    case skip
+}
+
 enum ArchiveService {
 
     /// 起始引擎顺序：磁盘映像这类 libarchive 读不了的交给 7-Zip 先试
@@ -41,16 +49,22 @@ enum ArchiveService {
 
     /// 解压。`entries` 为空表示全部。起始引擎失败时换另一个再试一次
     /// （加密 7z 在 libarchive 下会直接报 header is encrypted）。
+    /// `onConflict` 决定目标已存在同名文件时怎么办：
+    /// 主程序默认覆盖（用户主动解压，行为不变），访达右键传 `.skip`——
+    /// 右键动作没有进度与确认，静默覆盖等于让用户丢文件。
     static func extract(_ url: URL, entries: [String], to destination: URL,
-                        password: String?) throws {
+                        password: String?,
+                        onConflict: ArchiveConflictPolicy = .overwrite) throws {
         var lastError: Error?
         for engine in engineOrder(for: url) {
             do {
                 switch engine {
                 case .libarchive:
-                    try Tar.extract(url, entries: entries, to: destination, passphrase: password)
+                    try Tar.extract(url, entries: entries, to: destination,
+                                     passphrase: password, keepExisting: onConflict == .skip)
                 case .sevenZip:
-                    try SevenZip.extract(url, entries: entries, to: destination, password: password)
+                    try SevenZip.extract(url, entries: entries, to: destination,
+                                         password: password, skipExisting: onConflict == .skip)
                 }
                 return
             } catch ArchiveError.needsPassword {

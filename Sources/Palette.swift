@@ -78,6 +78,40 @@ enum Metrics {
     /// 列表里「大小 / 修改时间」两列宽度，表头与行必须共用
     static let sizeColumn: CGFloat = 84
     static let dateColumn: CGFloat = 118
+    /// 三栏各自的最小宽度：既是布局下限，也是自动切换阈值的推导输入。
+    /// 外观改版调这三个数，Layout 的阈值会跟着走，不用回来改 autoMode。
+    static let sidebarMin: CGFloat = 172
+    static let contentMin: CGFloat = 360
+    static let inspectorMin: CGFloat = 250
+}
+
+/// 窗口与模式切换的几何口径。
+/// 阈值一律从 `Metrics` 推导，不写死数字——写死过一次 760/900，
+/// 结果和窗口最小尺寸 1020 撞车，自动收起整整一版都没触发过。
+enum Layout {
+    /// 三栏几何上刚好放得下
+    static var fullModeMinWidth: CGFloat {
+        Metrics.sidebarMin + Metrics.contentMin + Metrics.inspectorMin + Metrics.gutter * 2 + 8
+    }
+
+    /// 舒适余量：刚到几何下限时内容列已经很挤，自动收起要提前一点
+    static let comfortMargin: CGFloat = 180
+
+    /// 低于它从完整模式收起（≈ 998）
+    static var autoCollapseWidth: CGFloat { fullModeMinWidth + comfortMargin }
+
+    /// 收缩与展开之间留滞回，避免拖动时来回弹
+    static let hysteresis: CGFloat = 80
+
+    /// 高于它从简化模式展开（≈ 1078）
+    static var autoExpandWidth: CGFloat { autoCollapseWidth + hysteresis }
+
+    /// 窗口最小尺寸与模式无关：只有解耦，窄窗口才可能真正出现
+    static let minWindowWidth: CGFloat = 560
+    static let minWindowHeight: CGFloat = 420
+
+    /// 简化模式浮层预览的断点：窗口更窄时不浮层，改用空格快速查看
+    static let overlayPreviewMinWidth: CGFloat = 620
 }
 
 enum FileKind {

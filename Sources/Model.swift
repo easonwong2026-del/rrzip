@@ -256,6 +256,9 @@ final class ArchiveModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published var status: String = "拖入一个压缩包，或按 ⌘O 打开"
     @Published var errorMessage: String?
+    /// 一次性浮条提示：不打断操作，3 秒后自动消失。
+    /// 用于「另有 N 个压缩包未打开」这类需要告知但不需要弹窗的情况。
+    @Published var notice: String?
     @Published private(set) var unlocked: Set<String> = []
     /// 非空时弹出批量面板
     @Published var batchRequest: BatchRequest?
@@ -661,11 +664,13 @@ final class ArchiveModel: ObservableObject {
     }
 
     /// 窗口宽度变化时该不该跟着换模式；nil = 不动。
+    /// 阈值来自 Layout（由三栏最小宽度推导），不写死——
+    /// 上一版把 760 写死，而完整模式又把窗口最小宽度锁在 1020，这条分支永远走不到。
     /// 手动切过之后 5 分钟内不抢控制权，避免「刚展开又被弹回去」。
     func autoMode(forWidth width: Double) -> WorkspaceMode? {
         guard Date().timeIntervalSince(modePinnedAt) > 300 else { return nil }
-        if width < 760, workspaceMode == .full { return .compact }
-        if width > 900, workspaceMode == .compact { return .full }
+        if width < Layout.autoCollapseWidth, workspaceMode == .full { return .compact }
+        if width > Layout.autoExpandWidth, workspaceMode == .compact { return .full }
         return nil
     }
 

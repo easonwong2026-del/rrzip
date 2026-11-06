@@ -183,10 +183,13 @@ enum Tar {
         return String(decoding: out, as: UTF8.self)
     }
 
-    static func extract(_ archive: URL, entries: [String], to destination: URL, passphrase: String? = nil) throws {
+    static func extract(_ archive: URL, entries: [String], to destination: URL,
+                        passphrase: String? = nil, keepExisting: Bool = false) throws {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         var args: [String] = []
         if let passphrase, !passphrase.isEmpty { args += ["--passphrase", passphrase] }
+        // 目标已存在同名文件时默认覆盖；keepExisting 走 bsdtar 的跳过语义
+        if keepExisting { args.append("--keep-old-files") }
         args += ["-xf", archive.path, "-C", destination.path]
         if !entries.isEmpty { args.append(contentsOf: entries) }
         try run(args)
@@ -200,21 +203,87 @@ enum Tar {
         case "tgz": args = ["-czf", output.path]
         default: throw ArchiveError.unsupported(format)
         }
-        args.append(contentsOf: items.map(\.path))
-        try run(args)
+        guard let first = items.first else { throw ArchiveError.tool("没有要压缩的内容") }
+
+        // 以第一项的父目录为工作目录、传相对名。
+        // 直接传绝对路径的话，包内会存成 Users/xxx/Documents/foo/…，
+        // 解压出来凭空多出好几层；用户看到的就是「压出来的包是坏的」。
+        let parent = first.deletingLastPathComponent()
+        let relatives = items.map { item -> String in
+            item.deletingLastPathComponent().path == parent.path
+                ? item.lastPathComponent
+                : item.path   // 跨目录的少数情况退回绝对路径，至少不丢内容
+        }
+        args.append(contentsOf: relatives)
+        try run(args, cwd: parent)
+    }
+
+    /// 用系统 ditto 打 zip。单源压缩走这条路：
+    /// tar 的 zip 实现只 store（不压缩），1.3 GB 的目录压完还是 1.3 GB；
+    /// ditto 走 deflate，而且 `--keepParent` 天然只保留源文件名，不会带绝对路径。
+    static func createZip(at output: URL, from item: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        process.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent",
+                             item.path, output.path]
+
+        var env = ProcessInfo.processInfo.environment
+        env["COPYFILE_DISABLE"] = "1"
+        process.environment = env
+
+        let errPipe = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = errPipe
+
+        try process.run()
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let message = String(decoding: errData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw ArchiveError.tool(message.isEmpty ? "压缩失败：\(item.lastPathComponent)" : message)
+        }
     }
 }
 
 /// 应用内附带的 7-Zip 26.05（arm64）
 /// 负责：创建 7z / 加密 / 分卷；以及 libarchive 读不了的加密头 7z
 enum SevenZip {
-    static var binary: URL? {
-        if let bundled = Bundle.main.url(forResource: "7zz", withExtension: nil),
-           FileManager.default.isExecutableFile(atPath: bundled.path) {
-            return bundled
+    /// 依次尝试：主 bundle 的 Resources、以及「自己是 appex」时上级 app 的 Resources。
+    /// 快捷查看和访达扩展里 `Bundle.main` 指向扩展自身，7zz 不在扩展包里；
+    /// 这两条候选路径让三个 target 共用一份实现，不必各自注入。
+    private static let candidates: [URL] = {
+        var list: [URL] = []
+        if let resources = Bundle.main.resourceURL {
+            list.append(resources.appendingPathComponent("7zz"))
         }
+        // <app>/Contents/PlugIns/<ext>.appex → <app>/Contents/Resources/7zz
+        list.append(
+            Bundle.main.bundleURL
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Resources/7zz")
+        )
+        return list
+    }()
+
+    /// 找一次就记住：每次解压都 stat 两个路径没必要。
+    /// 两个扩展（快速查看 / 访达）是沙盒进程，spawn 包内 7zz 会被系统拒绝，
+    /// 编译时用 ARCHIVE_EXTENSION 直接返回 nil，让 ArchiveService 只用 libarchive。
+    /// zip / tar / rar / 非加密 7z 都读得动；dmg、加密 7z 在扩展里会明确报错，
+    /// 而不是「菜单点了没反应」。
+    private static let resolved: URL? = {
+        #if ARCHIVE_EXTENSION
         return nil
-    }
+        #else
+        return candidates.first {
+            FileManager.default.isExecutableFile(atPath: $0.path)
+        }
+        #endif
+    }()
+
+    static var binary: URL? { resolved }
 
     static var isAvailable: Bool { binary != nil }
 
@@ -311,9 +380,13 @@ enum SevenZip {
         return entries
     }
 
-    static func extract(_ archive: URL, entries: [String], to destination: URL, password: String? = nil) throws {
+    static func extract(_ archive: URL, entries: [String], to destination: URL,
+                        password: String? = nil, skipExisting: Bool = false) throws {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        var args = ["x", "-y", "-o\(destination.path)"]
+        var args = ["x", "-y"]
+        // -aos：已存在的文件跳过，不覆盖
+        if skipExisting { args.append("-aos") }
+        args.append("-o\(destination.path)")
         if let password, !password.isEmpty { args.append("-p\(password)") }
         args.append(archive.path)
         if !entries.isEmpty { args.append(contentsOf: entries) }
