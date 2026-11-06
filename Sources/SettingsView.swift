@@ -13,23 +13,94 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var model: ArchiveModel
+    @State private var tab: Tab = .general
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case general = "通用"
+        case compress = "压缩"
+        case extract = "解压"
+        case integration = "访达"
+        case advanced = "高级"
+
+        var id: String { rawValue }
+
+        var symbol: String {
+            switch self {
+            case .general: return "gearshape"
+            case .compress: return "archivebox"
+            case .extract: return "tray.and.arrow.down"
+            case .integration: return "square.on.square"
+            case .advanced: return "slider.horizontal.3"
+            }
+        }
+    }
 
     var body: some View {
-        TabView {
-            GeneralSettingsView(model: model)
-                .tabItem { Label("通用", systemImage: "gearshape") }
-            CreateSettingsView()
-                .tabItem { Label("压缩", systemImage: "archivebox") }
-            ExtractSettingsView(model: model)
-                .tabItem { Label("解压", systemImage: "tray.and.arrow.down") }
-            IntegrationSettingsView()
-                .tabItem { Label("访达与预览", systemImage: "square.on.square") }
-            AdvancedSettingsView(model: model)
-                .tabItem { Label("高级", systemImage: "slider.horizontal.3") }
+        HStack(spacing: 0) {
+            sidebar
+            Divider()
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 560, height: 600)
+        .frame(width: 660, height: 560)
         // 设置窗口跟主窗口一个外观，不要一个浅色一个深色
         .preferredColorScheme(model.appearance.scheme)
+    }
+
+    /// 左栏：跟设计稿一致，选中项是青绿底条而不是系统 TabView 的顶部标签
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .frame(width: 22, height: 22)
+                Text("rrzip")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 16)
+            .padding(.bottom, 10)
+
+            ForEach(Tab.allCases) { item in
+                Button {
+                    tab = item
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: item.symbol)
+                            .font(.system(size: 12, weight: .medium))
+                            .frame(width: 16)
+                        Text(item.rawValue)
+                            .font(.system(size: 12.5))
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .foregroundStyle(tab == item ? Palette.brand : Color.primary.opacity(0.85))
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(tab == item ? Palette.brand.opacity(0.16) : .clear)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+            }
+
+            Spacer()
+        }
+        .frame(width: 168)
+        .background(Palette.chrome)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch tab {
+        case .general: GeneralSettingsView(model: model)
+        case .compress: CreateSettingsView()
+        case .extract: ExtractSettingsView(model: model)
+        case .integration: IntegrationSettingsView()
+        case .advanced: AdvancedSettingsView(model: model)
+        }
     }
 }
 

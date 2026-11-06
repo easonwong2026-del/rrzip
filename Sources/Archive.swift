@@ -94,12 +94,19 @@ enum Tar {
         process.standardOutput = out
         process.standardError = errHandle
         try process.run()
+        // 也要注册：2026-11-06 审计发现只有 7zz 注册了，zip/tar 的「取消」点了没用
+        TaskRegistry.begin(process)
 
         let outData = out.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        let wasCancelled = TaskRegistry.cancelled
+        TaskRegistry.finish()
         try? errHandle.close()
         let errData = (try? Data(contentsOf: errFile)) ?? Data()
         try? FileManager.default.removeItem(at: errFile)
+
+        // 主动取消也会让退出码非 0，先把它和真正的失败分开
+        if wasCancelled { throw ArchiveError.cancelled }
 
         let stdout = String(data: outData, encoding: .utf8) ?? ""
         let stderr = String(data: errData, encoding: .utf8) ?? ""
@@ -247,6 +254,31 @@ enum Tar {
     }
 }
 
+/// 当前正在跑的外部进程。取消按钮直接 terminate 它，不用层层传句柄。
+///
+/// `cancelled` 是必要的：被 terminate 的进程退出码也是非 0，
+/// 只看退出码会把「用户主动取消」当成「任务失败」弹错误框。
+/// 应用同一时刻只跑一个任务（PRD 明确不做并发），所以用一个布尔就够。
+enum TaskRegistry {
+    nonisolated(unsafe) static var current: Process?
+    nonisolated(unsafe) static var cancelled = false
+
+    static func begin(_ process: Process) {
+        current = process
+        cancelled = false
+    }
+
+    static func finish() {
+        current = nil
+        cancelled = false
+    }
+
+    static func cancel() {
+        cancelled = true
+        current?.terminate()
+    }
+}
+
 /// 应用内附带的 7-Zip 26.05（arm64）
 /// 负责：创建 7z / 加密 / 分卷；以及 libarchive 读不了的加密头 7z
 enum SevenZip {
@@ -288,11 +320,18 @@ enum SevenZip {
     static var isAvailable: Bool { binary != nil }
 
     @discardableResult
-    static func run(_ args: [String], cwd: URL? = nil) throws -> String {
+    static func run(_ args: [String], cwd: URL? = nil,
+                    onProgress: ((Double) -> Void)? = nil) throws -> String {
         guard let binary else { throw ArchiveError.engineUnavailable }
         let process = Process()
         process.executableURL = binary
-        process.arguments = args
+
+        var fullArgs = args
+        if onProgress != nil {
+            // -bsp1：把百分比进度从 stderr 挪到 stdout，才和普通输出分得开
+            fullArgs.insert("-bsp1", at: 1)
+        }
+        process.arguments = fullArgs
         if let cwd { process.currentDirectoryURL = cwd }
 
         var env = ProcessInfo.processInfo.environment
@@ -308,12 +347,32 @@ enum SevenZip {
         process.standardOutput = out
         process.standardError = errHandle
         try process.run()
+        TaskRegistry.begin(process)
 
-        let outData = out.fileHandleForReading.readDataToEndOfFile()
+        // 有进度回调时边读边解析，不能等 EOF 再读——那要等任务跑完才拿到数据
+        var outData = Data()
+        var tail = ""
+        let handle = out.fileHandleForReading
+        while true {
+            let chunk = handle.availableData
+            if chunk.isEmpty { break }
+            outData.append(chunk)
+            guard onProgress != nil,
+                  let text = String(data: chunk, encoding: .utf8) else { continue }
+            tail += text
+            if let percent = lastPercent(in: tail) { onProgress?(percent) }
+            // 只留最后一点文本，避免长任务把内存吃掉
+            if tail.count > 200 { tail = String(tail.suffix(80)) }
+        }
+
         process.waitUntilExit()
+        let wasCancelled = TaskRegistry.cancelled
+        TaskRegistry.finish()
         try? errHandle.close()
         let errData = (try? Data(contentsOf: errFile)) ?? Data()
         try? FileManager.default.removeItem(at: errFile)
+
+        if wasCancelled { throw ArchiveError.cancelled }
 
         let stdout = String(data: outData, encoding: .utf8) ?? ""
         if process.terminationStatus != 0 {
@@ -322,6 +381,16 @@ enum SevenZip {
             throw ArchiveError.tool(reason.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         return stdout
+    }
+
+    /// 取文本里最后一个 `NN%`。
+    /// 7zz 用 \b 退格原地刷新进度行，行内会堆着 0%、1%、2%…，按行取会拿到最早的。
+    private static func lastPercent(in text: String) -> Double? {
+        guard let regex = try? NSRegularExpression(pattern: #"(\d{1,3})%"#) else { return nil }
+        let ns = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        guard let last = matches.last else { return nil }
+        return Double(ns.substring(with: last.range(at: 1))).map { $0 / 100 }
     }
 
     /// 完整读一遍校验。损坏、密码不对都会抛错。
@@ -381,7 +450,8 @@ enum SevenZip {
     }
 
     static func extract(_ archive: URL, entries: [String], to destination: URL,
-                        password: String? = nil, skipExisting: Bool = false) throws {
+                        password: String? = nil, skipExisting: Bool = false,
+                        onProgress: ((Double) -> Void)? = nil) throws {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         var args = ["x", "-y"]
         // -aos：已存在的文件跳过，不覆盖
@@ -390,7 +460,7 @@ enum SevenZip {
         if let password, !password.isEmpty { args.append("-p\(password)") }
         args.append(archive.path)
         if !entries.isEmpty { args.append(contentsOf: entries) }
-        try run(args)
+        try run(args, onProgress: onProgress)
     }
 
     /// format: "zip" | "7z" | "tar"
@@ -399,9 +469,13 @@ enum SevenZip {
         from items: [URL],
         format: String,
         password: String?,
-        volume: String?
+        volume: String?,
+        level: Int? = nil,
+        onProgress: ((Double) -> Void)? = nil
     ) throws {
         var args = ["a", "-t\(format)", "-y"]
+        // -mx=0 存而不压，9 是极限；不传则用 7zz 默认（5）
+        if let level { args.append("-mx=\(level)") }
         if let password, !password.isEmpty {
             args.append("-p\(password)")
             if format == "zip" { args.append("-mem=AES256") }
@@ -410,7 +484,7 @@ enum SevenZip {
         if let volume, !volume.isEmpty { args.append("-v\(volume)") }
         args.append(output.path)
         args.append(contentsOf: items.map(\.path))
-        try run(args)
+        try run(args, onProgress: onProgress)
     }
 
     // MARK: - 原地编辑

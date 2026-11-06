@@ -187,8 +187,6 @@ struct WelcomeView: View {
         return FileManager.default.fileExists(atPath: appex.path)
     }
 
-    static var quickLookInstalled: Bool { extensionInstalled("ArchivePreview.appex") }
-
     static var version: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
     }

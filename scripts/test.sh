@@ -7,6 +7,8 @@ cd "$ROOT"
 FIX=$(mktemp -d)
 trap 'rm -rf "$FIX"' EXIT
 
+source "$ROOT/scripts/sources.sh"
+
 SRC="$FIX/src"
 mkdir -p "$SRC/照片/城市"
 printf 'hello\n' > "$SRC/说明.txt"
@@ -30,7 +32,9 @@ xcrun swiftc -O -swift-version 5 \
     -target arm64-apple-macos14.0 \
     -framework UserNotifications \
     -o build/rrzip-tests \
-    Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift Sources/ArchiveService.swift Sources/FinderSettings.swift Sources/PendingExtraction.swift Sources/Model.swift Sources/Palette.swift Sources/Batch.swift Sources/Thumbnails.swift FinderSync/MenuBuilder.swift FinderSync/JobKit.swift FinderSync/JobRunner.swift Tests/main.swift
+    "${ARCHIVE_CORE[@]}" "${SHARED_STATE[@]}" "${FINDER_CORE[@]}" \
+    Sources/Model.swift Sources/Palette.swift Sources/Batch.swift Sources/Thumbnails.swift \
+    Tests/*.swift
 
 if [ -x "$ROOT/Assets/7zz" ]; then cp "$ROOT/Assets/7zz" build/7zz; fi
 

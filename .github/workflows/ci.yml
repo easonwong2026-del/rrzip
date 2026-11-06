@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   build-test:
     # 需要 arm64 的 macOS runner：内置 7zz 是 arm64 构建，构建脚本也按 arm64 出包
@@ -44,8 +48,30 @@ jobs:
 
       - name: 并发严格检查
         run: |
-          xcrun swiftc -typecheck -swift-version 5 -strict-concurrency=complete \
-            -target arm64-apple-macos14.0 Sources/*.swift
+          # 输出落文件再转成 ::error::，失败时不用抓日志就能看到具体哪一行
+          if ! xcrun swiftc -typecheck -swift-version 5 -strict-concurrency=complete \
+                -target arm64-apple-macos14.0 Sources/*.swift > /tmp/check.log 2>&1; then
+            tail -80 /tmp/check.log | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit 1
+          fi
+
+      # 失败日志只看得到「exit code 1」，靠这个把尾部贴到 PR 上
+      - name: 失败时贴日志
+        if: failure() && github.event.pull_request.number
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for f in /tmp/test.log /tmp/check.log /tmp/build.log; do
+            [ -f "$f" ] || continue
+            {
+              echo '```'
+              tail -60 "$f"
+              echo '```'
+            } > /tmp/ci-body.md
+            gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/ci-body.md || true
+          done
 
       - name: 构建 app
         run: |

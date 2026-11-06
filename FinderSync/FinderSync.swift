@@ -137,6 +137,22 @@ final class FinderSync: FIFinderSync {
                 return
             }
 
+            // 有跳过或失败时必须让人知道：appex 发不出通知，只能转交主程序。
+            // 成功且干净的解压不打扰，产物就在访达里。
+            if !outcome.failed.isEmpty || outcome.skippedFiles > 0 {
+                let title = outcome.failed.isEmpty
+                    ? "解压完成，\(outcome.skippedFiles) 个同名文件被跳过"
+                    : "解压失败：\(outcome.failed[0].name)"
+                let message = outcome.failed.isEmpty
+                    ? "已存在的文件没有被覆盖。需要覆盖请先在访达里删掉旧文件。"
+                    : outcome.failed[0].reason
+                PendingNotice.write(title: title, message: message)
+                DispatchQueue.main.async {
+                    NSWorkspace.shared.open(app, configuration: NSWorkspace.OpenConfiguration())
+                }
+                return
+            }
+
             // 「解压到此处」的产物就是当前目录，跳过去没意义，只发通知
             FinderNotifier.report(outcome, verb: "解压",
                                   reveal: mode == .newFolder ? outcome.destination : nil)

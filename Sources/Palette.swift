@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 rrzip contributors
 //
+import AppKit
 import SwiftUI
 
-/// 统一的配色：品牌紫 + 按文件类型区分的色板。
+/// 统一的配色：品牌青绿 + 按文件类型区分的色板。
 /// 品牌色只用在「主操作 / 选中 / 强调」，其余一律走系统语义色，
-/// 否则整条工具栏都是紫的，层次会糊在一起。
+/// 否则整条工具栏都是青的，层次会糊在一起。
 extension AppearanceMode {
     /// 弹窗、小窗这些独立窗口读不到主窗口的 preferredColorScheme，只能自己读一次
     static var stored: AppearanceMode {
@@ -14,12 +15,50 @@ extension AppearanceMode {
     }
 }
 
+extension Color {
+    /// 按设计稿写色值：#00CFC3 比 Color(red: 0, green: 0.81, blue: 0.76) 好核对
+    init(hex: UInt32) {
+        self.init(.sRGB,
+                  red: Double((hex >> 16) & 0xFF) / 255,
+                  green: Double((hex >> 8) & 0xFF) / 255,
+                  blue: Double(hex & 0xFF) / 255)
+    }
+}
+
+extension Color {
+    /// 深/浅两套动态色：一处定义同时覆盖两种外观，调用方不用再读 colorScheme。
+    /// alpha 也要能分开给——同一浓度压在深底和浅底上的观感差很多。
+    static func adaptive(dark: UInt32, light: UInt32,
+                         darkAlpha: Double = 1, lightAlpha: Double = 1) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let hex = isDark ? dark : light
+            return NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
+                           green: CGFloat((hex >> 8) & 0xFF) / 255,
+                           blue: CGFloat(hex & 0xFF) / 255,
+                           alpha: isDark ? darkAlpha : lightAlpha)
+        })
+    }
+}
+
 enum Palette {
-    /// 品牌色：选中、强调、徽标统一用它
-    static let brand = Color(red: 0.45, green: 0.34, blue: 0.94)
-    /// 选中底色浓度，深浅色一致，避免深色下发灰
-    static let selectionFill = 0.14
-    static let selectionStroke = 0.24
+    /// 品牌色：选中、强调、徽标统一用它。
+    /// 深色下提亮一档——#00CFC3 压在深底上会发闷；浅色下压深一档，白底上更清楚。
+    static let brand = Color.adaptive(dark: 0x2FD3C5, light: 0x00C4B8)
+
+    /// 窗口底 / 工具栏 / 输入框 / 卡片。
+    /// 深色不用设计稿那套偏绿的灰（#263135 那几个）：四个色都在同一色相、
+    /// 明度只差 10 出头，叠在一起整屏发绿灰、卡片浮不出来。
+    /// 改成中性冷灰 + 逐级拉开明度，青绿只留给品牌色。
+    static let window = Color.adaptive(dark: 0x1C1F21, light: 0xFDFDFD)
+    static let chrome = Color.adaptive(dark: 0x232729, light: 0xF5F6F7)
+    static let card   = Color.adaptive(dark: 0x282D30, light: 0xFFFFFF)
+    static let field  = Color.adaptive(dark: 0x333A3D, light: 0xEDEFF1)
+    /// 选中底色与描边。固定 0.14 在深底上几乎看不见，改成按外观给不同浓度
+    static let selectionFill = Color.adaptive(dark: 0x2FD3C5, light: 0x00C4B8,
+                                              darkAlpha: 0.20, lightAlpha: 0.14)
+    static let selectionStroke = Color.adaptive(dark: 0x2FD3C5, light: 0x00C4B8,
+                                                darkAlpha: 0.36, lightAlpha: 0.26)
     /// 卡片 / 分组底色
     static let surface = 0.035
 }
@@ -67,7 +106,7 @@ enum Metrics {
     static let toolbarHeight: CGFloat = 44
     static let breadcrumbHeight: CGFloat = 32
     static let statusHeight: CGFloat = 26
-    static let rowHeight: CGFloat = 28
+    static let rowHeight: CGFloat = 32
     static let rowHeightWide: CGFloat = 38
     static let gutter: CGFloat = Space.xxl
     static let radiusPill: CGFloat = 4
@@ -153,19 +192,25 @@ enum FileKind {
         }
     }
 
-    /// 主色。浅色模式下饱和一些，深色模式下提亮一点，避免发暗。
+    /// 类型主色。全部改成与青绿品牌能放在一起的低饱和色板。
+    ///
+    /// 两条硬规则：
+    /// 1. **不许出现紫色**。压缩包以前是 `#8C5CF5`，欢迎页那颗大徽标、列表每行、
+    ///    详情栏头部全是它，品牌换青绿之后整屏最显眼的仍是那块紫——这就是「紫色 logo
+    ///    还在」的来源。压缩包是本应用的主角，直接用品牌色。
+    /// 2. 磁盘以前是靛蓝 `#5C6ECC`，和紫只差一点色相，一并挪到明确的蓝。
     var tint: Color {
         switch self {
-        case .folder: return Color(red: 0.19, green: 0.48, blue: 0.96)
-        case .archive: return Color(red: 0.55, green: 0.36, blue: 0.96)
-        case .image: return Color(red: 0.98, green: 0.57, blue: 0.18)
-        case .pdf: return Color(red: 0.93, green: 0.29, blue: 0.32)
-        case .video: return Color(red: 0.93, green: 0.34, blue: 0.62)
-        case .audio: return Color(red: 0.10, green: 0.68, blue: 0.66)
-        case .code: return Color(red: 0.18, green: 0.67, blue: 0.40)
-        case .text: return Color(red: 0.40, green: 0.49, blue: 0.62)
-        case .disk: return Color(red: 0.36, green: 0.43, blue: 0.80)
-        case .other: return Color(red: 0.55, green: 0.57, blue: 0.61)
+        case .folder: return Color(hex: 0x3B82F6)
+        case .archive: return Palette.brand
+        case .image: return Color(hex: 0xF59E0B)
+        case .pdf: return Color(hex: 0xE5484D)
+        case .video: return Color(hex: 0xEC6A9C)
+        case .audio: return Color(hex: 0x0EA5B7)
+        case .code: return Color(hex: 0x2FA55F)
+        case .text: return Color(hex: 0x66788F)
+        case .disk: return Color(hex: 0x4763B8)
+        case .other: return Color(hex: 0x8B9099)
         }
     }
 

@@ -33,7 +33,7 @@ struct PendingExtraction: Codable, Sendable {
         SharedPaths.support.appendingPathComponent("pending-extraction.json")
     }
 
-    static func write(archives: [URL], mode: Mode) {
+    static func write(archives: [URL], mode: Mode, to url: URL = fileURL) {
         let action = PendingExtraction(id: UUID().uuidString,
                                        archives: archives.map(\.path),
                                        mode: mode,
@@ -41,19 +41,19 @@ struct PendingExtraction: Codable, Sendable {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(action) else { return }
-        try? FileManager.default.createDirectory(at: SharedPaths.support,
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                  withIntermediateDirectories: true)
-        try? data.write(to: fileURL, options: .atomic)
+        try? data.write(to: url, options: .atomic)
     }
 
-    static func read() -> PendingExtraction? {
-        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+    static func read(from url: URL = fileURL) -> PendingExtraction? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try? decoder.decode(PendingExtraction.self, from: data)
     }
 
-    static func clear() {
-        try? FileManager.default.removeItem(at: fileURL)
+    static func clear(_ url: URL = fileURL) {
+        try? FileManager.default.removeItem(at: url)
     }
 }
