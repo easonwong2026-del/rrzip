@@ -1315,9 +1315,12 @@ final class ArchiveModel: ObservableObject {
     /// 非 nil 时主界面显示进度卡片
     @Published var task: TaskProgress?
 
+    /// 取消只负责发信号。状态留给真正收尾的那段代码改——
+    /// 点了取消就立刻写「已取消」，但如果进程还卡在写盘，用户会以为已经停了。
     func cancelTask() {
+        guard task != nil else { return }
         TaskRegistry.cancel()
-        status = "已取消"
+        status = "正在取消…"
     }
     private var passwordContinuation: CheckedContinuation<String?, Never>?
 
@@ -1465,6 +1468,11 @@ final class ArchiveModel: ObservableObject {
                     if UserDefaults.standard.object(forKey: "rrzip.revealAfterExtract") as? Bool ?? true {
                         NSWorkspace.shared.activateFileViewerSelecting([destination])
                     }
+                    return
+                } catch ArchiveError.cancelled {
+                    // 用户主动取消不是失败，不弹错误框
+                    status = "已取消"
+                    isLoading = false
                     return
                 } catch let ArchiveError.tool(message) where Tar.looksEncrypted(message) {
                     guard attempt == 0, let typed = await askPassword(for: frame.archive, wrong: passphrase != nil) else {
@@ -1664,6 +1672,11 @@ final class ArchiveModel: ObservableObject {
                 status = "已创建 \(output.lastPathComponent)"
                 isLoading = false
                 NSWorkspace.shared.activateFileViewerSelecting([output])
+            } catch ArchiveError.cancelled {
+                status = "已取消"
+                isLoading = false
+                // 取消时 7zz 会留下半个包，删掉——不然用户看到一个打不开的文件
+                try? FileManager.default.removeItem(at: output)
             } catch {
                 errorMessage = error.localizedDescription
                 status = "创建失败"
@@ -1679,7 +1692,8 @@ final class ArchiveModel: ObservableObject {
         return "\(base).\(format.ext)"
     }
 
-    func revealInFinder() {        guard let frame = current else { return }
+    func revealInFinder() {
+        guard let frame = current else { return }
         NSWorkspace.shared.activateFileViewerSelecting([frame.archive])
     }
 

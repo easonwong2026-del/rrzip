@@ -95,14 +95,18 @@ enum Tar {
         process.standardError = errHandle
         try process.run()
         // 也要注册：2026-11-06 审计发现只有 7zz 注册了，zip/tar 的「取消」点了没用
-        TaskRegistry.current = process
+        TaskRegistry.begin(process)
 
         let outData = out.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        TaskRegistry.current = nil
+        let wasCancelled = TaskRegistry.cancelled
+        TaskRegistry.finish()
         try? errHandle.close()
         let errData = (try? Data(contentsOf: errFile)) ?? Data()
         try? FileManager.default.removeItem(at: errFile)
+
+        // 主动取消也会让退出码非 0，先把它和真正的失败分开
+        if wasCancelled { throw ArchiveError.cancelled }
 
         let stdout = String(data: outData, encoding: .utf8) ?? ""
         let stderr = String(data: errData, encoding: .utf8) ?? ""
@@ -251,12 +255,27 @@ enum Tar {
 }
 
 /// 当前正在跑的外部进程。取消按钮直接 terminate 它，不用层层传句柄。
+///
+/// `cancelled` 是必要的：被 terminate 的进程退出码也是非 0，
+/// 只看退出码会把「用户主动取消」当成「任务失败」弹错误框。
+/// 应用同一时刻只跑一个任务（PRD 明确不做并发），所以用一个布尔就够。
 enum TaskRegistry {
     nonisolated(unsafe) static var current: Process?
+    nonisolated(unsafe) static var cancelled = false
+
+    static func begin(_ process: Process) {
+        current = process
+        cancelled = false
+    }
+
+    static func finish() {
+        current = nil
+        cancelled = false
+    }
 
     static func cancel() {
+        cancelled = true
         current?.terminate()
-        current = nil
     }
 }
 
@@ -328,7 +347,7 @@ enum SevenZip {
         process.standardOutput = out
         process.standardError = errHandle
         try process.run()
-        TaskRegistry.current = process
+        TaskRegistry.begin(process)
 
         // 有进度回调时边读边解析，不能等 EOF 再读——那要等任务跑完才拿到数据
         var outData = Data()
@@ -347,10 +366,13 @@ enum SevenZip {
         }
 
         process.waitUntilExit()
-        TaskRegistry.current = nil
+        let wasCancelled = TaskRegistry.cancelled
+        TaskRegistry.finish()
         try? errHandle.close()
         let errData = (try? Data(contentsOf: errFile)) ?? Data()
         try? FileManager.default.removeItem(at: errFile)
+
+        if wasCancelled { throw ArchiveError.cancelled }
 
         let stdout = String(data: outData, encoding: .utf8) ?? ""
         if process.terminationStatus != 0 {

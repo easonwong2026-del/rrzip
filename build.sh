@@ -2,6 +2,8 @@
 # rrzip 构建脚本：直接产出一个可双击运行的 .app
 set -e
 cd "$(dirname "$0")"
+# 源文件清单从 scripts/sources.sh 来，和 test.sh 共用一份
+source scripts/sources.sh
 
 APP_NAME="rrzip"
 BUNDLE="build/${APP_NAME}.app"
@@ -175,7 +177,7 @@ xcrun swiftc \
     -framework AppKit -framework QuickLookUI \
     -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$APEXPATH/Contents/MacOS/ArchivePreview" \
-    Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift Sources/ArchiveService.swift QuickLook/PreviewProvider.swift
+    "${ARCHIVE_CORE[@]}" QuickLook/PreviewProvider.swift
 
 codesign --force --sign - --entitlements /tmp/rrzip-appex.entitlements "$APEXPATH" >/dev/null 2>&1
 
@@ -213,11 +215,7 @@ xcrun swiftc \
     -framework Cocoa -framework FinderSync -framework UserNotifications \
     -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$FSXPATH/Contents/MacOS/ArchiveFinder" \
-    Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift \
-    Sources/ArchiveService.swift Sources/FinderSettings.swift Sources/PendingExtraction.swift \
-    Sources/UniquePath.swift \
-    Sources/PendingNotice.swift \
-    FinderSync/MenuBuilder.swift FinderSync/JobKit.swift FinderSync/JobRunner.swift \
+    "${ARCHIVE_CORE[@]}" "${SHARED_STATE[@]}" "${FINDER_CORE[@]}" \
     FinderSync/FinderSync.swift
 
 # 访达扩展必须是沙盒进程，否则 pluginkit 根本不登记它（系统设置里看不到「访达扩展」）。

@@ -129,7 +129,7 @@
 | 类型 | 色 | 符号 |
 |---|---|---|
 | 文件夹 | `#3B82F6` 蓝 | `folder.fill` |
-| 压缩包 | `#8B5CF6` 紫 | `zipper` 或 `archivebox.fill` |
+| 压缩包 | 品牌青绿 `#00CFC3`（主角用品牌色） | `shippingbox.fill` |
 | 图片 | `#F59E0B` 橙 | `photo.fill` |
 | PDF | `#EF4444` 红 | `doc.richtext.fill` |
 | 视频 | `#EC4899` 粉 | `film.fill` |
@@ -139,7 +139,7 @@
 | 磁盘映像 | `#6366F1` 靛 | `externaldrive.fill` |
 
 **详情卡**
-- 顶部：64pt 彩色徽标 + 文件名（13 semibold，两行截断）+ 类型标签（紫底白字，10pt，圆角 4）
+- 顶部：64pt 彩色徽标 + 文件名（13 semibold，两行截断）+ 类型标签（青绿底白字，10pt，圆角 4）
 - 属性表：左标签 `text.secondary` + 右值 `text.primary`，行高 26，无分隔线
 - 底部按钮：`在访达中显示`（次按钮，占满宽度）
 

@@ -27,7 +27,7 @@ macOS 原生压缩包工作台。SwiftUI + 系统 libarchive（`/usr/bin/tar`）
 | **访达快速查看** | 按空格直接看压缩包内容（`ArchivePreview.appex`） |
 | **包内搜索** | 工具栏搜索框，跨层级匹配，结果显示完整路径 |
 | **三种视图** | 列表 / 图标网格 / **分栏列视图** 一键切换 |
-| **类型配色** | 文件夹蓝、压缩包紫、图片橙、PDF 红、视频粉、音频青、代码绿、磁盘靛，深浅色都适配 |
+| **类型配色** | 文件夹蓝、压缩包青绿（品牌色）、图片橙、PDF 红、视频玫红、音频青蓝、代码绿、磁盘蓝，深浅色都适配 |
 | **外观切换** | ⋯ 菜单里可选「跟随系统 / 浅色 / 深色」 |
 | **悬停预览** | 鼠标停满 1 秒在光标旁弹出内容卡片（需先移动鼠标，开窗不会自动弹）：图片与 PDF 出大图，文本出前几行 |
 | **简化 / 完整模式** | 默认 720×520 单栏，轻量浏览与解压；⌃⌘M 或工具栏按钮展开成三栏工作台，目录层级、选中项、预览都不丢 |
@@ -119,37 +119,54 @@ open build/rrzip.app
 rrzip/
 ├── DESIGN.md                # 界面设计标准：原则 / 配色 / 字号 / 间距 / 组件 / 交互 / 验收清单
 ├── Sources/
-│   ├── ContentView.swift      # 主界面（工具栏 / 列表 / 简化与完整模式）
+│   ├── App.swift              # @main 入口、AppDelegate、Services、通知授权
+│   ├── ContentView.swift      # 主界面骨架：状态与布局，子视图拆在下面几个文件
+│   ├── MainToolbar.swift      # 工具栏：打开 / 暂存 / 新建 / 搜索 / 视图切换 / 更多
+│   ├── Chrome.swift           # 面包屑、状态条、轻提示、拖放遮罩
+│   ├── EntryList.swift        # 列表、分栏、图标网格、暂存条、行视图
+│   ├── DetailPane.swift       # 右侧详情栏与信息卡
+│   ├── SidebarPane.swift      # 左侧目录树
+│   ├── TaskCard.swift         # 长任务进度卡
 │   ├── Model.swift            # 状态机：打开、密码、嵌套栈、解压、创建、工作模式
 │   ├── PreviewPane.swift      # 右侧详情与预览
 │   ├── Batch.swift            # 批量解压 / 校验面板
-│   ├── Archive.swift          # 条目模型 + bsdtar / 7zz 双引擎封装（含增删）
+│   ├── Archive.swift          # 条目模型 + bsdtar / 7zz 双引擎封装（含增删、进度、取消）
 │   ├── ArchiveService.swift   # 统一入口：按格式选引擎 + 失败回退（打开/批量/暂存/QL 共用）
 │   ├── FormatCatalog.swift    # 格式目录（数据来自 MacPacker，生成文件）
 │   ├── FormatDetector.swift   # 后缀 + 魔数识别
-│   ├── Palette.swift          # 品牌色 + 尺寸 / 字号 / 间距 token
+│   ├── Palette.swift          # 品牌色 + 类型色板 + 尺寸 / 字号 / 间距 token
+│   ├── UniquePath.swift       # 重名避让（主程序与扩展共用一份）
 │   ├── HoverPreview.swift     # 悬停预览浮窗
 │   ├── QuickLook.swift        # 空格快速查看（QLPreviewPanel）
-│   ├── SettingsView.swift     # 设置中心（⌘,，5 个分页）
+│   ├── SettingsView.swift     # 设置中心（⌘,，左栏五个分页）
 │   ├── HomeView.swift         # 首页：打开 / 新建 / 最近打开 / 快速压缩
 │   ├── WelcomeView.swift      # 首次启动一屏说明
-│   └── FinderSettings.swift   # 访达右键配置（主程序写、扩展读）
+│   ├── FinderSettings.swift   # 访达右键配置（主程序写、扩展读）
+│   ├── PendingExtraction.swift# 加密包解锁后接着解压的意图记录
+│   └── PendingNotice.swift    # 扩展转交主程序的一句话结果
 ├── FinderSync/
 │   ├── FinderSync.swift       # 菜单构建与动作分发
 │   ├── MenuBuilder.swift      # 菜单判定：按选择类型给动作（纯逻辑，可单测）
 │   ├── JobKit.swift           # 目标目录、冲突策略、通知文案
-│   └── JobRunner.swift        # 解压 / 压缩执行、任务日志、通知
+│   └── JobRunner.swift        # 解压 / 压缩执行、任务日志
 ├── QuickLook/
 │   └── PreviewProvider.swift  # 快速查看扩展（QLPreviewingController）
 ├── Tests/
-│   └── main.swift             # 124 项断言（解析 / 转义 / 加密 / 识别 / 菜单 / 不覆盖 / 索引性能）
+│   ├── Support.swift          # 断言计数与样例包路径
+│   ├── ArchiveTests.swift     # 解析、列表、编辑、校验
+│   ├── ModelTests.swift       # 批量、打开判定、工作模式、排序
+│   ├── FinderTests.swift      # 菜单判定、任务计划与执行、转交
+│   ├── CompressTests.swift    # 级别、进度、包内路径
+│   └── main.swift             # 入口：按主题分组跑
 ├── Assets/
 │   ├── AppIcon.icns
 │   └── 7zz                    # 不入库，构建时下载
 ├── scripts/
+│   ├── sources.sh             # 共享源文件清单（build.sh 与 test.sh 都 source 它）
 │   ├── fetch-7zz.sh
 │   ├── gen-catalog.py
 │   ├── test.sh
+│   ├── install-local.sh       # 本地安装：重注册扩展 + 重启访达
 │   ├── poc-sandbox.sh         # POC：沙盒化扩展还能不能执行包内 7zz
 │   └── notarize.sh            # Developer ID 签名 + 公证（需要证书）
 ├── build.sh
@@ -169,7 +186,7 @@ rrzip/
 
 - 格式识别和主程序共用一套（后缀 + 魔数），改名为 `.bin` 的 zip 也认得出
 - 解压**不会覆盖**已有文件：解到「包名」文件夹，重名自动变「包名 2」；解到当前目录时同名文件跳过，完成通知里报跳过几个
-- 完成后发系统通知（数量、落点、失败原因）；通知被关掉也能在 `~/Library/Application Support/rrzip/finder-jobs.log` 查到
+- 完成后在访达里选中产物；跳过同名文件、解压失败会把原因转交主程序显示（访达扩展本身发不出系统通知，这是 appex 的权限边界）；每次任务都写 `~/Library/Application Support/rrzip/finder-jobs.log`
 
 首次使用要在 **系统设置 → 通用 → 登录项与扩展 → 访达扩展** 勾选 rrzip，然后重启访达（设置页里有「重新启动访达」按钮）。
 
@@ -181,7 +198,7 @@ rrzip/
 ./scripts/test.sh
 ```
 
-自动生成带中文名、含空格、嵌套目录、加密 7z、改名为 `.bin` 的样例包，断言 **124 项**：八进制转义还原、zip/tgz 列表、目录折叠、加密包识别与 7-Zip 回退、后缀与魔数识别、原地增删、子项索引一致性与 10 万条目性能、访达菜单矩阵、解压不覆盖（真的解压两次比对文件内容）、设置原子写。
+自动生成带中文名、含空格、嵌套目录、加密 7z、改名为 `.bin` 的样例包，断言 **142 项**：八进制转义还原、zip/tgz 列表、目录折叠、加密包识别与 7-Zip 回退、后缀与魔数识别、原地增删、子项索引一致性与 10 万条目性能、访达菜单矩阵、解压不覆盖（真的解压两次比对文件内容）、设置原子写、压缩进度回调、7zz 的 `-mx` 映射、扩展与主程序之间的两条转交记录。
 
 ## 许可
 
@@ -202,4 +219,5 @@ GNU GPL-3.0（见 [LICENSE](LICENSE)）。因为使用了 MacPacker 的格式目
 - 视频预览超过 800 MB 不在面板内加载，提示改用快速查看（解压整份文件到临时目录太慢）
 - 文本预览只读前 120 KB
 - 快速查看扩展只列条目，不预览条目内容
+- **访达扩展带全盘读写例外**：ad-hoc 签名下扩展拿不到「用户已选择文件」的沙盒授权，只能用 `temporary-exception.files.absolute-path.read-write` 兜底。这意味着该扩展进程能读写整块磁盘。拿到 Developer ID 后要复验能否删掉这条（脚本 `scripts/poc-sandbox.sh`）
 - 打开加密包时密码通过命令行参数传给 tar / 7zz，**同机其他用户理论上能在 `ps` 里看到**。单人使用的机器没问题，多用户共享机器上不要用它开加密包（libarchive 与 7-Zip 都不支持从标准输入读密码）
