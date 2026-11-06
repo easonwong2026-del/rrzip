@@ -517,6 +517,18 @@ do {
     expect(onlyOpen.filtered([.open, .extractHere, .compressZip]) == [.open],
            "设置里关掉的项从菜单消失")
 
+    // 设置落盘：设置页写、扩展读，中间不能有半截 JSON
+    let settingsFile = fixtures.appendingPathComponent("finder.json")
+    var saved = FinderSettings()
+    saved.secondLevel = false
+    saved.enabled = ["open", "extractHere"]
+    saved.extractStrategy = .here
+    FinderSettingsStore.save(saved, to: settingsFile)
+    expect(FinderSettings.load(from: settingsFile) == saved, "写盘后能原样读回")
+    expect(!FileManager.default.fileExists(
+        atPath: fixtures.appendingPathComponent(".finder.json.tmp").path),
+        "临时文件没有留在原地")
+
     // 解压到此处：落点是源目录，冲突一律跳过而不是覆盖
     let here = FinderJobPlanner.planExtraction(of: [zip], mode: .here)
     expect(here.count == 1, "一个包一条计划")

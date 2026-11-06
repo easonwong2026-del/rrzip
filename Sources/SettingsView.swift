@@ -9,6 +9,7 @@
 
 import AppKit
 import SwiftUI
+@preconcurrency import UserNotifications
 
 struct SettingsView: View {
     @ObservedObject var model: ArchiveModel
@@ -22,7 +23,7 @@ struct SettingsView: View {
             ExtractSettingsView(model: model)
                 .tabItem { Label("解压", systemImage: "tray.and.arrow.down") }
             IntegrationSettingsView()
-                .tabItem { Label("Finder 与预览", systemImage: "square.on.square") }
+                .tabItem { Label("访达与预览", systemImage: "square.on.square") }
             AdvancedSettingsView(model: model)
                 .tabItem { Label("高级", systemImage: "slider.horizontal.3") }
         }
@@ -186,16 +187,17 @@ private struct ExtractSettingsView: View {
 
 private struct IntegrationSettingsView: View {
     @State private var quickLookInstalled = false
+    @State private var finderInstalled = false
+    @State private var settings = FinderSettings.load()
+    @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
+    @State private var confirmRestartFinder = false
 
     var body: some View {
         Form {
             Section("快速查看") {
-                HStack(spacing: 8) {
-                    Image(systemName: quickLookInstalled ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(quickLookInstalled ? Color.green : Color.orange)
-                    Text(quickLookInstalled ? "扩展已内置，按空格即可看包内条目" : "未找到扩展，重新构建应用可恢复")
-                        .font(TypeScale.bodySmall)
-                }
+                statusRow(ok: quickLookInstalled,
+                          okText: "扩展已内置，按空格即可看包内条目",
+                          badText: "未找到扩展，重新构建应用可恢复")
                 Button("打开「登录项与扩展」设置") { openExtensionSettings() }
                     .controlSize(.small)
                 Text("若空格仍无反应：系统设置 → 通用 → 登录项与扩展 → 快速查看，勾选 rrzip。")
@@ -204,21 +206,151 @@ private struct IntegrationSettingsView: View {
             }
 
             Section("访达右键") {
-                Text("已注册「用 rrzip 压缩」与「用 rrzip 打开」。在访达右键 → 服务 里使用。")
-                    .font(TypeScale.bodySmall)
-                Button("打开「键盘快捷键 → 服务」设置") { openServicesSettings() }
-                    .controlSize(.small)
-                Text("找不到时，在服务列表里勾选一次即可常驻。")
+                statusRow(ok: finderInstalled,
+                          okText: "访达扩展已随应用安装",
+                          badText: "未找到访达扩展，重新构建应用可恢复")
+                Text("系统设置 → 通用 → 登录项与扩展 → 访达扩展，勾选 rrzip。这里判断不了你有没有勾——macOS 没有公开接口，所以只给步骤，不做假状态灯。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: Space.m) {
+                    Button("打开「登录项与扩展」") { openExtensionSettings() }
+                    Button("重新启动访达") { confirmRestartFinder = true }
+                    Spacer()
+                }
+                .controlSize(.small)
+            }
+
+            Section("右键菜单") {
+                Toggle("放进 rrzip 二级菜单", isOn: $settings.secondLevel)
+                ForEach(FinderAction.allCases, id: \.self) { action in
+                    Toggle(action.title, isOn: binding(for: action))
+                }
+                Text("改动后需重启访达生效；全部关掉就不显示菜单。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("解压位置") {
+                Picker("解压到", selection: $settings.extractStrategy) {
+                    Text("「包名」文件夹").tag(FinderSettings.ExtractStrategy.newFolder)
+                    Text("压缩包所在目录").tag(FinderSettings.ExtractStrategy.here)
+                }
+                .pickerStyle(.segmented)
+                Text("同名文件一律跳过，不会覆盖；重名文件夹自动加序号。加密包只提示，不解压。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("通知") {
+                HStack(spacing: 8) {
+                    Image(systemName: notificationIcon)
+                        .foregroundStyle(notificationColor)
+                    Text(notificationText)
+                        .font(TypeScale.bodySmall)
+                    Spacer()
+                    switch notificationStatus {
+                    case .notDetermined:
+                        Button("请求权限") { requestNotifications() }
+                            .controlSize(.small)
+                    case .denied:
+                        Button("打开通知设置") { openNotificationSettings() }
+                            .controlSize(.small)
+                    default:
+                        EmptyView()
+                    }
+                }
+                Text("访达右键任务完成后靠通知汇报结果。扩展自己申请不了授权，只能由这里申请一次。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            let appex = Bundle.main.builtInPlugInsURL?
-                .appendingPathComponent("ArchivePreview.appex")
-            quickLookInstalled = appex.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        .onAppear(perform: refresh)
+        .onChange(of: settings) { _, newValue in FinderSettingsStore.save(newValue) }
+        .alert("重新启动访达？", isPresented: $confirmRestartFinder) {
+            Button("取消", role: .cancel) {}
+            Button("重启", role: .destructive) { restartFinder() }
+        } message: {
+            Text("访达会关闭并重新打开，已打开的窗口会被恢复。")
         }
+    }
+
+    // MARK: 状态
+
+    private var notificationIcon: String {
+        switch notificationStatus {
+        case .authorized, .provisional: return "checkmark.circle.fill"
+        case .denied: return "xmark.circle.fill"
+        default: return "questionmark.circle.fill"
+        }
+    }
+
+    private var notificationColor: Color {
+        switch notificationStatus {
+        case .authorized, .provisional: return .green
+        case .denied: return .red
+        default: return .secondary
+        }
+    }
+
+    private var notificationText: String {
+        switch notificationStatus {
+        case .authorized: return "已授权，任务完成会发通知"
+        case .provisional: return "临时授权，通知会静默投递"
+        case .denied: return "已拒绝，任务照常完成但不会提示"
+        case .notDetermined: return "还没询问过"
+        @unknown default: return "状态未知"
+        }
+    }
+
+    @ViewBuilder
+    private func statusRow(ok: Bool, okText: String, badText: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(ok ? Color.green : Color.orange)
+            Text(ok ? okText : badText)
+                .font(TypeScale.bodySmall)
+        }
+    }
+
+    private func binding(for action: FinderAction) -> Binding<Bool> {
+        Binding(
+            get: { settings.isEnabled(action) },
+            set: { settings.setEnabled(action, $0) }
+        )
+    }
+
+    // MARK: 动作
+
+    private func refresh() {
+        let plugins = Bundle.main.builtInPlugInsURL
+        let fm = FileManager.default
+        if let url = plugins?.appendingPathComponent("ArchivePreview.appex") {
+            quickLookInstalled = fm.fileExists(atPath: url.path)
+        }
+        if let url = plugins?.appendingPathComponent("ArchiveFinder.appex") {
+            finderInstalled = fm.fileExists(atPath: url.path)
+        }
+        settings = FinderSettings.load()
+
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            let status = settings.authorizationStatus
+            DispatchQueue.main.async { notificationStatus = status }
+        }
+    }
+
+    private func requestNotifications() {
+        UNUserNotificationCenter.current()
+            .requestAuthorization(options: [.alert, .sound]) { _, _ in
+                DispatchQueue.main.async { refresh() }
+            }
+    }
+
+    private func restartFinder() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        process.arguments = ["Finder"]
+        try? process.run()
     }
 
     private func openExtensionSettings() {
@@ -231,10 +363,10 @@ private struct IntegrationSettingsView: View {
         }
     }
 
-    private func openServicesSettings() {
+    private func openNotificationSettings() {
         let urls = [
-            "x-apple.systempreferences:com.apple.Keyboard-Settings.extension",
-            "x-apple.systempreferences:com.apple.ExtensionsPreferences"
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
+            "x-apple.systempreferences:com.apple.preference.notifications"
         ]
         for string in urls {
             if let url = URL(string: string), NSWorkspace.shared.open(url) { return }

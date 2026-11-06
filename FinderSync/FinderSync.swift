@@ -33,24 +33,37 @@ final class FinderSync: FIFinderSync {
 
         let selection = FinderSelection.inspect(urls)
         // 设置里勾掉的项不出现；全关掉就连菜单一起不显示
-        let actions = FinderSettings.load().filtered(FinderMenuBuilder.actions(for: selection))
+        let config = FinderSettings.load()
+        let actions = config.filtered(FinderMenuBuilder.actions(for: selection))
         let note = FinderMenuBuilder.unsupportedNote(for: selection)
         guard !actions.isEmpty || note != nil else { return nil }
 
-        let menu = NSMenu(title: "rrzip")
+        let root = NSMenu(title: "rrzip")
+        // 默认收进 rrzip 二级菜单，不污染访达右键一级；设置里可以改成直接展开
+        let host: NSMenu
+        if config.secondLevel {
+            let parent = NSMenuItem(title: "rrzip", action: nil, keyEquivalent: "")
+            let submenu = NSMenu(title: "rrzip")
+            parent.submenu = submenu
+            root.addItem(parent)
+            host = submenu
+        } else {
+            host = root
+        }
+
         for action in actions {
             let item = NSMenuItem(title: FinderMenuBuilder.title(for: action, in: selection),
                                   action: selector(for: action), keyEquivalent: "")
             item.target = self
-            menu.addItem(item)
+            host.addItem(item)
         }
         if let note {
-            if !actions.isEmpty { menu.addItem(.separator()) }
+            if !actions.isEmpty { host.addItem(.separator()) }
             let item = NSMenuItem(title: note, action: nil, keyEquivalent: "")
             item.isEnabled = false
-            menu.addItem(item)
+            host.addItem(item)
         }
-        return menu
+        return root
     }
 
     private func selector(for action: FinderAction) -> Selector {

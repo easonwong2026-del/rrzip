@@ -12,23 +12,8 @@
 
 import Foundation
 
-/// 右键菜单里的动作。rawValue 同时是 finder.json 里开关键的取值。
-enum FinderAction: String, CaseIterable, Codable {
-    case open
-    case extractHere
-    case extractToFolder
-    case compressZip
-    case compressSevenZip
-    case compressEach
-
-    /// 界面上「解压」这类动作要排在「压缩」前面
-    var isExtract: Bool {
-        switch self {
-        case .open, .extractHere, .extractToFolder: return true
-        case .compressZip, .compressSevenZip, .compressEach: return false
-        }
-    }
-}
+// FinderAction 定义在 Sources/FinderSettings.swift——主程序设置页也要用它，
+// 放在这里会让扩展和主程序各有一份，迟早对不上。
 
 /// 一次选择分类的结果。压缩包 / 普通项目 / 认得出但打不开，三类分开存。
 struct FinderSelection {

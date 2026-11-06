@@ -6,69 +6,10 @@
 //
 //  访达右键任务的「计划层」：算目标目录、定冲突策略、拼通知文案。
 //  不执行、不写盘、不碰 AppKit，全部分支都能在单元测试里跑到。
-//  真正干活的在 JobRunner.swift。
+//  设置结构在 Sources/FinderSettings.swift（主程序也要读写），真正干活的在 JobRunner.swift。
 //
 
 import Foundation
-
-// MARK: - 设置
-
-/// 扩展读的配置。主程序写，扩展只读。
-/// ad-hoc 签名下 App Group 不生效（没有 Team ID），所以走共享文件；
-/// 上了 Developer ID 再换成 UserDefaults(suiteName:)，这个结构不用动。
-struct FinderSettings: Codable, Sendable {
-    enum ExtractStrategy: String, Codable, Sendable {
-        /// 解到「包名」子目录，重名就「包名 2」
-        case newFolder
-        /// 解到压缩包所在目录
-        case here
-    }
-
-    var secondLevel: Bool
-    var enabled: [String]
-    var extractStrategy: ExtractStrategy
-
-    static let allActions = FinderAction.allCases.map(\.rawValue)
-
-    init(secondLevel: Bool = true,
-         enabled: [String] = FinderSettings.allActions,
-         extractStrategy: ExtractStrategy = .newFolder) {
-        self.secondLevel = secondLevel
-        self.enabled = enabled
-        self.extractStrategy = extractStrategy
-    }
-
-    // 配置里少一个键不应该让整份设置失效，逐项给默认值
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        secondLevel = try container.decodeIfPresent(Bool.self, forKey: .secondLevel) ?? true
-        enabled = try container.decodeIfPresent([String].self, forKey: .enabled)
-            ?? FinderSettings.allActions
-        extractStrategy = try container.decodeIfPresent(ExtractStrategy.self, forKey: .extractStrategy)
-            ?? .newFolder
-    }
-
-    static var fileURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/rrzip/finder.json")
-    }
-
-    static func load(from url: URL = FinderSettings.fileURL) -> FinderSettings {
-        guard let data = try? Data(contentsOf: url),
-              let settings = try? JSONDecoder().decode(FinderSettings.self, from: data)
-        else { return FinderSettings() }
-        return settings
-    }
-
-    func isEnabled(_ action: FinderAction) -> Bool {
-        enabled.contains(action.rawValue)
-    }
-
-    /// 菜单项按设置过滤。全关掉就返回空，菜单不显示。
-    func filtered(_ actions: [FinderAction]) -> [FinderAction] {
-        actions.filter(isEnabled)
-    }
-}
 
 // MARK: - 计划
 
