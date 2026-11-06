@@ -119,7 +119,9 @@ final class FinderSync: FIFinderSync {
                                                      needsPassword: outcome.needsPassword,
                                                      skippedFiles: outcome.skippedFiles,
                                                      destination: outcome.destination?.path)))
-            FinderNotifier.post(outcome, verb: "解压")
+            // 「解压到此处」的产物就是当前目录，跳过去没意义，只发通知
+            FinderNotifier.report(outcome, verb: "解压",
+                                  reveal: mode == .newFolder ? outcome.destination : nil)
         }
     }
 
@@ -154,7 +156,7 @@ final class FinderSync: FIFinderSync {
                                                      needsPassword: outcome.needsPassword,
                                                      skippedFiles: outcome.skippedFiles,
                                                      destination: outcome.destination?.path)))
-            FinderNotifier.post(outcome, verb: "压缩")
+            FinderNotifier.report(outcome, verb: "压缩", reveal: outcome.destination)
         }
     }
 }

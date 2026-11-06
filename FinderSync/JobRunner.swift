@@ -8,6 +8,7 @@
 //  计划本身在 JobKit.swift（纯逻辑），这里只做「真的动文件」和「把结果说出去」。
 //
 
+import AppKit
 import Foundation
 // 同上：UNUserNotificationCenter 未标 Sendable，@preconcurrency 只压警告不改语义
 @preconcurrency import UserNotifications
@@ -74,22 +75,50 @@ enum FinderJobLog {
 
 enum FinderNotifier {
 
-    /// 扩展不能自己申请授权，只能投递。主程序启动时申请一次，
-    /// 用户拒绝的话 add 会失败，任务本身仍然完成——所以调用方不要依赖返回值。
-    static func post(_ outcome: JobOutcome, verb: String) {
-        let content = UNMutableNotificationContent()
-        content.title = FinderNoticeText.title(for: outcome, verb: verb)
-        if let body = FinderNoticeText.body(for: outcome) {
-            content.body = body
-        }
-        if let destination = outcome.destination {
-            content.userInfo = ["reveal": destination.path]
-        }
+    /// 扩展不能自己申请授权，只能投递。主程序启动时申请一次。
+    ///
+    /// 关键：**通知不等于反馈的全部**。用户拒绝过通知、或系统压掉横幅时，
+    /// 任务做完了却「什么都没发生」——这是最伤人的状态。
+    /// 所以先按 reveal 把产物在访达里亮出来，通知只当补充。
+    /// 注意「解压到此处」不该 reveal：产物就是当前目录，跳过去没有意义，
+    /// 这种情况只能靠通知，调用方传 `reveal: nil`。
+    static func report(_ outcome: JobOutcome, verb: String, reveal: URL?) {
+        revealInFinder(reveal)
 
-        let request = UNNotificationRequest(identifier: UUID().uuidString,
-                                           content: content,
-                                           trigger: nil)
-        UNUserNotificationCenter.current().add(request) { _ in }
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            let allowed = settings.authorizationStatus == .authorized
+                || settings.authorizationStatus == .provisional
+            guard allowed else { return }
+
+            let content = UNMutableNotificationContent()
+            content.title = FinderNoticeText.title(for: outcome, verb: verb)
+            if let body = FinderNoticeText.body(for: outcome) {
+                content.body = body
+            }
+            if let reveal {
+                content.userInfo = ["reveal": reveal.path]
+            }
+
+            let request = UNNotificationRequest(identifier: UUID().uuidString,
+                                               content: content,
+                                               trigger: nil)
+            center.add(request) { _ in }
+        }
+    }
+
+    /// 同一批多选会调多次，1 秒内只跳一次，别把访达刷屏
+    nonisolated(unsafe) private static var lastReveal = Date.distantPast
+
+    /// 在访达里选中产物。沙盒扩展调用它只是给 Finder 发个事件，不需要文件权限。
+    private static func revealInFinder(_ url: URL?) {
+        guard let url else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastReveal) > 1.0 else { return }
+        lastReveal = now
+        DispatchQueue.main.async {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
     }
 }
 
