@@ -215,6 +215,7 @@ xcrun swiftc \
     -o "$FSXPATH/Contents/MacOS/ArchiveFinder" \
     Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift \
     Sources/ArchiveService.swift Sources/FinderSettings.swift Sources/PendingExtraction.swift \
+    Sources/PendingNotice.swift \
     FinderSync/MenuBuilder.swift FinderSync/JobKit.swift FinderSync/JobRunner.swift \
     FinderSync/FinderSync.swift
 

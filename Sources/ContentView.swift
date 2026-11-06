@@ -264,6 +264,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     static func attach(_ model: ArchiveModel) {
         Self.model = model
+        // 访达那边转交过来的结果（跳过 N 个、解压失败），启动时补一句
+        if let notice = PendingNotice.take() {
+            model.notice = "\(notice.title) · \(notice.message)"
+        }
         guard !pendingOpen.isEmpty else { return }
         let urls = pendingOpen
         pendingOpen = []
@@ -297,6 +301,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
         requestNotificationPermissionIfNeeded()
+    }
+
+    /// 访达那边做完任务后只是「唤起 app」，不带文件参数，
+    /// `application(_:open:)` 不会触发。激活时才取结果最稳。
+    func applicationDidBecomeActive(_ notification: Notification) {
+        Task { @MainActor in
+            guard let notice = PendingNotice.take(), let model = AppDelegate.model else { return }
+            model.notice = "\(notice.title) · \(notice.message)"
+        }
     }
 
     /// 访达扩展只能投递通知、不能申请授权，所以授权这件事只能由主程序做。
