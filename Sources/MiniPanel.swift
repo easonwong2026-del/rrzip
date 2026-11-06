@@ -55,9 +55,15 @@ final class MiniTabs: ObservableObject {
     struct Tab: Identifiable {
         let id = UUID()
         let model = ArchiveModel()
-        var title: String {
-            model.current?.archive.deletingPathExtension().lastPathComponent ?? "未命名"
+        /// 标签名在打开时就定下来：Tab 不是 ObservableObject，
+        /// 从 model 现算的话，包读完了标题也不会刷新（一直显示「未命名」）
+        let name: String
+
+        init(url: URL) {
+            name = url.deletingPathExtension().lastPathComponent
         }
+
+        var title: String { name.isEmpty ? "未命名" : name }
     }
 
     @Published private(set) var tabs: [Tab] = []
@@ -79,7 +85,7 @@ final class MiniTabs: ObservableObject {
             // 关掉最早的一个，给新标签腾位置
             if let oldest = tabs.first { close(oldest.id) }
         }
-        let tab = Tab()
+        let tab = Tab(url: url)
         tabs.append(tab)
         activeID = tab.id
         tab.model.open(url: url)
@@ -153,33 +159,44 @@ struct MiniView: View {
 
     private var tabStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
+            HStack(spacing: 3) {
                 ForEach(tabs.tabs) { tab in
+                    let active = tabs.activeID == tab.id
                     HStack(spacing: 4) {
+                        Image(systemName: "shippingbox.fill")
+                            .font(.system(size: 8.5, weight: .medium))
+                            .foregroundStyle(active ? Palette.brand : Color.secondary)
                         Text(tab.title)
-                            .font(.system(size: 10.5))
+                            .font(.system(size: 10.5, weight: active ? .medium : .regular))
                             .lineLimit(1)
+                            .truncationMode(.middle)
                         Button {
                             tabs.close(tab.id)
                         } label: {
                             Image(systemName: "xmark")
-                                .font(.system(size: 7, weight: .bold))
+                                .font(.system(size: 6.5, weight: .bold))
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 10, height: 10)
                         }
                         .buttonStyle(.plain)
-                        .foregroundStyle(.tertiary)
                     }
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
+                    .padding(.leading, 7)
+                    .padding(.trailing, 4)
+                    .padding(.vertical, 3.5)
                     .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(tabs.activeID == tab.id ? Palette.brand.opacity(0.18) : Color.clear)
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(active ? Palette.brand.opacity(0.14) : Color.primary.opacity(0.04))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(active ? Palette.brand.opacity(0.22) : .clear, lineWidth: 0.5)
                     )
                     .contentShape(Rectangle())
                     .onTapGesture { tabs.select(tab.id) }
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.top, 22)
+            .padding(.top, 24)
             .padding(.bottom, 5)
         }
     }
@@ -236,7 +253,10 @@ struct MiniBody: View {
                 model.goBack()
             } label: {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
+                    .frame(width: 20, height: 20)
+                    .background(Color.primary.opacity(0.05),
+                                in: RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
             .buttonStyle(.plain)
             .disabled(!model.canGoBack)
@@ -310,10 +330,14 @@ struct MiniBody: View {
                     }
                 }
                 .listRowInsets(EdgeInsets(top: 1, leading: 10, bottom: 1, trailing: 10))
+                .listRowSeparator(.hidden)
                 .listRowBackground(
-                    model.selection.contains(entry.id)
-                        ? Palette.brand.opacity(0.16)
-                        : Color.clear
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(model.selection.contains(entry.id)
+                              ? Palette.brand.opacity(Palette.selectionFill)
+                              : Color.clear)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
                 )
                 .contentShape(Rectangle())
                 .onTapGesture { model.select(entry) }

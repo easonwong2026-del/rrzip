@@ -201,6 +201,14 @@ struct RrzipApp: App {
             }
         }
         .commands {
+            CommandGroup(after: .pasteboard) {
+                Button("搜索包内文件") {
+                    NotificationCenter.default.post(name: .rrzipFocusSearch, object: nil)
+                }
+                .keyboardShortcut("f")
+            }
+        }
+        .commands {
             CommandGroup(after: .toolbar) {
                 Button("返回上级") { model.goBack() }
                     .keyboardShortcut(.upArrow, modifiers: .command)
@@ -297,50 +305,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - 主界面
+
+extension Notification.Name {
+    /// ⌘F：把焦点丢进搜索框（菜单项发、主界面收）
+    static let rrzipFocusSearch = Notification.Name("rrzipFocusSearch")
+}
+
 struct ContentView: View {
     @ObservedObject var model: ArchiveModel
     @StateObject private var hover = HoverCoordinator()
     @FocusState private var listFocused: Bool
+    @FocusState private var searchFocused: Bool
     @State private var stashTargeted = false
     @State private var isDropTarget = false
+    /// 左右两栏的显隐，跟 viewMode 一样记住用户上次的选择
+    @AppStorage("rrzip.showSidebar") private var showSidebar = true
+    @AppStorage("rrzip.showInspector") private var showInspector = true
 
     var body: some View {
         VStack(spacing: 0) {
             toolbar
-            Divider()
-            breadcrumb
-            Divider()
+            Hairline()
+            breadcrumbBar
+            Hairline()
 
             if model.current == nil {
                 emptyState
             } else {
-                HSplitView {
-                    sidebar
-                        .frame(minWidth: 168, idealWidth: 196, maxWidth: 280)
-                    entryList
-                        .frame(minWidth: 360)
-                    detailPane
-                        .frame(minWidth: 236, idealWidth: 276, maxWidth: 340)
+                // HSplitView 里条件显隐子视图后，理想宽度会算不准，
+                // 必须显式把可用宽高喂给它，否则最右一栏会被窗口裁掉
+                GeometryReader { proxy in
+                    HSplitView {
+                        if showSidebar {
+                            sidebar
+                                .frame(minWidth: 172, idealWidth: 198, maxWidth: 280)
+                        }
+                        entryList
+                            .frame(minWidth: 360)
+                        if showInspector {
+                            detailPane
+                                .frame(minWidth: 250, idealWidth: 288, maxWidth: 340)
+                        }
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height)
                 }
+                // GeometryReader 的理想宽度接近 0，会让窗口被挤到最小宽度，补回理想尺寸
+                .frame(idealWidth: 1120, idealHeight: 660)
             }
 
             if model.isStashVisible {
-                Divider()
+                Hairline()
                 stashBar
             }
 
-            Divider()
+            Hairline()
             statusBar
         }
-        .overlay {
-            if isDropTarget {
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Palette.brand, lineWidth: 3)
-                    .padding(6)
-                    .allowsHitTesting(false)
-            }
-        }
-        .tint(Palette.brand)
+        .overlay { dropOverlay }
         .preferredColorScheme(model.appearance.scheme)
         .onDrop(of: [.fileURL], isTargeted: $isDropTarget) { providers in
             guard !providers.isEmpty else { return false }
@@ -472,6 +494,20 @@ struct ContentView: View {
             }
 #endif
         }
+        .onReceive(NotificationCenter.default.publisher(for: .rrzipFocusSearch)) { _ in
+            searchFocused = true
+        }
+        .onAppear {
+            // 分栏改成条件显隐后，SwiftUI 算出的理想宽度会小于 defaultSize，
+            // 窗口会被挤到最小宽度。首帧把默认尺寸补回来，之后用户怎么拖都不干预。
+            // 空状态首帧窗口可能还没 visible，延迟半拍再补
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                if let window = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 400 }),
+                   window.frame.width < 1100 {
+                    window.setContentSize(NSSize(width: 1180, height: 720))
+                }
+            }
+        }
         .sheet(item: $model.batchRequest) { request in
             BatchSheet(urls: request.urls, mode: request.mode)
         }
@@ -485,316 +521,483 @@ struct ContentView: View {
         }
     }
 
+    // MARK: 拖入提示
+
+    @ViewBuilder
+    private var dropOverlay: some View {
+        if isDropTarget {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Palette.brand.opacity(0.05))
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Palette.brand.opacity(0.5),
+                                  style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                HStack(spacing: 7) {
+                    Image(systemName: "arrow.down.doc.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("松开即可打开")
+                        .font(TypeScale.bodySmall.weight(.medium))
+                }
+                .foregroundStyle(Palette.brand)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .padding(8)
+            .allowsHitTesting(false)
+            .transition(.opacity)
+        }
+    }
+
+    // MARK: 工具栏
+
     private var toolbar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
+            ToolButton(symbol: "sidebar.leading",
+                       help: showSidebar ? "隐藏目录栏" : "显示目录栏") {
+                showSidebar.toggle()
+            }
+
             Button {
                 model.openWithPanel()
             } label: {
                 Label("打开", systemImage: "folder")
-                    .labelStyle(.titleAndIcon)
+                    .font(TypeScale.bodySmall.weight(.medium))
             }
             .buttonStyle(.borderedProminent)
             .tint(Palette.brand)
+            .help("打开压缩包（⌘O）")
 
-            Button {
-                model.extractAll()
-            } label: {
-                Image(systemName: "arrow.down.doc")
+            // 解压只留一个入口：有选中解选中、没选中解全部；
+            // 旁边的小三角给出明确选项，比两个长得几乎一样的图标好懂
+            HStack(spacing: 0) {
+                Button {
+                    if model.selection.isEmpty { model.extractAll() } else { model.extractSelection() }
+                } label: {
+                    Label("解压", systemImage: "tray.and.arrow.down")
+                        .font(TypeScale.bodySmall.weight(.medium))
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.current == nil)
+                .help(model.selection.isEmpty ? "全部解压（⌘E）" : "解压选中的 \(model.selection.count) 项（⇧⌘E）")
+
+                Menu {
+                    Button("全部解压") { model.extractAll() }
+                        .disabled(model.current == nil)
+                    Button("只解压选中项") { model.extractSelection() }
+                        .disabled(model.selection.isEmpty)
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7.5, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .disabled(model.current == nil)
+                .help("选择解压范围")
             }
-            .disabled(model.current == nil)
-            .help("全部解压（⌘E）")
-
-            Button {
-                model.extractSelection()
-            } label: {
-                Image(systemName: "square.and.arrow.down.on.square")
-            }
-            .disabled(model.selection.isEmpty)
-            .help("只解压选中项（⇧⌘E）")
-
-            Divider().frame(height: 18)
 
             Button {
                 model.createArchive()
             } label: {
-                Image(systemName: "archivebox")
+                Label("新建", systemImage: "archivebox")
+                    .font(TypeScale.bodySmall.weight(.medium))
             }
+            .buttonStyle(.bordered)
             .help("新建压缩包（⌘N）")
 
-            Button {
-                MiniPanelController.shared.toggle()
-            } label: {
-                Image(systemName: "macwindow.on.rectangle")
-            }
-            .help("Mini 小窗：拖入即看，看完就走")
+            groupDivider
 
-            Button {
-                model.isStashVisible.toggle()
-            } label: {
-                Image(systemName: model.stash.isEmpty ? "tray" : "tray.full")
-                    .overlay(alignment: .topTrailing) {
-                        if !model.stash.isEmpty {
-                            Text("\(model.stash.count)")
-                                .font(.system(size: 8, weight: .bold))
-                                .padding(.horizontal, 3)
-                                .padding(.vertical, 1)
-                                .background(Palette.brand, in: Capsule())
-                                .foregroundStyle(.white)
-                                .offset(x: 7, y: -6)
-                        }
-                    }
+            ToolButton(symbol: "macwindow.on.rectangle", help: "Mini 小窗：拖入即看，看完就走") {
+                MiniPanelController.shared.toggle()
             }
-            .disabled(model.current == nil)
-            .help("暂存区：把选中项攒起来，跨目录跨包一起导出")
+            stashButton
 
             Spacer(minLength: 12)
 
             searchField
-
-            Picker("视图", selection: $model.viewMode) {
-                ForEach(ArchiveViewMode.allCases) { mode in
-                    Image(systemName: mode.symbol).tag(mode)
-                }
+            viewSwitcher
+            ToolButton(symbol: "sidebar.right",
+                       help: showInspector ? "隐藏详情栏" : "显示详情栏",
+                       inactive: model.current == nil) {
+                showInspector.toggle()
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 122)
-            .help("切换列表 / 图标")
+            overflowMenu
+        }
+        .padding(.horizontal, Metrics.gutter)
+        .frame(height: Metrics.toolbarHeight)
+        .background(.bar)
+    }
 
-            if model.isLoading { ProgressView().controlSize(.small) }
+    private var groupDivider: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor).opacity(0.6))
+            .frame(width: 1, height: 16)
+            .padding(.horizontal, 3)
+    }
 
-            Menu {
-                Button("在访达中显示") { model.revealInFinder() }
-                Button("检查完整性") { model.verifyCurrent() }
-                if model.isEncrypted { Button("锁定并清除密码") { model.lockCurrent() } }
-                Divider()
-                Picker("外观", selection: $model.appearance) {
-                    ForEach(AppearanceMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+    private var stashButton: some View {
+        Button {
+            model.isStashVisible.toggle()
+        } label: {
+            Image(systemName: model.stash.isEmpty ? "tray" : "tray.full")
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(model.isStashVisible ? Palette.brand : Color.primary.opacity(0.82))
+                .frame(width: 27, height: 24)
+                .overlay(alignment: .topTrailing) {
+                    if !model.stash.isEmpty {
+                        Text("\(model.stash.count)")
+                            .font(.system(size: 8, weight: .bold))
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(Palette.brand, in: Capsule())
+                            .foregroundStyle(.white)
+                            .offset(x: 4, y: 1)
                     }
                 }
-                .pickerStyle(.inline)
-            } label: {
-                Image(systemName: "ellipsis.circle")
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .disabled(model.current == nil)
-
-            Menu {
-                Button("添加文件…") { model.addFiles() }
-                    .disabled(model.current == nil)
-                Button("删除选中项…") { model.deleteSelection() }
-                    .disabled(model.selection.isEmpty)
-            } label: {
-                Label("编辑", systemImage: "pencil")
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .disabled(model.current == nil || model.isNested)
-            .help(model.isNested ? "嵌套包内不支持编辑：请先导出内层包" : "在压缩包里增删文件，保存后原地写回")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
+        .buttonStyle(.plain)
+        .disabled(model.current == nil)
+        .opacity(model.current == nil ? 0.32 : 1)
+        .help("暂存区：把选中项攒起来，跨目录跨包一起导出")
     }
 
     private var searchField: some View {
         HStack(spacing: 5) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.tertiary)
             TextField("搜索包内文件", text: $model.searchText)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .frame(width: 132)
+                .font(.system(size: 11.5))
+                .focused($searchFocused)
+                .frame(width: 128)
                 .disabled(model.current == nil)
+                .onExitCommand { model.searchText = "" }
             if !model.searchText.isEmpty {
                 Button {
                     model.searchText = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 11))
+                        .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
+                .help("清除搜索")
             }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 6))
+        .frame(height: 24)
+        .background(Color.primary.opacity(0.05),
+                    in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(searchFocused ? Palette.brand.opacity(0.55) : Color.primary.opacity(0.06),
+                              lineWidth: 1)
+        )
+        .help("搜索包内文件（⌘F）")
     }
 
-    private var breadcrumb: some View {
-        HStack(spacing: 6) {
-            if model.trail.isEmpty {
-                Text("未打开归档")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-            } else if model.isSearching {
-                HStack(spacing: 4) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 10))
-                    Text("搜索「\(model.searchText)」· \(model.displayEntries.count) 个结果")
-                        .font(.system(size: 12))
+    private var viewSwitcher: some View {
+        HStack(spacing: 1) {
+            ForEach(ArchiveViewMode.allCases) { mode in
+                Button {
+                    model.viewMode = mode
+                } label: {
+                    Image(systemName: mode.symbol)
+                        .font(TypeScale.label.weight(.medium))
+                        .foregroundStyle(model.viewMode == mode ? Color.primary : Color.secondary)
+                        .frame(width: 24, height: 20)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(model.viewMode == mode ? Color.primary.opacity(0.10) : .clear)
+                        )
+                        .contentShape(Rectangle())
                 }
-                .foregroundStyle(.secondary)
+                .buttonStyle(.plain)
+                .help(mode.title)
+            }
+        }
+        .padding(2)
+        .background(Color.primary.opacity(0.045),
+                    in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+
+    private var overflowMenu: some View {
+        Menu {
+            Button("在访达中显示") { model.revealInFinder() }
+            Button("检查完整性") { model.verifyCurrent() }
+            if model.isEncrypted { Button("锁定并清除密码") { model.lockCurrent() } }
+            Divider()
+            Button("添加文件…") { model.addFiles() }
+                .disabled(model.isNested)
+            Button("删除选中项…") { model.deleteSelection() }
+                .disabled(model.selection.isEmpty || model.isNested)
+            Divider()
+            Picker("外观", selection: $model.appearance) {
+                ForEach(AppearanceMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 13, weight: .regular))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 24)
+        .fixedSize()
+        .disabled(model.current == nil)
+        .opacity(model.current == nil ? 0.35 : 1)
+        .help("更多操作")
+    }
+
+    // MARK: 面包屑
+
+    private var breadcrumbBar: some View {
+        HStack(spacing: 4) {
+            if model.trail.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "shippingbox")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                    Text("未打开归档")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.leading, 4)
+            } else if model.isSearching {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Palette.brand)
+                    Text("搜索「\(model.searchText)」")
+                        .font(TypeScale.bodySmall.weight(.medium))
+                    Text("· \(model.displayEntries.count) 个结果")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.leading, 4)
             } else {
+                if model.canGoBack {
+                    Button {
+                        model.goBack()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 20, height: 20)
+                            .background(Color.primary.opacity(0.05),
+                                        in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .help("返回上一级（⌘[）")
+                    .padding(.trailing, 2)
+                }
+
                 ForEach(Array(model.trail.enumerated()), id: \.element.id) { index, frame in
                     if index > 0 {
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.tertiary)
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(.quaternary)
                     }
-                    Button {
-                        model.popTo(index)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: breadcrumbIcon(index))
-                                .font(.system(size: 10))
-                            Text(frame.title)
-                                .font(.system(size: 12, weight: index == model.trail.count - 1 ? .semibold : .regular))
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(index == model.trail.count - 1 ? Color.primary : Color.secondary)
+                    crumb(index: index, frame: frame)
                 }
             }
-            Spacer()
+
+            Spacer(minLength: 8)
+
             if let current = model.current {
                 Text(current.archive.deletingLastPathComponent().path)
-                    .font(.system(size: 11))
+                    .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .help(current.archive.path)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
+        .padding(.horizontal, Metrics.gutter)
+        .frame(height: Metrics.breadcrumbHeight)
+        .background(.bar.opacity(0.6))
     }
+
+    private func crumb(index: Int, frame: ArchiveModel.Frame) -> some View {
+        let isLast = index == model.trail.count - 1
+        return Button {
+            model.popTo(index)
+        } label: {
+            HStack(spacing: 5) {
+                KindBadge(kind: frame.prefix.isEmpty ? .archive : .folder, side: 15, corner: 4)
+                Text(frame.title)
+                    .font(TypeScale.bodySmall.weight(isLast ? .semibold : .regular))
+                    .foregroundStyle(isLast ? Color.primary : Color.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 5)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(isLast ? Color.primary.opacity(0.055) : .clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(frame.title)
+    }
+
+    // MARK: 目录树
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 6) {
                 Text("目录")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(TypeScale.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-
-            List {
-                Button {
-                    model.jump(to: "")
-                } label: {
-                    HStack(spacing: 5) {
-                        KindBadge(kind: .archive, side: 16, corner: 4)
-                            .frame(width: 16, height: 16)
-                        Text(model.current?.archive.deletingPathExtension().lastPathComponent ?? "根目录")
-                            .font(.system(size: 12, weight: model.current?.prefix.isEmpty == true ? .semibold : .regular))
-                            .lineLimit(1)
-                    }
+                if model.folderTree.count > 0 {
+                    Text("\(model.folderTree.count)")
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(.tertiary)
                 }
-                .buttonStyle(.plain)
-                .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 5)
 
-                OutlineGroup(model.folderTree, children: \.optionalChildren) { node in
-                    Button {
-                        model.jump(to: node.path)
-                    } label: {
-                        HStack(spacing: 5) {
-                            KindBadge(kind: .folder, side: 16, corner: 4)
-                                .frame(width: 16, height: 16)
-                            Text(node.name)
-                                .font(.system(size: 12, weight: model.current?.prefix == node.path ? .semibold : .regular))
-                                .lineLimit(1)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    SidebarRow(
+                        title: model.current?.archive.deletingPathExtension().lastPathComponent ?? "根目录",
+                        kind: .archive,
+                        isSelected: model.current?.prefix.isEmpty == true
+                    ) {
+                        model.jump(to: "")
+                    }
+
+                    OutlineGroup(model.folderTree, children: \.optionalChildren) { node in
+                        SidebarRow(
+                            title: node.name,
+                            kind: .folder,
+                            isSelected: model.current?.prefix == node.path
+                        ) {
+                            model.jump(to: node.path)
                         }
                     }
-                    .buttonStyle(.plain)
                 }
-                .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+                .padding(.horizontal, 8)
+                .padding(.bottom, 10)
             }
-            .listStyle(.sidebar)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+    }
+
+    // MARK: 详情
+
+    private var detailKind: FileKind {
+        guard let ext = model.current?.archive.pathExtension.lowercased() else { return .archive }
+        return FileKind(ext: ext)
     }
 
     private var detailPane: some View {
         VStack(spacing: 0) {
-            let kind = FileKind(ext: model.current?.archive.pathExtension.lowercased() ?? "")
-            VStack(spacing: 8) {
-                KindBadge(kind: kind, side: 54, corner: 14)
-                Text(model.current?.archive.lastPathComponent ?? "")
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-                TintPill(text: model.archiveFormatName, tint: kind.tint)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
-            .background(
-                LinearGradient(
-                    colors: [kind.tint.opacity(0.16), kind.tint.opacity(0.02)],
-                    startPoint: .top, endPoint: .bottom
-                )
-            )
-
-            Divider().padding(.vertical, 10)
-
-            VStack(spacing: 7) {
-                infoRow("大小", model.archiveSizeText)
-                infoRow("项目", "\(model.totalEntryCount)")
-                infoRow("加密", model.isEncrypted ? "是" : "否")
-                infoRow("修改", model.archiveModifiedText)
-                infoRow("识别", model.detectionSourceText)
-            }
-            .padding(.horizontal, 14)
-
-            Divider().padding(.vertical, 10)
-
+            detailHeader
+            infoCard
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+                .padding(.bottom, 12)
+            Hairline()
             PreviewPane(model: model)
         }
-        .background(.background)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.35))
+    }
+
+    private var detailHeader: some View {
+        let kind = detailKind
+        return VStack(spacing: 7) {
+            KindBadge(kind: kind, side: 44, corner: 11)
+            Text(model.current?.archive.lastPathComponent ?? "")
+                .font(TypeScale.title)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .padding(.horizontal, 8)
+            HStack(spacing: 5) {
+                TintPill(text: model.archiveFormatName, tint: kind.tint)
+                if model.isEncrypted {
+                    HStack(spacing: 3) {
+                        Image(systemName: "lock.fill").font(.system(size: 7.5, weight: .bold))
+                        Text("已加密").font(.system(size: 9.5, weight: .semibold))
+                    }
+                    .padding(.horizontal, 5.5)
+                    .padding(.vertical, 2)
+                    .background(Color.orange.opacity(0.14),
+                                in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .foregroundStyle(.orange)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 13)
+        .background(
+            LinearGradient(colors: [kind.tint.opacity(0.07), kind.tint.opacity(0.015)],
+                           startPoint: .top, endPoint: .bottom)
+        )
+    }
+
+    private var infoCard: some View {
+        VStack(spacing: 0) {
+            infoRow("大小", model.archiveSizeText)
+            rowDivider
+            infoRow("条目", "\(model.totalEntryCount)")
+            rowDivider
+            infoRow("加密", model.isEncrypted ? "是" : "否")
+            rowDivider
+            infoRow("修改", model.archiveModifiedText)
+            rowDivider
+            infoRow("识别", model.detectionSourceText)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .cardSurface()
+    }
+
+    private var rowDivider: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.055))
+            .frame(height: 1)
+            .padding(.leading, 2)
     }
 
     private func infoRow(_ title: String, _ value: String) -> some View {
-        HStack {
+        HStack(spacing: 8) {
             Text(title)
-                .font(.system(size: 11))
+                .font(TypeScale.label)
                 .foregroundStyle(.secondary)
-            Spacer()
+            Spacer(minLength: 4)
             Text(value)
-                .font(.system(size: 11).monospacedDigit())
+                .font(TypeScale.data())
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
+        .padding(.vertical, 4.5)
     }
+
+    // MARK: 条目区
 
     private var entryList: some View {
         VStack(spacing: 0) {
-            if model.viewMode == .list && !model.isSearching {
-                HStack(spacing: 0) {
-                    Text("名称").frame(maxWidth: .infinity, alignment: .leading)
-                    Text("大小").frame(width: 90, alignment: .trailing)
-                    Text("修改时间").frame(width: 130, alignment: .trailing)
-                }
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-                .background(.quaternary.opacity(0.35))
+            if model.viewMode == .list {
+                listHeader
             }
 
             if model.displayEntries.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: model.isSearching ? "magnifyingglass" : "folder")
-                        .font(.system(size: 26, weight: .thin))
-                        .foregroundStyle(.tertiary)
-                    Text(model.isSearching ? "没有匹配的文件" : "这个目录是空的")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                emptyFolder
             } else if model.viewMode == .icons {
                 iconGrid
             } else if model.viewMode == .columns && !model.isSearching {
@@ -807,6 +1010,7 @@ struct ContentView: View {
                 flowBar
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .focusable()
         .focusEffectDisabled()
         .focused($listFocused)
@@ -830,25 +1034,78 @@ struct ContentView: View {
             model.goBack()
             return .handled
         }
+        .onKeyPress(KeyEquivalent("a"), phases: .down) { press in
+            guard press.modifiers.contains(EventModifiers.command) else { return .ignored }
+            model.selectAll()
+            return .handled
+        }
+        .onKeyPress(.escape) {
+            if !model.searchText.isEmpty {
+                model.searchText = ""
+                return .handled
+            }
+            if !model.selection.isEmpty {
+                model.selection = []
+                return .handled
+            }
+            return .ignored
+        }
         .onAppear { listFocused = true }
+    }
+
+    private var listHeader: some View {
+        HStack(spacing: 8) {
+            Text("名称")
+                .padding(.leading, 28)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("大小")
+                .frame(width: Metrics.sizeColumn, alignment: .trailing)
+            Text("修改时间")
+                .frame(width: Metrics.dateColumn, alignment: .trailing)
+        }
+        .font(TypeScale.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 16)
+        .frame(height: 26)
+        .background(Color.primary.opacity(0.025))
+        .overlay(alignment: .bottom) { Hairline() }
+    }
+
+    private var emptyFolder: some View {
+        VStack(spacing: 8) {
+            Image(systemName: model.isSearching ? "magnifyingglass" : "folder")
+                .font(.system(size: 24, weight: .thin))
+                .foregroundStyle(.quaternary)
+            Text(model.isSearching ? "没有匹配的文件" : "这个目录是空的")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+            if model.isSearching && !model.searchText.isEmpty {
+                Button("清除搜索") { model.searchText = "" }
+                    .buttonStyle(.link)
+                    .font(.system(size: 11))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var listView: some View {
         ScrollViewReader { proxy in
-            List {
-                ForEach(model.displayEntries) { entry in
-                    row(entry)
-                        .id(entry.id)
-                        .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
-                        .listRowBackground(
-                            model.selection.contains(entry.id)
-                                ? Palette.brand.opacity(0.16)
-                                : Color.clear
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(model.displayEntries) { entry in
+                        EntryRow(
+                            entry: entry,
+                            model: model,
+                            hover: hover,
+                            selected: model.selection.contains(entry.id),
+                            showPath: model.isSearching
                         )
+                        .id(entry.id)
+                    }
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
             }
-            .listStyle(.inset)
-            .alternatingRowBackgrounds()
             .onChange(of: model.selection) { _, selection in
                 // 键盘上下移动时要跟着滚动，否则选中项跑出屏幕就看不见了
                 guard let id = selection.first else { return }
@@ -864,131 +1121,102 @@ struct ContentView: View {
         ScrollView(.horizontal, showsIndicators: true) {
             HStack(alignment: .top, spacing: 0) {
                 ForEach(Array(model.trail.enumerated()), id: \.element.id) { index, frame in
-                    columnView(prefix: frame.prefix, isLast: index == model.trail.count - 1)
-                        .frame(width: 236)
-                    Divider()
+                    columnView(frame: frame, isLast: index == model.trail.count - 1)
+                        .frame(width: 224)
+                    Hairline(vertical: true)
                 }
             }
         }
-        .background(.background)
+        .background(Color(nsColor: .textBackgroundColor))
     }
 
-    private func columnView(prefix: String, isLast: Bool) -> some View {
-        let items = model.entries(at: prefix)
+    private func columnView(frame: ArchiveModel.Frame, isLast: Bool) -> some View {
+        let items = model.entries(at: frame.prefix)
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
+                Text(frame.prefix.isEmpty
+                     ? (model.current?.archive.deletingPathExtension().lastPathComponent ?? "根目录")
+                     : frame.title)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+
                 if items.isEmpty {
                     Text("空目录")
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                         .padding(10)
                 }
+
                 ForEach(items) { entry in
                     let selected = model.selection.contains(entry.id)
-                    HStack(spacing: 6) {
-                        EntryThumbnail(entry: entry, model: model, side: 16, corner: 3)
-                            .frame(width: 16, height: 16)
-                        Text(entry.name)
-                            .font(.system(size: 12))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer(minLength: 4)
-                        if entry.isDirectory {
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 8, weight: .bold))
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(selected ? Palette.brand.opacity(0.16) : Color.clear)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        if entry.isDirectory {
-                            model.jump(to: entry.path)
-                        } else {
-                            model.select(entry)
-                        }
-                    }
-                    .onTapGesture(count: 2) { model.activate(entry) }
-                    .onDrag { EntryDrag.provider(for: entry, model: model) }
-                    .onHover { inside in
-                        if inside { hover.begin(entry, model: model) } else { hover.end() }
-                    }
-                    .help(entry.path)
+                    ColumnRow(entry: entry, model: model, hover: hover, selected: selected)
                 }
             }
-            .padding(.vertical, 4)
+            .padding(.bottom, 6)
         }
-        .background(isLast ? Color.clear : Color.clear)
     }
 
     private var iconGrid: some View {
         ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 108), spacing: 14)], spacing: 14) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 116), spacing: 6)], spacing: 6) {
                 ForEach(model.displayEntries) { entry in
-                    VStack(spacing: 6) {
-                        EntryThumbnail(entry: entry, model: model, side: 56, corner: 8)
-                            .frame(height: 56)
-                        Text(entry.name)
-                            .font(.system(size: 11))
-                            .lineLimit(2)
-                            .multilineTextAlignment(.center)
-                        Text(entry.isDirectory ? "文件夹" : entry.displaySize)
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .frame(width: 100, height: 96)
-                    .padding(4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(model.selection.contains(entry.id)
-                                  ? Palette.brand.opacity(0.16)
-                                  : Color.clear)
+                    IconTile(
+                        entry: entry,
+                        model: model,
+                        hover: hover,
+                        selected: model.selection.contains(entry.id)
                     )
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { model.activate(entry) }
-                    .onTapGesture { model.select(entry) }
-                    .onDrag { EntryDrag.provider(for: entry, model: model) }
-                    .onHover { inside in
-                        if inside { hover.begin(entry, model: model) } else { hover.end() }
-                    }
-                    .help(entry.path)
                 }
             }
-            .padding(16)
+            .padding(14)
         }
+        .background(Color(nsColor: .textBackgroundColor))
     }
 
     /// 选中后浮出的快捷操作条
     private var flowBar: some View {
-        HStack(spacing: 10) {
-            Text("已选 \(model.selection.count) 项")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+        HStack(spacing: 8) {
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(Palette.brand)
+                Text("已选 \(model.selection.count) 项")
+                    .font(TypeScale.label.weight(.medium))
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2.5)
+            .background(Palette.brand.opacity(0.10), in: Capsule())
 
             Spacer()
 
-            Button("解压到…") { model.extractSelection() }
+            Button("解压到文件夹…") { model.extractSelection() }
+                .buttonStyle(.bordered)
                 .controlSize(.small)
             if let entry = model.displayEntries.first(where: { model.selection.contains($0.id) }),
                !entry.isDirectory {
-                Button("导出…") { exportSelected() }
+                Button("另存为…") { exportSelected() }
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
             }
             Button("暂存") { model.addSelectionToStash() }
+                .buttonStyle(.bordered)
                 .controlSize(.small)
             Button("删除…") { model.deleteSelection() }
+                .buttonStyle(.bordered)
                 .controlSize(.small)
-            Button("取消选择") { model.selection = [] }
-                .controlSize(.small)
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .tint(.red)
+            ToolButton(symbol: "xmark", help: "取消选择（Esc）") { model.selection = [] }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 12)
         .padding(.vertical, 7)
         .background(.bar)
-        .overlay(alignment: .top) { Divider() }
+        .overlay(alignment: .top) { Hairline() }
     }
 
     private func exportSelected() {
@@ -1003,24 +1231,265 @@ struct ContentView: View {
         }
     }
 
-    private func breadcrumbIcon(_ index: Int) -> String {
-        guard index < model.trail.count else { return "shippingbox" }
-        let frame = model.trail[index]
-        let isLast = index == model.trail.count - 1
-        if frame.prefix.isEmpty { return isLast ? "shippingbox.fill" : "shippingbox" }
-        return isLast ? "folder.fill" : "folder"
+    // MARK: 空状态
+
+    private var emptyState: some View {
+        VStack(spacing: 0) {
+            Spacer()
+
+            VStack(spacing: 16) {
+                ZStack {
+                    Circle()
+                        .fill(LinearGradient(colors: [Palette.brand.opacity(0.18), Palette.brand.opacity(0.04)],
+                                             startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 82, height: 82)
+                    Image(systemName: "shippingbox")
+                        .font(.system(size: 33, weight: .light))
+                        .foregroundStyle(Palette.brand)
+                }
+
+                VStack(spacing: 5) {
+                    Text("把压缩包拖进来")
+                        .font(TypeScale.display)
+                    Text("也可以 ⌘O 选择文件，或从访达右键「用 rrzip 打开」")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 5) {
+                    ForEach(["ZIP", "7Z", "RAR", "TAR", "GZ", "ISO", "DMG"], id: \.self) { name in
+                        Text(name)
+                            .font(.system(size: 9, weight: .semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2.5)
+                            .background(Color.primary.opacity(0.05),
+                                        in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Button("选择压缩包…") { model.openWithPanel() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Palette.brand)
+                    .controlSize(.large)
+                    .padding(.top, 2)
+
+                Text("加密包会提示输入密码")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 38)
+            .padding(.vertical, 28)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.primary.opacity(0.02))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Palette.brand.opacity(0.16),
+                                  style: StrokeStyle(lineWidth: 1.5, dash: [7, 5]))
+            )
+            .frame(maxWidth: 420)
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
     }
 
-    private func row(_ entry: ArchiveEntry) -> some View {
+    // MARK: 暂存区
+
+    private var stashBar: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 7) {
+                Image(systemName: "tray.full")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                Text("暂存区")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("\(model.stash.count) 项")
+                    .font(.system(size: 10.5).monospacedDigit())
+                    .foregroundStyle(.tertiary)
+
+                Spacer()
+
+                Button("打包成 ZIP") { model.compressStash() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Button("全部导出…") { model.exportStash() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Button("清空") { model.clearStash() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Button {
+                    model.isStashVisible = false
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.plain)
+                .help("收起暂存区")
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 7)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    if model.stash.isEmpty {
+                        Text("把文件拖到这里暂存，最后一起导出")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 2)
+                    }
+                    ForEach(model.stash) { item in
+                        HStack(spacing: 5) {
+                            KindBadge(kind: FileKind(ext: (item.path as NSString).pathExtension.lowercased()),
+                                      side: 14, corner: 3)
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(item.name)
+                                    .font(.system(size: 10.5))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Text(item.displaySize)
+                                    .font(.system(size: 8.5))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            Button {
+                                model.removeFromStash(item)
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 7.5, weight: .bold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.045),
+                                    in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.055), lineWidth: 0.5)
+                        )
+                        .help(item.path)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+            }
+        }
+        .background(.bar)
+        .overlay(alignment: .top) {
+            if stashTargeted {
+                Rectangle()
+                    .fill(Palette.brand.opacity(0.55))
+                    .frame(height: 2)
+            }
+        }
+        .onDrop(of: [rrzipEntryType], isTargeted: $stashTargeted) { providers in
+            for provider in providers {
+                _ = provider.loadDataRepresentation(forTypeIdentifier: rrzipEntryType.identifier) { data, _ in
+                    guard let data,
+                          let text = String(data: data, encoding: .utf8) else { return }
+                    let parts = text.components(separatedBy: "\u{1F}")
+                    guard parts.count == 3 else { return }
+                    let archive = URL(fileURLWithPath: parts[0])
+                    let path = parts[1]
+                    let size = Int64(parts[2]) ?? 0
+                    Task { @MainActor in
+                        model.addToStash(archive: archive, path: path, size: size)
+                    }
+                }
+            }
+            return true
+        }
+    }
+
+    // MARK: 状态栏
+
+    private var statusBar: some View {
+        HStack(spacing: 7) {
+            if model.isLoading {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(Palette.brand)
+            } else {
+                Circle()
+                    .fill(Palette.brand)
+                    .frame(width: 5, height: 5)
+            }
+
+            Text(model.status)
+                .font(TypeScale.label)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Spacer(minLength: 8)
+
+            if model.isSearching {
+                statusItem("\(model.displayEntries.count) 个结果")
+                if !model.selection.isEmpty { statusDot }
+            }
+            if !model.selection.isEmpty {
+                Text("已选 \(model.selection.count) 项")
+                    .font(TypeScale.caption.weight(.medium))
+                    .foregroundStyle(Palette.brand)
+                statusDot
+            }
+            if !model.archiveSizeText.isEmpty {
+                if !model.isSearching || !model.selection.isEmpty { statusDot }
+                statusItem(model.archiveSizeText, mono: true)
+            }
+        }
+        .padding(.horizontal, Metrics.gutter)
+        .frame(height: Metrics.statusHeight)
+        .background(.bar)
+    }
+
+    private var statusDot: some View {
+        Circle()
+            .fill(Color.primary.opacity(0.18))
+            .frame(width: 2.5, height: 2.5)
+    }
+
+    private func statusItem(_ text: String, mono: Bool = false) -> some View {
+        Text(text)
+            .font(mono ? TypeScale.data(10.5) : TypeScale.caption)
+            .foregroundStyle(.tertiary)
+    }
+}
+
+// MARK: - 列表行
+
+private struct EntryRow: View {
+    let entry: ArchiveEntry
+    @ObservedObject var model: ArchiveModel
+    @ObservedObject var hover: HoverCoordinator
+    let selected: Bool
+    let showPath: Bool
+
+    @State private var hovering = false
+
+    private var rowHeight: CGFloat {
+        showPath ? Metrics.rowHeightWide : Metrics.rowHeight
+    }
+
+    var body: some View {
         HStack(spacing: 8) {
             EntryThumbnail(entry: entry, model: model, side: 20, corner: 4)
                 .frame(width: 20, height: 20)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(entry.name)
-                    .font(.system(size: 12.5))
+                    .font(TypeScale.body)
                     .lineLimit(1)
-                if model.isSearching {
+                    .truncationMode(.middle)
+                if showPath {
                     Text(entry.path)
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
@@ -1029,27 +1498,41 @@ struct ContentView: View {
                 }
             }
 
-            if entry.isArchive {
+            if entry.isArchive && !entry.isDirectory {
                 TintPill(text: "嵌套", tint: FileKind.archive.tint)
             }
 
             Spacer(minLength: 8)
 
             Text(entry.isDirectory ? "—" : entry.displaySize)
-                .font(.system(size: 11.5).monospacedDigit())
+                .font(TypeScale.data())
                 .foregroundStyle(.secondary)
-                .frame(width: 90, alignment: .trailing)
+                .frame(width: Metrics.sizeColumn, alignment: .trailing)
 
             Text(entry.modified)
-                .font(.system(size: 11.5).monospacedDigit())
+                .font(TypeScale.data())
                 .foregroundStyle(.tertiary)
-                .frame(width: 130, alignment: .trailing)
+                .frame(width: Metrics.dateColumn, alignment: .trailing)
         }
+        .padding(.horizontal, 8)
+        .frame(height: rowHeight)
+        .background(
+            RoundedRectangle(cornerRadius: Metrics.radiusRow, style: .continuous)
+                .fill(selected
+                      ? Palette.brand.opacity(Palette.selectionFill)
+                      : (hovering ? Color.primary.opacity(0.045) : .clear))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Metrics.radiusRow, style: .continuous)
+                .strokeBorder(selected ? Palette.brand.opacity(Palette.selectionStroke) : .clear,
+                              lineWidth: 0.5)
+        )
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { model.activate(entry) }
-        .onTapGesture { model.select(entry) }
+        .onTapGesture { model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? []) }
         .onDrag { EntryDrag.provider(for: entry, model: model) }
         .onHover { inside in
+            hovering = inside
             if inside { hover.begin(entry, model: model) } else { hover.end() }
         }
         .contextMenu {
@@ -1059,9 +1542,9 @@ struct ContentView: View {
                 model.selection = [entry.id]
                 model.extractSelection()
             }
-            Button("导出…") {
+            Button("另存为…") {
                 model.selection = [entry.id]
-                exportSelected()
+                exportSingle(entry)
             }
             .disabled(entry.isDirectory)
             Divider()
@@ -1082,141 +1565,161 @@ struct ContentView: View {
         .help(entry.path)
     }
 
-
-    private var emptyState: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "shippingbox")
-                .font(.system(size: 52, weight: .thin))
-                .foregroundStyle(.tertiary)
-            Text("把压缩包拖进来")
-                .font(.system(size: 15, weight: .medium))
-            Text("zip · 7z · rar(只读) · tar · gz · bz2 · xz · zst · cab · iso · xar · 加密包会提示输入密码")
-                .font(.system(size: 11.5))
-                .foregroundStyle(.secondary)
-            Button("选择文件…") { model.openWithPanel() }
-                .controlSize(.large)
-                .padding(.top, 4)
+    private func exportSingle(_ entry: ArchiveEntry) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = entry.name
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        model.payloadURL(for: entry) { url in
+            guard let url else { return }
+            try? FileManager.default.removeItem(at: destination)
+            try? FileManager.default.copyItem(at: url, to: destination)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - 分栏行
+
+private struct ColumnRow: View {
+    let entry: ArchiveEntry
+    @ObservedObject var model: ArchiveModel
+    @ObservedObject var hover: HoverCoordinator
+    let selected: Bool
+
+    @State private var hovering = false
+
+    var body: some View {
+        // 目录只在单击时跳转（等价访达列视图：在右侧开下一列）。
+        // 不能再挂双击 activate——单击已经 jump 过一次，双击会再 push 一层，
+        // 面包屑出现「照片 › 照片」，看起来就像套了一层。
+        if entry.isDirectory {
+            row
+                .onTapGesture { model.jump(to: entry.path) }
+        } else {
+            row
+                .onTapGesture(count: 2) { model.activate(entry) }
+                .onTapGesture { model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? []) }
+        }
+    }
+
+    private var row: some View {
+        HStack(spacing: 6) {
+            EntryThumbnail(entry: entry, model: model, side: 16, corner: 3)
+                .frame(width: 16, height: 16)
+            Text(entry.name)
+                .font(TypeScale.bodySmall)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 4)
+            if entry.isDirectory {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.quaternary)
+            }
+        }
+        .padding(.horizontal, 6)
+        .frame(height: 24)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(selected
+                      ? Palette.brand.opacity(Palette.selectionFill)
+                      : (hovering ? Color.primary.opacity(0.045) : .clear))
+        )
+        .padding(.horizontal, 5)
         .contentShape(Rectangle())
-    }
-
-    private var stashBar: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "tray.full")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                Text("暂存区 \(model.stash.count) 项")
-                    .font(.system(size: 11, weight: .semibold))
-                Spacer()
-                Button("打包成 ZIP") { model.compressStash() }
-                    .controlSize(.small)
-                Button("全部导出…") { model.exportStash() }
-                    .controlSize(.small)
-                Button("清空") { model.clearStash() }
-                    .controlSize(.small)
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                Button {
-                    model.isStashVisible = false
-                } label: {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("收起暂存区")
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    if model.stash.isEmpty {
-                        Text("把文件拖到这里暂存，最后一起导出")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                            .padding(.leading, 2)
-                    }
-                    ForEach(model.stash) { item in
-                        HStack(spacing: 5) {
-                            Image(systemName: "doc")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
-                            VStack(alignment: .leading, spacing: 0) {
-                                Text(item.name)
-                                    .font(.system(size: 10.5))
-                                    .lineLimit(1)
-                                Text(item.displaySize)
-                                    .font(.system(size: 8.5))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            Button {
-                                model.removeFromStash(item)
-                            } label: {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 8, weight: .bold))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 4)
-                        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-                        .help(item.path)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.bottom, 7)
-            }
+        .onDrag { EntryDrag.provider(for: entry, model: model) }
+        .onHover { inside in
+            hovering = inside
+            if inside { hover.begin(entry, model: model) } else { hover.end() }
         }
-        .background(.bar)
-        .onDrop(of: [rrzipEntryType], isTargeted: $stashTargeted) { providers in
-            for provider in providers {
-                _ = provider.loadDataRepresentation(forTypeIdentifier: rrzipEntryType.identifier) { data, _ in
-                    guard let data,
-                          let text = String(data: data, encoding: .utf8) else { return }
-                    let parts = text.components(separatedBy: "\u{1F}")
-                    guard parts.count == 3 else { return }
-                    let archive = URL(fileURLWithPath: parts[0])
-                    let path = parts[1]
-                    let size = Int64(parts[2]) ?? 0
-                    Task { @MainActor in
-                        model.addToStash(archive: archive, path: path, size: size)
-                    }
-                }
-            }
-            return true
-        }
+        .help(entry.path)
     }
+}
 
-    private var statusBar: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(Palette.brand)
-                .frame(width: 5, height: 5)
-            Text(model.status)
+// MARK: - 图标网格
+
+private struct IconTile: View {
+    let entry: ArchiveEntry
+    @ObservedObject var model: ArchiveModel
+    @ObservedObject var hover: HoverCoordinator
+    let selected: Bool
+
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(spacing: 5) {
+            EntryThumbnail(entry: entry, model: model, side: 64, corner: 10)
+                .frame(width: 64, height: 64)
+
+            Text(entry.name)
                 .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            if !model.archiveSizeText.isEmpty {
-                Text(model.archiveSizeText)
-                    .font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
-            Spacer()
-            if model.isSearching {
-                Text("\(model.displayEntries.count) 个结果")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            if !model.selection.isEmpty {
-                Text("已选 \(model.selection.count) 项")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .truncationMode(.middle)
+                .frame(height: 27, alignment: .top)
+
+            Text(entry.isDirectory ? "文件夹" : entry.displaySize)
+                .font(.system(size: 9.5).monospacedDigit())
+                .foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 9)
+        .padding(.horizontal, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(selected
+                      ? Palette.brand.opacity(Palette.selectionFill)
+                      : (hovering ? Color.primary.opacity(0.045) : .clear))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(selected ? Palette.brand.opacity(Palette.selectionStroke) : .clear,
+                              lineWidth: 0.5)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { model.activate(entry) }
+        .onTapGesture { model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? []) }
+        .onDrag { EntryDrag.provider(for: entry, model: model) }
+        .onHover { inside in
+            hovering = inside
+            if inside { hover.begin(entry, model: model) } else { hover.end() }
+        }
+        .help(entry.path)
+    }
+}
+
+// MARK: - 侧栏行
+
+private struct SidebarRow: View {
+    let title: String
+    let kind: FileKind
+    let isSelected: Bool
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                KindBadge(kind: kind, side: 16, corner: 4)
+                Text(title)
+                    .font(TypeScale.bodySmall.weight(isSelected ? .medium : .regular))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 7)
+            .frame(height: 24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isSelected
+                          ? Palette.brand.opacity(Palette.selectionFill)
+                          : (hovering ? Color.primary.opacity(0.05) : .clear))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(title)
     }
 }

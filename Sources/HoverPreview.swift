@@ -5,20 +5,34 @@ import AppKit
 import SwiftUI
 import PDFKit
 
-/// 悬停预览：鼠标在列表行上停 0.4 秒，在光标旁弹一张内容卡片。
+/// 悬停预览：鼠标在列表行上停满 1 秒，在光标旁弹一张内容卡片。
 /// 不抢焦点、不接管鼠标事件，移开就消失。
+/// 窗口刚打开、鼠标恰好停在列表上时不弹：必须先观察到鼠标真的移动过，
+/// 否则每次开包都会有一张卡片直接盖在内容上。
 @MainActor
 final class HoverCoordinator: ObservableObject {
     private var pending: Task<Void, Never>?
+    private var lastPoint: NSPoint?
+    private var sawMovement = false
 
     func begin(_ entry: ArchiveEntry, model: ArchiveModel, at point: NSPoint? = nil) {
         pending?.cancel()
+
+        let current = NSEvent.mouseLocation
+        if let last = lastPoint, abs(current.x - last.x) + abs(current.y - last.y) > 2 {
+            sawMovement = true
+        }
+        lastPoint = current
+
         guard !entry.isDirectory else {
             HoverPreviewPanel.shared.hide()
             return
         }
+        // 显式传坐标的是调试入口（--demo-hover），不卡「先移动」这条
+        guard sawMovement || point != nil else { return }
+
         pending = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 400_000_000)
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
             guard !Task.isCancelled else { return }
             self?.show(entry, model: model, at: point)
         }

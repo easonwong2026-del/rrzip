@@ -211,6 +211,7 @@ struct BatchSheet: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .tint(Palette.brand)
             .frame(width: 120)
             .disabled(runner.running)
         }
@@ -304,6 +305,8 @@ struct BatchSheet: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+        .background(.bar)
+        .overlay(alignment: .top) { Hairline() }
     }
 
     private var summary: String {

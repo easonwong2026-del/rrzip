@@ -4,7 +4,8 @@
 import SwiftUI
 
 /// 统一的配色：品牌紫 + 按文件类型区分的色板。
-/// 深色模式下提高底色透明度，保证图标块在暗背景上仍然分得清。
+/// 品牌色只用在「主操作 / 选中 / 强调」，其余一律走系统语义色，
+/// 否则整条工具栏都是紫的，层次会糊在一起。
 extension AppearanceMode {
     /// 弹窗、小窗这些独立窗口读不到主窗口的 preferredColorScheme，只能自己读一次
     static var stored: AppearanceMode {
@@ -16,6 +17,67 @@ extension AppearanceMode {
 enum Palette {
     /// 品牌色：选中、强调、徽标统一用它
     static let brand = Color(red: 0.45, green: 0.34, blue: 0.94)
+    /// 选中底色浓度，深浅色一致，避免深色下发灰
+    static let selectionFill = 0.14
+    static let selectionStroke = 0.24
+    /// 卡片 / 分组底色
+    static let surface = 0.035
+}
+
+/// 字号阶梯：全应用只允许用这几档。
+/// 档位比「看起来差不多大」更重要——同一层级的信息必须共用同一档。
+enum TypeScale {
+    /// 空状态主标题
+    static let display = Font.system(size: 17, weight: .semibold)
+    /// 卡片 / 详情标题
+    static let title = Font.system(size: 12.5, weight: .semibold)
+    /// 文件名、主要正文
+    static let body = Font.system(size: 12.5)
+    /// 面包屑、侧栏、工具栏按钮
+    static let bodySmall = Font.system(size: 12)
+    /// 数据列、说明文字、状态栏主文案
+    static let label = Font.system(size: 11)
+    /// 分区标题、次级信息
+    static let caption = Font.system(size: 10.5)
+    /// 胶囊标签、角标、浮动控件
+    static let micro = Font.system(size: 9.5)
+    /// 路径与代码
+    static let mono = Font.system(size: 10.5, design: .monospaced)
+
+    /// 数字列统一等宽数字，避免 109.1 KB 与 12.6 KB 的小数点错位
+    static func data(_ size: CGFloat = 11) -> Font {
+        .system(size: size).monospacedDigit()
+    }
+}
+
+/// 间距阶梯：2 / 4 / 6 / 8 / 10 / 12 / 14 / 20，不接受 7、13 这类即兴值
+enum Space {
+    static let xxs: CGFloat = 2
+    static let xs: CGFloat = 4
+    static let s: CGFloat = 6
+    static let m: CGFloat = 8
+    static let l: CGFloat = 10
+    static let xl: CGFloat = 12
+    static let xxl: CGFloat = 14
+    static let xxxl: CGFloat = 20
+}
+
+/// 尺寸与圆角统一在这里，别在各视图里各写一套魔法数字
+enum Metrics {
+    static let toolbarHeight: CGFloat = 44
+    static let breadcrumbHeight: CGFloat = 32
+    static let statusHeight: CGFloat = 26
+    static let rowHeight: CGFloat = 28
+    static let rowHeightWide: CGFloat = 38
+    static let gutter: CGFloat = Space.xxl
+    static let radiusPill: CGFloat = 4
+    static let radiusRow: CGFloat = 6
+    static let radiusThumb: CGFloat = 8
+    static let radiusCard: CGFloat = 10
+    static let radiusHero: CGFloat = 18
+    /// 列表里「大小 / 修改时间」两列宽度，表头与行必须共用
+    static let sizeColumn: CGFloat = 84
+    static let dateColumn: CGFloat = 118
 }
 
 enum FileKind {
@@ -28,6 +90,8 @@ enum FileKind {
     }
 
     init(ext: String) {
+        // 归档名可能出现在详情头部、面包屑这些只有后缀的地方，先按归档判断
+        if ArchiveKind.isArchive(ext: ext) { self = .archive; return }
         switch ext {
         case "png", "jpg", "jpeg", "heic", "heif", "gif", "webp", "tiff", "bmp", "raw", "svg":
             self = .image
@@ -82,7 +146,7 @@ enum FileKind {
     }
 }
 
-/// 彩色图标徽标：圆角底 + 类型符号。列表、网格、侧栏、Mini 共用。
+/// 彩色图标徽标：圆角底 + 类型符号 + 一圈极细描边（浅色下不至于糊在背景里）
 struct KindBadge: View {
     let kind: FileKind
     var side: CGFloat = 20
@@ -90,15 +154,20 @@ struct KindBadge: View {
     @Environment(\.colorScheme) private var scheme
 
     private var radius: CGFloat { corner ?? max(4, side * 0.26) }
-    private var fillOpacity: Double { scheme == .dark ? 0.24 : 0.14 }
+    private var fillOpacity: Double { scheme == .dark ? 0.22 : 0.13 }
+    private var strokeOpacity: Double { scheme == .dark ? 0.30 : 0.16 }
 
     var body: some View {
         RoundedRectangle(cornerRadius: radius, style: .continuous)
             .fill(kind.tint.opacity(fillOpacity))
             .frame(width: side, height: side)
             .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(kind.tint.opacity(strokeOpacity), lineWidth: 0.5)
+            )
+            .overlay(
                 Image(systemName: kind.symbol)
-                    .font(.system(size: side * 0.54, weight: .medium))
+                    .font(.system(size: side * 0.52, weight: .medium))
                     .foregroundStyle(kind.tint)
             )
     }
@@ -111,10 +180,68 @@ struct TintPill: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 9, weight: .semibold))
-            .padding(.horizontal, 5)
-            .padding(.vertical, 1.5)
-            .background(tint.opacity(0.16), in: Capsule())
+            .font(.system(size: 9.5, weight: .semibold))
+            .padding(.horizontal, 5.5)
+            .padding(.vertical, 2)
+            .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .strokeBorder(tint.opacity(0.18), lineWidth: 0.5)
+            )
             .foregroundStyle(tint)
+            .lineLimit(1)
+    }
+}
+
+/// 工具栏图标按钮：hover 才有底色，图标用语义色，不抢主按钮的注意力
+struct ToolButton: View {
+    let symbol: String
+    var help: String = ""
+    var inactive: Bool = false
+    var active: Bool = false
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(active ? Palette.brand : Color.primary.opacity(0.82))
+                .frame(width: 27, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(hovering && !inactive ? Color.primary.opacity(0.065) : .clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .disabled(inactive)
+        .opacity(inactive ? 0.32 : 1)
+        .help(help)
+    }
+}
+
+/// 极细分割线：比 Divider 更克制，不会把界面切成一块块
+struct Hairline: View {
+    var vertical = false
+    var body: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor).opacity(0.5))
+            .frame(width: vertical ? 1 : nil, height: vertical ? nil : 1)
+    }
+}
+
+extension View {
+    /// 分组卡片：浅底色 + 细描边，替代一层层 Divider
+    func cardSurface(radius: CGFloat = Metrics.radiusCard) -> some View {
+        background(
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .fill(Color.primary.opacity(Palette.surface))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
+        )
     }
 }
