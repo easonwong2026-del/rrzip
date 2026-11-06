@@ -1118,13 +1118,27 @@ struct ContentView: View {
 
     /// 分栏视图：每列一层目录，点目录在右侧开新列（类似访达的列视图）
     private var columnsView: some View {
-        ScrollView(.horizontal, showsIndicators: true) {
-            HStack(alignment: .top, spacing: 0) {
-                ForEach(Array(model.trail.enumerated()), id: \.element.id) { index, frame in
-                    columnView(frame: frame, isLast: index == model.trail.count - 1)
-                        .frame(width: 224)
-                    Hairline(vertical: true)
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: true) {
+                HStack(alignment: .top, spacing: 0) {
+                    ForEach(Array(model.trail.enumerated()), id: \.element.id) { index, frame in
+                        columnView(frame: frame, isLast: index == model.trail.count - 1)
+                            .frame(width: 224)
+                            .id(index)
+                        Hairline(vertical: true)
+                    }
                 }
+            }
+            // 窗口不宽时新列会落在可视区外，看起来像「点了没反应」，必须跟到最新一列
+            .onChange(of: model.trail.count) { _, count in
+                guard count > 0 else { return }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    proxy.scrollTo(count - 1, anchor: .trailing)
+                }
+            }
+            .onAppear {
+                guard model.trail.count > 1 else { return }
+                proxy.scrollTo(model.trail.count - 1, anchor: .trailing)
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
