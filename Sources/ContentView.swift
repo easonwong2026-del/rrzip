@@ -264,8 +264,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                              error: AutoreleasingUnsafeMutablePointer<NSString>) {
         let urls = readURLs(from: pboard)
         guard let first = urls.first else { return }
-        if let archive = urls.first(where: { ArchiveKind.isArchive(ext: $0.pathExtension.lowercased()) }) {
+        // 与 application(_:open:) 同一条判定，不在这里另设后缀白名单
+        let archives = urls.filter {
+            if case .open = OpenGate.decide($0) { return true }
+            return false
+        }
+        if let archive = archives.first {
             AppDelegate.model?.open(url: archive)
+            if archives.count > 1 {
+                AppDelegate.model?.notice = "另有 \(archives.count - 1) 个压缩包未打开"
+            }
         } else {
             AppDelegate.model?.open(url: first)
         }
@@ -366,9 +374,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        guard let url = urls.first(where: { ArchiveKind.isArchive(ext: $0.pathExtension.lowercased()) })
-        else { return }
-        Task { @MainActor in AppDelegate.model?.open(url: url) }
+        guard !urls.isEmpty else { return }
+        // 统一走 OpenGate：后缀说不清就读魔数，改过名的包也要能打开。
+        // 这里如果按后缀前置拦截，访达双击和右键「用 rrzip 打开」就会静默丢文件。
+        Task { @MainActor in
+            let archives = urls.filter {
+                if case .open = OpenGate.decide($0) { return true }
+                return false
+            }
+            if let first = archives.first {
+                AppDelegate.model?.open(url: first)
+                if archives.count > 1 {
+                    AppDelegate.model?.notice = "另有 \(archives.count - 1) 个压缩包未打开"
+                }
+            } else if let first = urls.first {
+                // 交回 model 走 unrecognized 分支，给出真实提示而不是静默返回
+                AppDelegate.model?.open(url: first)
+            }
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -455,6 +479,16 @@ struct ContentView: View {
             statusBar
         }
         .overlay { dropOverlay }
+        .overlay(alignment: .bottom) { noticeBar }
+        .animation(.easeOut(duration: 0.18), value: model.notice)
+        .onChange(of: model.notice) { _, newValue in
+            guard let newValue else { return }
+            Task {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                // 期间又来了新提示就别清，让新提示自己走完
+                if model.notice == newValue { model.notice = nil }
+            }
+        }
         .background(
             // 量一次窗口宽度：简化 / 完整模式的自动切换只看它，不猜窗口尺寸
             GeometryReader { proxy in
@@ -698,6 +732,27 @@ struct ContentView: View {
             Button("好", role: .cancel) { model.errorMessage = nil }
         } message: {
             Text(model.errorMessage ?? "")
+        }
+    }
+
+    // MARK: 一次性提示
+
+    /// 不与 alert 争焦点的轻提示：贴在状态栏上方，3 秒后自动消失。
+    /// 只做「告知」，不带按钮——要用户做决定的场景一律走 alert。
+    @ViewBuilder
+    private var noticeBar: some View {
+        if let notice = model.notice {
+            Text(notice)
+                .font(TypeScale.bodySmall)
+                .foregroundStyle(.primary)
+                .padding(.horizontal, Space.xl)
+                .padding(.vertical, Space.m)
+                .background(.regularMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+                .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                .padding(.bottom, Metrics.statusHeight + Space.l)
+                .allowsHitTesting(false)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
 

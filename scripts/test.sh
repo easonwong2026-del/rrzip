@@ -17,6 +17,8 @@ head -c 80000 /dev/urandom > "$SRC/照片/002.jpg"
 
 (cd "$SRC" && /usr/bin/tar -a -cf "$FIX/basic.zip" 说明.txt "带 空格.txt" 照片)
 (cd "$SRC" && /usr/bin/tar -czf "$FIX/bundle.tgz" readme.txt)
+# 改名的包：后缀不可信，只能靠魔数认出来
+cp "$FIX/basic.zip" "$FIX/renamed.bin"
 
 if [ -x "$ROOT/Assets/7zz" ]; then
     (cd "$SRC" && "$ROOT/Assets/7zz" a -t7z -y -ppw123 -mhe=on "$FIX/secret.7z" 说明.txt >/dev/null)
@@ -27,7 +29,7 @@ mkdir -p build
 xcrun swiftc -O -swift-version 5 \
     -target arm64-apple-macos14.0 \
     -o build/rrzip-tests \
-    Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift Sources/ArchiveService.swift Sources/Model.swift Sources/Palette.swift Sources/Batch.swift Sources/Thumbnails.swift Tests/main.swift
+    Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift Sources/ArchiveService.swift Sources/Model.swift Sources/Palette.swift Sources/Batch.swift Sources/Thumbnails.swift FinderSync/MenuBuilder.swift Tests/main.swift
 
 if [ -x "$ROOT/Assets/7zz" ]; then cp "$ROOT/Assets/7zz" build/7zz; fi
 

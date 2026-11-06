@@ -425,6 +425,63 @@ do {
     expect(false, "暂存落盘", "\(error)")
 }
 
+// 访达右键菜单判定：全部分支都走 OpenGate，不再有第二份后缀表
+print("访达菜单判定")
+do {
+    let zip = fixtures.appendingPathComponent("basic.zip")
+    let renamed = fixtures.appendingPathComponent("renamed.bin")
+    let text = fixtures.appendingPathComponent("src/说明.txt")
+    let folder = fixtures.appendingPathComponent("src/照片")
+
+    let single = FinderSelection.inspect([zip])
+    expect(single.archives.count == 1 && single.plain.isEmpty, "单个包归到压缩包")
+    expect(FinderMenuBuilder.actions(for: single) == [.open, .extractHere, .extractToFolder],
+           "单包给 打开/解压到此处/解压到文件夹")
+    expect(FinderMenuBuilder.title(for: .extractHere, in: single) == "解压到此处",
+           "单包标题不带数量")
+    expect(FinderMenuBuilder.title(for: .extractToFolder, in: single) == "解压到「basic」",
+           "解压到文件夹带包名", FinderMenuBuilder.title(for: .extractToFolder, in: single))
+
+    let byMagic = FinderSelection.inspect([renamed])
+    expect(byMagic.archives.count == 1, "改名为 .bin 的 zip 按内容识别")
+    expect(FinderMenuBuilder.actions(for: byMagic) == [.open, .extractHere, .extractToFolder],
+           "改名包同样给解压菜单")
+
+    let noBudget = FinderSelection.inspect([renamed], magicBudget: 0)
+    expect(noBudget.plain.count == 1 && noBudget.archives.isEmpty,
+           "魔数预算为 0 时不读文件，按普通文件处理")
+
+    let many = FinderSelection.inspect([zip, renamed])
+    expect(FinderMenuBuilder.actions(for: many) == [.open, .extractHere, .extractToFolder],
+           "多包仍是 3 项")
+    expect(FinderMenuBuilder.title(for: .open, in: many) == "用 rrzip 打开第一个",
+           "多包打开文案说明只开第一个")
+    expect(FinderMenuBuilder.title(for: .extractHere, in: many) == "解压 2 个压缩包到此处",
+           "多包解压标题带数量")
+    expect(FinderMenuBuilder.title(for: .extractToFolder, in: many) == "分别解压到同名文件夹",
+           "多包解压到文件夹不拼包名")
+
+    let oneFile = FinderSelection.inspect([text])
+    expect(oneFile.archives.isEmpty && oneFile.plain.count == 1, "普通文件归到 plain")
+    expect(FinderMenuBuilder.actions(for: oneFile) == [.compressZip, .compressSevenZip],
+           "单个普通文件不给「分别压缩」")
+
+    let twoItems = FinderSelection.inspect([text, folder])
+    expect(twoItems.plain.count == 2, "目录算普通项目")
+    expect(FinderMenuBuilder.actions(for: twoItems) == [.compressZip, .compressSevenZip, .compressEach],
+           "多选普通项目给「分别压缩」")
+    expect(FinderMenuBuilder.title(for: .compressZip, in: twoItems) == "压缩 2 个项目为 ZIP",
+           "压缩标题带数量", FinderMenuBuilder.title(for: .compressZip, in: twoItems))
+
+    let mixed = FinderSelection.inspect([zip, text])
+    expect(FinderMenuBuilder.actions(for: mixed) == [.extractHere, .compressZip],
+           "混合选择只留双方都成立的动作")
+    expect(FinderMenuBuilder.unsupportedNote(for: mixed) == nil, "没有不支持项时不加说明")
+
+    let empty = FinderSelection.inspect([])
+    expect(FinderMenuBuilder.actions(for: empty).isEmpty, "空选择不出菜单")
+}
+
 print("")
 print(failures == 0 ? "全部通过（\(checks) 项）" : "失败 \(failures)/\(checks)")
 exit(failures == 0 ? 0 : 1)

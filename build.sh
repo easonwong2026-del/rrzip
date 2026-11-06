@@ -208,7 +208,8 @@ xcrun swiftc \
     -framework Cocoa -framework FinderSync \
     -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$FSXPATH/Contents/MacOS/ArchiveFinder" \
-    FinderSync/FinderSync.swift
+    Sources/Archive.swift Sources/FormatCatalog.swift Sources/FormatDetector.swift \
+    Sources/ArchiveService.swift FinderSync/MenuBuilder.swift FinderSync/FinderSync.swift
 codesign --force --sign - "$FSXPATH" >/dev/null 2>&1
 
 echo "==> 签名（ad-hoc）"
