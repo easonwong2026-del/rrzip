@@ -617,7 +617,8 @@ struct ContentView: View {
                     return
                 }
 #endif
-                guard welcomeSeenVersion != WelcomeView.version else { return }
+                guard WelcomeView.minorVersion(welcomeSeenVersion)
+                        != WelcomeView.minorVersion(WelcomeView.version) else { return }
                 showWelcome = true
             }
         }
@@ -626,7 +627,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showWelcome) {
             WelcomeView { remember in
-                if remember { welcomeSeenVersion = WelcomeView.version }
+                if remember { welcomeSeenVersion = WelcomeView.minorVersion(WelcomeView.version) }
                 showWelcome = false
             }
         }
@@ -1244,13 +1245,12 @@ struct ContentView: View {
 
     private var listHeader: some View {
         HStack(spacing: 8) {
-            Text("名称")
-                .padding(.leading, 28)
+            headerCell("名称", key: .name, leading: 28, alignLeading: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text("大小")
-                .frame(width: Metrics.sizeColumn, alignment: .trailing)
-            Text("修改时间")
-                .frame(width: Metrics.dateColumn, alignment: .trailing)
+            headerCell("大小", key: .size, leading: 0, alignLeading: false)
+                .frame(width: Metrics.sizeColumn)
+            headerCell("修改时间", key: .modified, leading: 0, alignLeading: false)
+                .frame(width: Metrics.dateColumn)
         }
         .font(TypeScale.caption.weight(.semibold))
         .foregroundStyle(.secondary)
@@ -1258,6 +1258,27 @@ struct ContentView: View {
         .frame(height: 26)
         .background(Color.primary.opacity(0.025))
         .overlay(alignment: .bottom) { Hairline() }
+    }
+
+    /// 表头可点：同一列再点一次换方向，目录永远在前
+    private func headerCell(_ title: String, key: SortKey,
+                            leading: CGFloat, alignLeading: Bool) -> some View {
+        Button {
+            model.toggleSort(key)
+        } label: {
+            HStack(spacing: 3) {
+                Text(title)
+                if model.sortKey == key {
+                    Image(systemName: model.sortAscending ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 7, weight: .bold))
+                }
+            }
+            .padding(.leading, leading)
+            .frame(maxWidth: .infinity, alignment: alignLeading ? .leading : .trailing)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("按\(title)排序")
     }
 
     private var emptyFolder: some View {

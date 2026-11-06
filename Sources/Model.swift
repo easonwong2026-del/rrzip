@@ -156,6 +156,47 @@ struct CreateOptions {
     var volume: CreateVolume = .none
 }
 
+/// 列表排序：点表头切换，目录永远在前，组内按这一列排
+enum SortKey: String, CaseIterable, Identifiable {
+    case name, size, modified
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .name: return "名称"
+        case .size: return "大小"
+        case .modified: return "修改时间"
+        }
+    }
+}
+
+/// 暂存区导出时的落盘方式：不同包里的同名文件不能互相覆盖
+enum StashLayout: String, CaseIterable, Identifiable {
+    /// 每个包一个子目录（默认，最不容易撞名）
+    case perArchive
+    /// 全部平铺，同名自动加序号
+    case flat
+    /// 保留包内目录结构
+    case original
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .perArchive: return "每个包一个文件夹"
+        case .flat: return "全部平铺（同名自动改名）"
+        case .original: return "保留包内目录结构"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .perArchive: return "目标/A.zip/…、目标/B.zip/…，互不干扰"
+        case .flat: return "都放在同一层，重复的自动加「 2」「 3」"
+        case .original: return "按包里的路径还原，可能和已有文件重名"
+        }
+    }
+}
+
 @MainActor
 final class ArchiveModel: ObservableObject {
 
@@ -187,6 +228,19 @@ final class ArchiveModel: ObservableObject {
     @Published var viewMode: ArchiveViewMode = .list {
         didSet { UserDefaults.standard.set(viewMode.rawValue, forKey: "rrzip.viewMode") }
     }
+    /// 列表排序：点表头切换列，再点一次换方向
+    @Published var sortKey: SortKey = .name {
+        didSet {
+            UserDefaults.standard.set(sortKey.rawValue, forKey: "rrzip.sortKey")
+            searchCache = nil
+        }
+    }
+    @Published var sortAscending = true {
+        didSet {
+            UserDefaults.standard.set(sortAscending, forKey: "rrzip.sortAscending")
+            searchCache = nil
+        }
+    }
     @Published var appearance: AppearanceMode = .system {
         didSet { UserDefaults.standard.set(appearance.rawValue, forKey: "rrzip.appearance") }
     }
@@ -209,6 +263,10 @@ final class ArchiveModel: ObservableObject {
     /// 暂存区：跨层、跨包攒起来，最后一次性导出
     @Published private(set) var stash: [StashItem] = []
     @Published var isStashVisible = false
+    /// 暂存导出的落盘方式
+    @Published var stashLayout: StashLayout = .perArchive {
+        didSet { UserDefaults.standard.set(stashLayout.rawValue, forKey: "rrzip.stashLayout") }
+    }
 
     /// 首页「最近打开」，最多 8 条
     @Published private(set) var recentArchives: [RecentArchive] = []
@@ -270,16 +328,46 @@ final class ArchiveModel: ObservableObject {
         guard let frame = current else { return [] }
         let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !keyword.isEmpty else {
-            return cachedFrame()?.childIndex[frame.prefix] ?? []
+            return sortEntries(cachedFrame()?.childIndex[frame.prefix] ?? [])
         }
         if let cached = searchCache, cached.frameID == frame.id, cached.keyword == keyword {
             return cached.result
         }
-        let result = frame.entries
-            .filter { $0.path.localizedCaseInsensitiveContains(keyword) }
-            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        let result = sortEntries(frame.entries.filter {
+            $0.path.localizedCaseInsensitiveContains(keyword)
+        })
         searchCache = (frame.id, keyword, result)
         return result
+    }
+
+    /// 目录永远在前（跟访达一致），组内按当前列排
+    func sortEntries(_ list: [ArchiveEntry]) -> [ArchiveEntry] {
+        let dirs = list.filter(\.isDirectory).sorted(by: byName)
+        let files = list.filter { !$0.isDirectory }.sorted(by: compare)
+        return dirs + files
+    }
+
+    private func byName(_ a: ArchiveEntry, _ b: ArchiveEntry) -> Bool {
+        a.name.localizedStandardCompare(b.name) == .orderedAscending
+    }
+
+    private func compare(_ a: ArchiveEntry, _ b: ArchiveEntry) -> Bool {
+        let ascending: Bool
+        switch sortKey {
+        case .name: ascending = byName(a, b)
+        case .size: ascending = a.size < b.size
+        case .modified: ascending = a.modified < b.modified
+        }
+        return sortAscending ? ascending : !ascending
+    }
+
+    func toggleSort(_ key: SortKey) {
+        if sortKey == key {
+            sortAscending.toggle()
+        } else {
+            sortKey = key
+            sortAscending = true
+        }
     }
 
     /// 一次遍历建立「父前缀 → 子项」索引；显式目录和路径里隐含的目录都会补齐
@@ -540,6 +628,17 @@ final class ArchiveModel: ObservableObject {
         if let mode = UserDefaults.standard.string(forKey: "rrzip.workspaceMode"),
            let parsed = WorkspaceMode(rawValue: mode) {
             workspaceMode = parsed
+        }
+        if let layout = UserDefaults.standard.string(forKey: "rrzip.stashLayout"),
+           let parsed = StashLayout(rawValue: layout) {
+            stashLayout = parsed
+        }
+        if let key = UserDefaults.standard.string(forKey: "rrzip.sortKey"),
+           let parsed = SortKey(rawValue: key) {
+            sortKey = parsed
+        }
+        if UserDefaults.standard.object(forKey: "rrzip.sortAscending") != nil {
+            sortAscending = UserDefaults.standard.bool(forKey: "rrzip.sortAscending")
         }
         if let keyword = UserDefaults.standard.string(forKey: "rrzip.search") {
             searchText = keyword
@@ -1004,7 +1103,7 @@ final class ArchiveModel: ObservableObject {
         isStashVisible = false
     }
 
-    /// 把暂存项全部解压到用户选的目录
+    /// 把暂存项全部解压到用户选的目录。按 stashLayout 分目录，绝不覆盖已有文件
     func exportStash() {
         guard !stash.isEmpty else { return }
         let panel = NSOpenPanel()
@@ -1017,6 +1116,7 @@ final class ArchiveModel: ObservableObject {
 
         let items = stash
         let passwordMap = passwords
+        let layout = stashLayout
         isLoading = true
         status = "正在导出 \(items.count) 项…"
         Task {
@@ -1024,9 +1124,8 @@ final class ArchiveModel: ObservableObject {
             for item in items {
                 do {
                     try await Task.detached(priority: .userInitiated) {
-                        try ArchiveService.extract(item.archive, entries: [item.path],
-                                                   to: destination,
-                                                   password: passwordMap[item.archive.path])
+                        _ = try Self.exportStashItem(item, to: destination, layout: layout,
+                                                     password: passwordMap[item.archive.path])
                     }.value
                 } catch {
                     failed += 1
@@ -1035,6 +1134,40 @@ final class ArchiveModel: ObservableObject {
             isLoading = false
             status = failed == 0 ? "已导出 \(items.count) 项" : "导出完成，\(failed) 项失败"
             if failed == 0 { stash.removeAll(); isStashVisible = false }
+        }
+    }
+
+    /// 单个暂存项的落盘：按布局决定目标目录，平铺时用临时目录过渡并去重
+    nonisolated static func exportStashItem(_ item: StashItem, to destination: URL,
+                                           layout: StashLayout, password: String?) throws -> URL {
+        let fm = FileManager.default
+        switch layout {
+        case .perArchive:
+            let folder = destination
+                .appendingPathComponent(item.archive.deletingPathExtension().lastPathComponent,
+                                        isDirectory: true)
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            try ArchiveService.extract(item.archive, entries: [item.path], to: folder,
+                                       password: password)
+            return folder.appendingPathComponent(item.path)
+
+        case .original:
+            try ArchiveService.extract(item.archive, entries: [item.path], to: destination,
+                                       password: password)
+            return destination.appendingPathComponent(item.path)
+
+        case .flat:
+            // 先解到临时目录，再挑一个不撞名的地方放进去
+            let staging = fm.temporaryDirectory
+                .appendingPathComponent("rrzip-flat-\(UUID().uuidString)", isDirectory: true)
+            try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: staging) }
+            try ArchiveService.extract(item.archive, entries: [item.path], to: staging,
+                                       password: password)
+            let produced = staging.appendingPathComponent(item.path)
+            let target = uniqueOutput(destination.appendingPathComponent(produced.lastPathComponent))
+            try fm.moveItem(at: produced, to: target)
+            return target
         }
     }
 
@@ -1062,8 +1195,8 @@ final class ArchiveModel: ObservableObject {
                                                            isDirectory: true)
                 try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 try? await Task.detached(priority: .userInitiated) {
-                    try SevenZip.extract(item.archive, entries: [item.path],
-                                         to: folder, password: passwordMap[item.archive.path])
+                    try ArchiveService.extract(item.archive, entries: [item.path],
+                                               to: folder, password: passwordMap[item.archive.path])
                 }.value
                 var file = folder.appendingPathComponent(item.path)
                 if FileManager.default.fileExists(atPath: file.path) {
