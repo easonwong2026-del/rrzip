@@ -112,6 +112,21 @@ enum ArchiveViewMode: String, CaseIterable, Identifiable {
     }
 }
 
+/// 主窗口的两种工作模式：简化模式只做「打开 → 看 → 解压」，完整模式是工作台。
+/// 两种模式共用同一个 ArchiveModel，切换时目录层级、选中项、预览都不重置。
+enum WorkspaceMode: String, CaseIterable, Identifiable {
+    case compact, full
+    var id: String { rawValue }
+    var title: String { self == .compact ? "简化模式" : "完整模式" }
+    /// 工具栏按钮的图标：当前在简化模式，就给「展开」
+    var toggleSymbol: String {
+        self == .compact ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left"
+    }
+    var toggleHelp: String {
+        self == .compact ? "展开为完整模式（⌃⌘M）" : "收起为简化模式（⌃⌘M）"
+    }
+}
+
 /// 应用内拖拽使用的自定义类型：暂存区靠它拿到「包 + 包内路径」，不必先解压
 let rrzipEntryType = UTType(exportedAs: "com.rrzip.entry")
 
@@ -165,6 +180,13 @@ final class ArchiveModel: ObservableObject {
     @Published var appearance: AppearanceMode = .system {
         didSet { UserDefaults.standard.set(appearance.rawValue, forKey: "rrzip.appearance") }
     }
+    /// 简化 / 完整模式。放在 model 里而不是视图里，切换模式不会重建状态机
+    @Published var workspaceMode: WorkspaceMode = .compact {
+        didSet { UserDefaults.standard.set(workspaceMode.rawValue, forKey: "rrzip.workspaceMode") }
+    }
+    /// 最近一次「手动」切模式的时刻。自适应布局在这之后 5 分钟内不抢控制权
+    private(set) var modePinnedAt: Date = .distantPast
+    var isCompactMode: Bool { workspaceMode == .compact }
     /// 每次重新点同一行就自增，强制预览刷新
     @Published private(set) var previewToken: Int = 0
     @Published private(set) var isLoading = false
@@ -502,12 +524,38 @@ final class ArchiveModel: ObservableObject {
            let parsed = AppearanceMode(rawValue: mode) {
             appearance = parsed
         }
+        if let mode = UserDefaults.standard.string(forKey: "rrzip.workspaceMode"),
+           let parsed = WorkspaceMode(rawValue: mode) {
+            workspaceMode = parsed
+        }
         if let keyword = UserDefaults.standard.string(forKey: "rrzip.search") {
             searchText = keyword
         }
     }
     /// 预览/导出缓存：key = 归档路径 + 修改时间 + 条目路径
     private var payloadCache: [String: URL] = [:]
+
+    // MARK: - 工作模式
+
+    /// 用户主动展开 / 收起：记下时刻，冷却期内不再自动切换
+    func toggleWorkspaceMode() {
+        setWorkspaceMode(workspaceMode == .compact ? .full : .compact, manual: true)
+    }
+
+    func setWorkspaceMode(_ mode: WorkspaceMode, manual: Bool) {
+        if manual { modePinnedAt = Date() }
+        guard workspaceMode != mode else { return }
+        workspaceMode = mode
+    }
+
+    /// 窗口宽度变化时该不该跟着换模式；nil = 不动。
+    /// 手动切过之后 5 分钟内不抢控制权，避免「刚展开又被弹回去」。
+    func autoMode(forWidth width: Double) -> WorkspaceMode? {
+        guard Date().timeIntervalSince(modePinnedAt) > 300 else { return nil }
+        if width < 760, workspaceMode == .full { return .compact }
+        if width > 900, workspaceMode == .compact { return .full }
+        return nil
+    }
 
     // MARK: - 工作目录
 
@@ -532,11 +580,24 @@ final class ArchiveModel: ObservableObject {
     // MARK: - 打开
 
     func open(url: URL) {
-        guard ArchiveKind.isArchive(ext: url.pathExtension.lowercased()) else {
-            errorMessage = "不支持的格式：.\(url.pathExtension)"
-            return
+        // 统一走格式识别：后缀说不清时读魔数，改过名 / 没后缀的包也能打开。
+        // 这里不能再按后缀前置拦截，否则拖入、⌘O、访达打开三条路径都和 README 的承诺不一致。
+        switch OpenGate.decide(url) {
+        case .open:
+            loadFrame(url: url, resetTrail: true)
+        case .unrecognized:
+            errorMessage = "无法识别这个文件：\(url.lastPathComponent)\n后缀不认识，内容也不像已知的压缩包。"
+        case .unsupported(let detection):
+            errorMessage = "\(detection.displayName) 目前只能识别，打不开（本机引擎不支持）。"
         }
-        loadFrame(url: url, resetTrail: true)
+    }
+
+    /// 右键准备：点中已选中的条目时保留整组选择（跟访达一致），点未选中的条目才改成单选
+    func prepareContextSelection(_ entry: ArchiveEntry) {
+        guard !selection.contains(entry.id) else { return }
+        selection = [entry.id]
+        selectionAnchor = entry.id
+        previewToken &+= 1
     }
 
     func openWithPanel() {
@@ -962,7 +1023,7 @@ final class ArchiveModel: ObservableObject {
         }
     }
 
-    /// 返回上一级（Mini 窗口的返回键）
+    /// 返回上一级（⌘[ / ⌘↑）
     func goBack() {
         guard trail.count > 1 else { return }
         trail.removeLast()

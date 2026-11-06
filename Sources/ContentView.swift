@@ -177,10 +177,12 @@ struct RrzipApp: App {
     var body: some Scene {
         Window("rrzip", id: "main") {
             ContentView(model: model)
-                .frame(minWidth: 1020, minHeight: 600)
+                // 最小尺寸按简化模式给，完整模式下由 applyModeWindowSize 提高下限，
+                // 否则窗口永远缩不进 720 宽，「简化」就是句空话
+                .frame(minWidth: 560, minHeight: 420)
                 .onAppear { AppDelegate.model = model }
         }
-        .defaultSize(width: 1180, height: 720)
+        .defaultSize(width: 720, height: 520)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("打开压缩包…") { model.openWithPanel() }
@@ -226,6 +228,11 @@ struct RrzipApp: App {
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("检查当前压缩包") { model.verifyCurrent() }
                     .disabled(model.current == nil)
+                Divider()
+                Button(model.isCompactMode ? "展开为完整模式" : "收起为简化模式") {
+                    NotificationCenter.default.post(name: .rrzipToggleWorkspaceMode, object: nil)
+                }
+                .keyboardShortcut("m", modifiers: [.command, .control])
             }
         }
     }
@@ -310,6 +317,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension Notification.Name {
     /// ⌘F：把焦点丢进搜索框（菜单项发、主界面收）
     static let rrzipFocusSearch = Notification.Name("rrzipFocusSearch")
+    /// ⌃⌘M：简化 / 完整模式互切（菜单项发、主界面收，窗口尺寸由主界面负责）
+    static let rrzipToggleWorkspaceMode = Notification.Name("rrzipToggleWorkspaceMode")
 }
 
 struct ContentView: View {
@@ -322,6 +331,12 @@ struct ContentView: View {
     /// 左右两栏的显隐，跟 viewMode 一样记住用户上次的选择
     @AppStorage("rrzip.showSidebar") private var showSidebar = true
     @AppStorage("rrzip.showInspector") private var showInspector = true
+    /// 窗口变窄自动进简化模式。手动切过之后有冷却期，见 ArchiveModel.autoMode
+    @AppStorage("rrzip.autoWorkspaceMode") private var autoWorkspaceMode = true
+    @State private var windowWidth: Double = 1180
+    /// 启动阶段先按记住的模式摆好窗口，再让宽度自适应接管，
+    /// 否则「上次窗口 1180 宽」会在第一帧把简化模式弹成完整模式
+    @State private var autoModeReady = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -332,6 +347,8 @@ struct ContentView: View {
 
             if model.current == nil {
                 emptyState
+            } else if model.isCompactMode {
+                compactWorkspace
             } else {
                 // HSplitView 里条件显隐子视图后，理想宽度会算不准，
                 // 必须显式把可用宽高喂给它，否则最右一栏会被窗口裁掉
@@ -363,6 +380,19 @@ struct ContentView: View {
             statusBar
         }
         .overlay { dropOverlay }
+        .background(
+            // 量一次窗口宽度：简化 / 完整模式的自动切换只看它，不猜窗口尺寸
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { windowWidth = proxy.size.width }
+                    .onChange(of: proxy.size.width) { _, width in windowWidth = width }
+            }
+        )
+        .onChange(of: windowWidth) { _, width in
+            guard autoModeReady, autoWorkspaceMode,
+                  let next = model.autoMode(forWidth: width) else { return }
+            model.setWorkspaceMode(next, manual: false)
+        }
         .preferredColorScheme(model.appearance.scheme)
         .onDrop(of: [.fileURL], isTargeted: $isDropTarget) { providers in
             guard !providers.isEmpty else { return false }
@@ -388,14 +418,11 @@ struct ContentView: View {
 #if DEBUG
             // 便于截图/调试：--icons 初始图标视图，--search xxx 预填搜索
             if CommandLine.arguments.contains("--icons") { model.viewMode = .icons }
+            // 便于截图：--compact / --full 指定起始工作模式
+            if CommandLine.arguments.contains("--compact") { model.setWorkspaceMode(.compact, manual: false) }
+            if CommandLine.arguments.contains("--full") { model.setWorkspaceMode(.full, manual: false) }
             if let i = CommandLine.arguments.firstIndex(of: "--search"), i + 1 < CommandLine.arguments.count {
                 model.searchText = CommandLine.arguments[i + 1]
-            }
-#endif
-            // 调试用：defaults write com.rrzip.mac rrzip.demoMini -bool true
-#if DEBUG
-            if UserDefaults.standard.bool(forKey: "rrzip.demoMini") {
-                MiniPanelController.shared.show()
             }
 #endif
 #if DEBUG
@@ -411,12 +438,13 @@ struct ContentView: View {
                 }
             }
 #endif
-            // 支持 `open -a rrzip xxx.zip` 以及命令行直接传路径
+            // 支持 `open -a rrzip xxx.zip` 以及命令行直接传路径。
+            // 判定走 OpenGate，改过名的包从命令行打开也要能认出来。
             if model.trail.isEmpty {
                 for arg in CommandLine.arguments.dropFirst() where !arg.hasPrefix("-") {
                     let url = URL(fileURLWithPath: arg)
-                    if FileManager.default.fileExists(atPath: url.path),
-                       ArchiveKind.isArchive(ext: url.pathExtension.lowercased()) {
+                    guard FileManager.default.fileExists(atPath: url.path) else { continue }
+                    if case .open = OpenGate.decide(url) {
                         model.open(url: url)
                         break
                     }
@@ -497,15 +525,37 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .rrzipFocusSearch)) { _ in
             searchFocused = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .rrzipToggleWorkspaceMode)) { _ in
+            model.toggleWorkspaceMode()
+            applyModeWindowSize()
+        }
         .onAppear {
-            // 分栏改成条件显隐后，SwiftUI 算出的理想宽度会小于 defaultSize，
-            // 窗口会被挤到最小宽度。首帧把默认尺寸补回来，之后用户怎么拖都不干预。
-            // 空状态首帧窗口可能还没 visible，延迟半拍再补
+            // 首帧按当前模式给窗口尺寸：简化模式退回 720 宽，完整模式补回 1180。
+            // 摆好之后再让宽度自适应接管，避免两者抢着改窗口。
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                if let window = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 400 }),
-                   window.frame.width < 1100 {
-                    window.setContentSize(NSSize(width: 1180, height: 720))
+                defer {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        autoModeReady = true
+                    }
                 }
+                guard let window = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 400 })
+                else { return }
+                let compact = model.isCompactMode
+                window.minSize = compact
+                    ? NSSize(width: 560, height: 420)
+                    : NSSize(width: 1020, height: 600)
+                var frame = window.frame
+                if compact {
+                    // 上次在完整模式留下的宽窗口，进简化模式后收回来
+                    guard frame.width > 1100 else { return }
+                    frame.origin.y += frame.height - 520
+                    frame.size = NSSize(width: 720, height: 520)
+                } else {
+                    guard frame.width < 1100 else { return }
+                    frame.origin.y += frame.height - 720
+                    frame.size = NSSize(width: 1180, height: 720)
+                }
+                window.setFrame(frame, display: true, animate: false)
             }
         }
         .sheet(item: $model.batchRequest) { request in
@@ -553,9 +603,12 @@ struct ContentView: View {
 
     private var toolbar: some View {
         HStack(spacing: 6) {
-            ToolButton(symbol: "sidebar.leading",
-                       help: showSidebar ? "隐藏目录栏" : "显示目录栏") {
-                showSidebar.toggle()
+            // 简化模式没有目录树，这个开关自然也不该在
+            if !model.isCompactMode {
+                ToolButton(symbol: "sidebar.leading",
+                           help: showSidebar ? "隐藏目录栏" : "显示目录栏") {
+                    showSidebar.toggle()
+                }
             }
 
             Button {
@@ -611,21 +664,29 @@ struct ContentView: View {
 
             groupDivider
 
-            ToolButton(symbol: "macwindow.on.rectangle", help: "Mini 小窗：拖入即看，看完就走") {
-                MiniPanelController.shared.toggle()
+            // 暂存区属于「工作台」能力，简化模式只留最常用的打开 / 解压 / 新建
+            if !model.isCompactMode {
+                stashButton
             }
-            stashButton
 
             Spacer(minLength: 12)
 
             searchField
-            viewSwitcher
-            ToolButton(symbol: "sidebar.right",
-                       help: showInspector ? "隐藏详情栏" : "显示详情栏",
-                       inactive: model.current == nil) {
-                showInspector.toggle()
+            if !model.isCompactMode {
+                viewSwitcher
+                ToolButton(symbol: "sidebar.right",
+                           help: showInspector ? "隐藏详情栏" : "显示详情栏",
+                           inactive: model.current == nil) {
+                    showInspector.toggle()
+                }
             }
             overflowMenu
+            ToolButton(symbol: model.workspaceMode.toggleSymbol,
+                       help: model.workspaceMode.toggleHelp,
+                       inactive: model.current == nil) {
+                model.toggleWorkspaceMode()
+                applyModeWindowSize()
+            }
         }
         .padding(.horizontal, Metrics.gutter)
         .frame(height: Metrics.toolbarHeight)
@@ -637,6 +698,25 @@ struct ContentView: View {
             .fill(Color(nsColor: .separatorColor).opacity(0.6))
             .frame(width: 1, height: 16)
             .padding(.horizontal, 3)
+    }
+
+    /// 手动切换模式时同步窗口尺寸：展开给工作台尺寸，收起给小窗尺寸。
+    /// 顶边保持不动，避免窗口在屏幕上跳。
+    private func applyModeWindowSize() {
+        guard let window = NSApp.keyWindow
+                ?? NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain })
+        else { return }
+        let compact = model.isCompactMode
+        window.minSize = compact
+            ? NSSize(width: 560, height: 420)
+            : NSSize(width: 1020, height: 600)
+        var frame = window.frame
+        let target = compact
+            ? NSSize(width: 720, height: 520)
+            : NSSize(width: max(frame.width, 1180), height: max(frame.height, 720))
+        frame.origin.y += frame.height - target.height
+        frame.size = target
+        window.setFrame(frame, display: true, animate: true)
     }
 
     private var stashButton: some View {
@@ -728,14 +808,18 @@ struct ContentView: View {
 
     private var overflowMenu: some View {
         Menu {
+            // 全局项（外观、工作模式）在没有打开压缩包时也要能用，
+            // 所以菜单本身不再整体禁用，只禁用依赖当前包的动作
             Button("在访达中显示") { model.revealInFinder() }
+                .disabled(model.current == nil)
             Button("检查完整性") { model.verifyCurrent() }
+                .disabled(model.current == nil)
             if model.isEncrypted { Button("锁定并清除密码") { model.lockCurrent() } }
             Divider()
             Button("添加文件…") { model.addFiles() }
-                .disabled(model.isNested)
+                .disabled(model.current == nil || model.isNested)
             Button("删除选中项…") { model.deleteSelection() }
-                .disabled(model.selection.isEmpty || model.isNested)
+                .disabled(model.current == nil || model.selection.isEmpty || model.isNested)
             Divider()
             Picker("外观", selection: $model.appearance) {
                 ForEach(AppearanceMode.allCases) { mode in
@@ -743,6 +827,7 @@ struct ContentView: View {
                 }
             }
             .pickerStyle(.inline)
+            Toggle("窗口变窄时自动简化", isOn: $autoWorkspaceMode)
         } label: {
             Image(systemName: "ellipsis.circle")
                 .font(.system(size: 13, weight: .regular))
@@ -751,9 +836,7 @@ struct ContentView: View {
         .menuIndicator(.hidden)
         .frame(width: 24)
         .fixedSize()
-        .disabled(model.current == nil)
-        .opacity(model.current == nil ? 0.35 : 1)
-        .help("更多操作")
+        .help("更多操作与外观")
     }
 
     // MARK: 面包屑
@@ -988,19 +1071,56 @@ struct ContentView: View {
         .padding(.vertical, 4.5)
     }
 
+    // MARK: 简化模式
+
+    /// 简化模式：单栏列表 + 右侧浮层预览。
+    /// 与完整模式共用同一个 model，所以目录层级、选中项、预览都不用搬。
+    private var compactWorkspace: some View {
+        GeometryReader { proxy in
+            entryList
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .overlay(alignment: .trailing) {
+                    // 太窄时浮层会把列表压没，此时只保留空格快速查看
+                    if proxy.size.width >= 620,
+                       let entry = model.selectedEntry, !entry.isDirectory {
+                        compactPreview
+                            .padding(.trailing, Space.l)
+                            .padding(.top, Space.l)
+                            // 给底部选中操作条让位，否则浮层压住「解压到文件夹…」
+                            .padding(.bottom, 44)
+                    }
+                }
+        }
+        .frame(idealWidth: 720, idealHeight: 460)
+    }
+
+    private var compactPreview: some View {
+        PreviewPane(model: model)
+            .frame(width: 280)
+            .frame(maxHeight: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: Metrics.radiusCard, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Metrics.radiusCard, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+            )
+            .shadow(color: .black.opacity(0.14), radius: 14, y: 4)
+            .transition(.opacity)
+    }
+
     // MARK: 条目区
 
     private var entryList: some View {
         VStack(spacing: 0) {
-            if model.viewMode == .list {
+            // 简化模式固定列表：图标网格和分栏留到工作台里用，不在这里挤
+            if model.isCompactMode || model.viewMode == .list {
                 listHeader
             }
 
             if model.displayEntries.isEmpty {
                 emptyFolder
-            } else if model.viewMode == .icons {
+            } else if !model.isCompactMode && model.viewMode == .icons {
                 iconGrid
-            } else if model.viewMode == .columns && !model.isSearching {
+            } else if !model.isCompactMode && model.viewMode == .columns && !model.isSearching {
                 columnsView
             } else {
                 listView
@@ -1110,6 +1230,13 @@ struct ContentView: View {
                 // 键盘上下移动时要跟着滚动，否则选中项跑出屏幕就看不见了
                 guard let id = selection.first else { return }
                 withAnimation(.easeOut(duration: 0.12)) {
+                    proxy.scrollTo(id, anchor: .center)
+                }
+            }
+            .onChange(of: model.workspaceMode) { _, _ in
+                // 切换模式会重建列表，把选中项重新滚回可见位置（不改变选中状态）
+                guard let id = model.selectedEntry?.id else { return }
+                DispatchQueue.main.async {
                     proxy.scrollTo(id, anchor: .center)
                 }
             }
@@ -1550,27 +1677,32 @@ private struct EntryRow: View {
             if inside { hover.begin(entry, model: model) } else { hover.end() }
         }
         .contextMenu {
-            Button(entry.isDirectory ? "进入文件夹" : "打开") { model.activate(entry) }
-                .disabled(!entry.isDirectory && !entry.isArchive)
-            Button("解压到…") {
-                model.selection = [entry.id]
+            // 右键已选中的条目保留整组选择；右键未选中的条目才切单选（跟访达一致）
+            let group = model.selection.contains(entry.id) ? model.selection.count : 1
+
+            Button(entry.isDirectory ? "进入文件夹" : (entry.isArchive ? "进入压缩包" : "打开")) {
+                model.prepareContextSelection(entry)
+                model.activate(entry)
+            }
+            Button(group > 1 ? "解压 \(group) 项到…" : "解压到…") {
+                model.prepareContextSelection(entry)
                 model.extractSelection()
             }
             Button("另存为…") {
-                model.selection = [entry.id]
+                model.prepareContextSelection(entry)
                 exportSingle(entry)
             }
-            .disabled(entry.isDirectory)
+            .disabled(entry.isDirectory || group > 1)
             Divider()
             Button("加入暂存区") {
-                model.selection = [entry.id]
+                model.prepareContextSelection(entry)
                 model.addSelectionToStash()
             }
             .disabled(entry.isDirectory)
             Button("加入文件…") { model.addFiles() }
                 .disabled(model.isNested)
-            Button("从压缩包删除…") {
-                model.selection = [entry.id]
+            Button(group > 1 ? "删除这 \(group) 项…" : "从压缩包删除…") {
+                model.prepareContextSelection(entry)
                 model.deleteSelection()
             }
             .foregroundStyle(.red)
