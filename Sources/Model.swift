@@ -760,6 +760,20 @@ final class ArchiveModel: ObservableObject {
         }
     }
 
+    /// 目录版：不拼扩展名
+    nonisolated static func uniqueDirectory(_ url: URL) -> URL {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return url }
+        let parent = url.deletingLastPathComponent()
+        let base = url.lastPathComponent
+        var index = 2
+        while true {
+            let candidate = parent.appendingPathComponent("\(base) \(index)", isDirectory: true)
+            if !fm.fileExists(atPath: candidate.path) { return candidate }
+            index += 1
+        }
+    }
+
     // MARK: - 工作目录
 
     private lazy var workspace: URL = {
@@ -909,7 +923,7 @@ final class ArchiveModel: ObservableObject {
                 break
             } catch ArchiveError.needsPassword {
                 if !askedPassword {
-                    guard let typed = askPassword(for: url, wrong: false) else { return finishLocked() }
+                    guard let typed = await askPassword(for: url, wrong: false) else { return finishLocked() }
                     askedPassword = true
                     passphrase = typed
                     passwords[url.path] = typed
@@ -930,7 +944,7 @@ final class ArchiveModel: ObservableObject {
                     continue
                 }
                 if Tar.looksEncrypted(message), !askedPassword {
-                    guard let typed = askPassword(for: url, wrong: false) else { return finishLocked() }
+                    guard let typed = await askPassword(for: url, wrong: false) else { return finishLocked() }
                     askedPassword = true
                     passphrase = typed
                     passwords[url.path] = typed
@@ -976,6 +990,36 @@ final class ArchiveModel: ObservableObject {
         } else {
             status = "\(Self.children(of: "", in: entries).count) 个项目 · \(url.lastPathComponent)"
         }
+
+        // 这次打开如果是访达右键「解压」撞上加密包转过来的，解锁完就接着解
+        if resetTrail {
+            resumePendingExtractionIfNeeded(for: url)
+        }
+    }
+
+    /// 访达那边点的「解压到此处 / 解压到包名」因为要密码没做完。
+    /// 把包交过来只是手段，真正要做的事记在 PendingExtraction 里，这里收尾。
+    private func resumePendingExtractionIfNeeded(for url: URL) {
+        guard let pending = PendingExtraction.read(),
+              pending.archives.contains(url.path) else { return }
+        PendingExtraction.clear()
+
+        // 太久以前的记录不动手：用户可能只是顺手打开了同名的另一个包
+        guard Date().timeIntervalSince(pending.createdAt) < PendingExtraction.validInterval,
+              let frame = current, frame.archive.path == url.path else { return }
+
+        let destination: URL
+        switch pending.mode {
+        case .here:
+            destination = url.deletingLastPathComponent()
+        case .newFolder:
+            let parent = url.deletingLastPathComponent()
+            let base = url.deletingPathExtension().lastPathComponent
+            destination = Self.uniqueDirectory(
+                parent.appendingPathComponent(base.isEmpty ? "归档" : base, isDirectory: true))
+        }
+        status = "解压到 \(destination.lastPathComponent)…"
+        extract(entries: [], from: frame, to: destination)
     }
 
     // MARK: - 原地编辑
@@ -1239,24 +1283,33 @@ final class ArchiveModel: ObservableObject {
         status = "已加密，未解锁"
     }
 
-    private func askPassword(for archive: URL, wrong: Bool) -> String? {
-        let alert = NSAlert()
-        alert.messageText = wrong ? "密码不正确" : "该压缩包已加密"
-        alert.informativeText = "\(archive.lastPathComponent)\n输入密码后即可浏览与解压。"
-        alert.alertStyle = wrong ? .warning : .informational
+    // MARK: - 密码询问
 
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        field.placeholderString = "密码"
-        alert.accessoryView = field
+    /// 密码询问改用 SwiftUI 弹窗，不用 NSAlert.runModal。
+    /// runModal 会在主线程跑嵌套 runloop，从 async 上下文调用时偶尔根本不显示——
+    /// 表现就是「点了加密包，什么都没发生」。
+    struct PasswordRequest: Identifiable {
+        let id = UUID()
+        let archive: URL
+        let isRetry: Bool
+    }
 
-        alert.addButton(withTitle: "解锁")
-        alert.addButton(withTitle: "取消")
-        NSApp.activate(ignoringOtherApps: true)
-        alert.window.initialFirstResponder = field
+    @Published var passwordRequest: PasswordRequest?
+    private var passwordContinuation: CheckedContinuation<String?, Never>?
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        let value = field.stringValue
-        return value.isEmpty ? nil : value
+    private func askPassword(for archive: URL, wrong: Bool) async -> String? {
+        return await withCheckedContinuation { continuation in
+            passwordContinuation = continuation
+            passwordRequest = PasswordRequest(archive: archive, isRetry: wrong)
+        }
+    }
+
+    /// 弹窗回调；nil 表示取消
+    func submitPassword(_ value: String?) {
+        guard passwordRequest != nil else { return }
+        passwordRequest = nil
+        passwordContinuation?.resume(returning: value)
+        passwordContinuation = nil
     }
 
     // MARK: - 嵌套浏览
@@ -1381,7 +1434,7 @@ final class ArchiveModel: ObservableObject {
                     }
                     return
                 } catch let ArchiveError.tool(message) where Tar.looksEncrypted(message) {
-                    guard attempt == 0, let typed = askPassword(for: frame.archive, wrong: passphrase != nil) else {
+                    guard attempt == 0, let typed = await askPassword(for: frame.archive, wrong: passphrase != nil) else {
                         errorMessage = "密码错误或已取消"
                         status = "解压失败"
                         isLoading = false

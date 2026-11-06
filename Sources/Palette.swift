@@ -94,8 +94,13 @@ enum Layout {
         Metrics.sidebarMin + Metrics.contentMin + Metrics.inspectorMin + Metrics.gutter * 2 + 8
     }
 
-    /// 舒适余量：刚到几何下限时内容列已经很挤，自动收起要提前一点
-    static let comfortMargin: CGFloat = 180
+    /// 舒适余量：三栏几何下限保证「放得下」，这里再加一段「不那么挤」的缓冲。
+    ///
+    /// 实测教训（2026-11-06）：留 180 时展开阈值被推到 1078，用户把窗口拉到 1044
+    /// 还没反应，体感就是「自动切换坏了」；留 100 仍然嫌高。
+    /// 结论：宁可在下限处就切、让三栏紧一点，也不要让阈值跑到用户够不到的地方。
+    /// 现在等于不留余量，展开 898 / 收起 818 —— 都在「800 多」区间内。
+    static let comfortMargin: CGFloat = 0
 
     /// 低于它从完整模式收起（≈ 998）
     static var autoCollapseWidth: CGFloat { fullModeMinWidth + comfortMargin }
