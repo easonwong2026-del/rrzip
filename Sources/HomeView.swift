@@ -19,23 +19,40 @@ struct HomeView: View {
     @State private var quickResult: String?
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Space.xxxl) {
-                header
-                actionCards
-                HStack(alignment: .top, spacing: 26) {
-                    recentSection
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    quickSection
-                        .frame(width: 250)
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Space.xxxl) {
+                    header
+                    actionCards
+                    // 窄窗口（简化模式最小 560）下横排放不下，自动改成竖排，
+                    // 不要为了并排把「快速压缩」挤成三行字
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 26) {
+                            recentSection
+                                .frame(minWidth: 320, maxWidth: .infinity, alignment: .leading)
+                            quickSection
+                                .frame(width: 250)
+                        }
+                        VStack(alignment: .leading, spacing: 16) {
+                            recentSection
+                            quickSection
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
                 }
-                footer
+                .padding(.horizontal, 34)
+                .padding(.top, 28)
+                .padding(.bottom, 18)
+                .frame(maxWidth: 860)
+                .frame(maxWidth: .infinity)
             }
-            .padding(.horizontal, 34)
-            .padding(.top, 34)
-            .padding(.bottom, 26)
-            .frame(maxWidth: 860)
-            .frame(maxWidth: .infinity)
+            // 底栏固定，不跟着内容滚走
+            footer
+                .padding(.horizontal, 34)
+                .padding(.top, 6)
+                .padding(.bottom, 14)
+                .frame(maxWidth: 860)
+                .frame(maxWidth: .infinity)
         }
     }
 
@@ -58,20 +75,34 @@ struct HomeView: View {
     // MARK: 主操作
 
     private var actionCards: some View {
-        HStack(spacing: 12) {
-            actionCard(
-                symbol: "folder",
-                title: "打开压缩包",
-                detail: "ZIP · RAR · 7Z · TAR · DMG…",
-                prominent: true
-            ) { model.openWithPanel() }
-            actionCard(
-                symbol: "archivebox",
-                title: "新建压缩包",
-                detail: "选文件，设格式与密码",
-                prominent: false
-            ) { model.createArchive() }
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                openCard
+                newCard
+            }
+            VStack(spacing: 10) {
+                openCard
+                newCard
+            }
         }
+    }
+
+    private var openCard: some View {
+        actionCard(
+            symbol: "folder",
+            title: "打开压缩包",
+            detail: "ZIP · RAR · 7Z · TAR · DMG…",
+            prominent: true
+        ) { model.openWithPanel() }
+    }
+
+    private var newCard: some View {
+        actionCard(
+            symbol: "archivebox",
+            title: "新建压缩包",
+            detail: "选文件，设格式与密码",
+            prominent: false
+        ) { model.createArchive() }
     }
 
     private func actionCard(symbol: String, title: String, detail: String,

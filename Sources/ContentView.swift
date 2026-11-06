@@ -233,6 +233,12 @@ struct RrzipApp: App {
                 }
                 .keyboardShortcut("m", modifiers: [.command, .control])
             }
+            // 帮助菜单里随时能重看首次启动那一屏
+            CommandGroup(replacing: .help) {
+                Button("欢迎使用 rrzip") {
+                    NotificationCenter.default.post(name: .rrzipShowWelcome, object: nil)
+                }
+            }
         }
 
         // 设置中心：⌘, 由系统菜单自动提供
@@ -323,6 +329,8 @@ extension Notification.Name {
     static let rrzipFocusSearch = Notification.Name("rrzipFocusSearch")
     /// ⌃⌘M：简化 / 完整模式互切（菜单项发、主界面收，窗口尺寸由主界面负责）
     static let rrzipToggleWorkspaceMode = Notification.Name("rrzipToggleWorkspaceMode")
+    /// 帮助菜单：随时重看首次启动那一屏
+    static let rrzipShowWelcome = Notification.Name("rrzipShowWelcome")
 }
 
 struct ContentView: View {
@@ -341,6 +349,9 @@ struct ContentView: View {
     /// 启动阶段先按记住的模式摆好窗口，再让宽度自适应接管，
     /// 否则「上次窗口 1180 宽」会在第一帧把简化模式弹成完整模式
     @State private var autoModeReady = false
+    /// 首次启动 / 大版本升级时的一屏引导
+    @AppStorage("rrzip.welcomeSeenVersion") private var welcomeSeenVersion = ""
+    @State private var showWelcome = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -565,6 +576,9 @@ struct ContentView: View {
             model.toggleWorkspaceMode()
             applyModeWindowSize()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .rrzipShowWelcome)) { _ in
+            showWelcome = true
+        }
         .onAppear {
             // 首帧按当前模式给窗口尺寸：简化模式退回 720 宽，完整模式补回 1180。
             // 摆好之后再让宽度自适应接管，避免两者抢着改窗口。
@@ -593,9 +607,28 @@ struct ContentView: View {
                 }
                 window.setFrame(frame, display: true, animate: false)
             }
+
+            // 首次启动（或版本变了）弹一屏说明；等窗口摆好再出，避免和首帧抢
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+#if DEBUG
+                if UserDefaults.standard.bool(forKey: "rrzip.showWelcome") {
+                    UserDefaults.standard.set(false, forKey: "rrzip.showWelcome")
+                    showWelcome = true
+                    return
+                }
+#endif
+                guard welcomeSeenVersion != WelcomeView.version else { return }
+                showWelcome = true
+            }
         }
         .sheet(item: $model.batchRequest) { request in
             BatchSheet(urls: request.urls, mode: request.mode)
+        }
+        .sheet(isPresented: $showWelcome) {
+            WelcomeView { remember in
+                if remember { welcomeSeenVersion = WelcomeView.version }
+                showWelcome = false
+            }
         }
         .alert("出错了", isPresented: Binding(
             get: { model.errorMessage != nil },
