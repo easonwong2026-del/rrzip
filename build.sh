@@ -41,6 +41,18 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
             <key>NSPortName</key><string>rrzip</string>
             <key>NSSendFileTypes</key><array><string>public.item</string></array>
         </dict>
+        <dict>
+            <key>NSMenuItem</key><dict><key>default</key><string>用 rrzip 解压到此处</string></dict>
+            <key>NSMessage</key><string>extractHereWithRrzip</string>
+            <key>NSPortName</key><string>rrzip</string>
+            <key>NSSendFileTypes</key><array><string>public.item</string></array>
+        </dict>
+        <dict>
+            <key>NSMenuItem</key><dict><key>default</key><string>用 rrzip 分别压缩</string></dict>
+            <key>NSMessage</key><string>compressEachWithRrzip</string>
+            <key>NSPortName</key><string>rrzip</string>
+            <key>NSSendFileTypes</key><array><string>public.item</string></array>
+        </dict>
     </array>
     <key>UTExportedTypeDeclarations</key>
     <array>

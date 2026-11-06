@@ -300,6 +300,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 用 rrzip 解压到此处：每个包解到它自己所在的目录
+    @objc func extractHereWithRrzip(_ pboard: NSPasteboard, userData: String,
+                                    error: AutoreleasingUnsafeMutablePointer<NSString>) {
+        let urls = readURLs(from: pboard).filter { ArchiveService.canOpen($0) }
+        guard !urls.isEmpty else { return }
+        Task { @MainActor in
+            var failed: [String] = []
+            for url in urls {
+                do {
+                    try await Task.detached(priority: .userInitiated) {
+                        try ArchiveService.extract(url, entries: [],
+                                                   to: url.deletingLastPathComponent(),
+                                                   password: nil)
+                    }.value
+                } catch {
+                    failed.append(url.lastPathComponent)
+                }
+            }
+            if failed.isEmpty {
+                NSWorkspace.shared.activateFileViewerSelecting(
+                    urls.map { $0.deletingLastPathComponent() }
+                )
+            } else {
+                let alert = NSAlert()
+                alert.messageText = "有 \(failed.count) 个包没能解压"
+                alert.informativeText = failed.joined(separator: "\n")
+                    + "\n\n加密包需要密码，请用 rrzip 打开后解压。"
+                alert.runModal()
+            }
+        }
+    }
+
+    /// 用 rrzip 分别压缩：每个文件各生成一个 zip，不合并
+    @objc func compressEachWithRrzip(_ pboard: NSPasteboard, userData: String,
+                                     error: AutoreleasingUnsafeMutablePointer<NSString>) {
+        let urls = readURLs(from: pboard)
+        guard !urls.isEmpty else { return }
+        Task { @MainActor in
+            var made: [URL] = []
+            for url in urls {
+                let folder = url.deletingLastPathComponent()
+                let name = url.deletingPathExtension().lastPathComponent
+                let output = ArchiveModel.uniqueOutput(
+                    folder.appendingPathComponent(name).appendingPathExtension("zip")
+                )
+                do {
+                    try await Task.detached(priority: .userInitiated) {
+                        try Tar.create(at: output, from: [url], format: "zip")
+                    }.value
+                    made.append(output)
+                } catch {
+                    // 单个失败不影响其他文件
+                }
+            }
+            if !made.isEmpty {
+                NSWorkspace.shared.activateFileViewerSelecting(made)
+            }
+        }
+    }
+
     private func readURLs(from pboard: NSPasteboard) -> [URL] {
         let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
         return (pboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL]) ?? []
