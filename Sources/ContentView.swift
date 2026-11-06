@@ -183,7 +183,7 @@ struct RrzipApp: App {
                 // 最小尺寸与模式无关：简化与完整共用同一个下限，
                 // 否则窗口永远缩不进触发自动收起的宽度
                 .frame(minWidth: Layout.minWindowWidth, minHeight: Layout.minWindowHeight)
-                .onAppear { AppDelegate.model = model }
+                .onAppear { AppDelegate.attach(model) }
         }
         .defaultSize(width: 720, height: 520)
         .commands {            CommandGroup(replacing: .newItem) {
@@ -255,6 +255,44 @@ struct RrzipApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var model: ArchiveModel?
 
+    /// 冷启动时收到的文件。此时窗口还没建好、`model` 仍是 nil，
+    /// 直接调 `.open` 会被可选链吞掉——表现就是「右键用 rrzip 打开，毫无反应」。
+    /// 先存下来，等 ContentView 上屏后由 `attach` 取走。
+    @MainActor private(set) static var pendingOpen: [URL] = []
+
+    /// ContentView 上屏时调用：接上 model，并把冷启动排队中的文件放进去
+    @MainActor
+    static func attach(_ model: ArchiveModel) {
+        Self.model = model
+        guard !pendingOpen.isEmpty else { return }
+        let urls = pendingOpen
+        pendingOpen = []
+        open(urls)
+    }
+
+    /// 所有「从外部打开」的入口都走这里：能判定就直接开，判不了就告知
+    @MainActor
+    static func open(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        guard let model else {
+            pendingOpen = urls
+            return
+        }
+        let archives = urls.filter {
+            if case .open = OpenGate.decide($0) { return true }
+            return false
+        }
+        if let first = archives.first {
+            model.open(url: first)
+            if archives.count > 1 {
+                model.notice = "另有 \(archives.count - 1) 个压缩包未打开"
+            }
+        } else if let first = urls.first {
+            // 交回 model 走 unrecognized 分支，给出真实提示而不是静默返回
+            model.open(url: first)
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
@@ -279,20 +317,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openWithRrzip(_ pboard: NSPasteboard, userData: String,
                              error: AutoreleasingUnsafeMutablePointer<NSString>) {
         let urls = readURLs(from: pboard)
-        guard let first = urls.first else { return }
+        guard !urls.isEmpty else { return }
         // 与 application(_:open:) 同一条判定，不在这里另设后缀白名单
-        let archives = urls.filter {
-            if case .open = OpenGate.decide($0) { return true }
-            return false
-        }
-        if let archive = archives.first {
-            AppDelegate.model?.open(url: archive)
-            if archives.count > 1 {
-                AppDelegate.model?.notice = "另有 \(archives.count - 1) 个压缩包未打开"
-            }
-        } else {
-            AppDelegate.model?.open(url: first)
-        }
+        AppDelegate.open(urls)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -391,22 +418,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         guard !urls.isEmpty else { return }
-        // 统一走 OpenGate：后缀说不清就读魔数，改过名的包也要能打开。
-        // 这里如果按后缀前置拦截，访达双击和右键「用 rrzip 打开」就会静默丢文件。
         Task { @MainActor in
-            let archives = urls.filter {
-                if case .open = OpenGate.decide($0) { return true }
-                return false
-            }
-            if let first = archives.first {
-                AppDelegate.model?.open(url: first)
-                if archives.count > 1 {
-                    AppDelegate.model?.notice = "另有 \(archives.count - 1) 个压缩包未打开"
-                }
-            } else if let first = urls.first {
-                // 交回 model 走 unrecognized 分支，给出真实提示而不是静默返回
-                AppDelegate.model?.open(url: first)
-            }
+            AppDelegate.open(urls)
             NSApp.activate(ignoringOtherApps: true)
         }
     }
