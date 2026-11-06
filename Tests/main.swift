@@ -307,9 +307,26 @@ MainActor.assumeIsolated {
     let model = ArchiveModel()
     expect(model.workspaceMode == .compact, "默认简化模式")
 
+    // 阈值全部从 Layout 推导，不再有写死的 760 / 900
+    let collapse = Layout.autoCollapseWidth
+    let expand = Layout.autoExpandWidth
+
     // 冷却期外（刚启动）的自动判据
-    expect(model.autoMode(forWidth: 950) == .full, "窗口够宽自动展开")
-    expect(model.autoMode(forWidth: 700) == nil, "简化模式下窄窗口不再重复切")
+    expect(model.autoMode(forWidth: expand + 10) == .full, "超过展开阈值自动展开",
+           "expand=\(expand)")
+    expect(model.autoMode(forWidth: collapse + 10) == nil, "滞回区内不切换")
+    expect(model.autoMode(forWidth: collapse - 10) == nil, "简化模式下更窄也不再重复切")
+
+    // 阈值本身要自洽：这是上一版的 bug——判据低于窗口最小宽度，分支永远走不到
+    expect(collapse > Layout.fullModeMinWidth, "收起阈值高于三栏几何下限")
+    expect(expand > collapse, "展开阈值高于收起阈值（留滞回）")
+    expect(collapse <= 1020, "收起阈值不超过旧版窗口最小宽度，否则又会不可达",
+           "collapse=\(collapse)")
+
+    // 完整模式被拖窄必须能收起（旧版这条永远返回 nil）
+    model.setWorkspaceMode(.full, manual: false)
+    expect(model.autoMode(forWidth: collapse - 1) == .compact, "完整模式变窄自动收起")
+    expect(model.autoMode(forWidth: collapse + 1) == nil, "留在滞回区内不来回弹")
 
     model.selection = ["a", "b"]
     model.setWorkspaceMode(.full, manual: true)

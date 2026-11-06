@@ -664,11 +664,13 @@ final class ArchiveModel: ObservableObject {
     }
 
     /// 窗口宽度变化时该不该跟着换模式；nil = 不动。
+    /// 阈值来自 Layout（由三栏最小宽度推导），不写死——
+    /// 上一版把 760 写死，而完整模式又把窗口最小宽度锁在 1020，这条分支永远走不到。
     /// 手动切过之后 5 分钟内不抢控制权，避免「刚展开又被弹回去」。
     func autoMode(forWidth width: Double) -> WorkspaceMode? {
         guard Date().timeIntervalSince(modePinnedAt) > 300 else { return nil }
-        if width < 760, workspaceMode == .full { return .compact }
-        if width > 900, workspaceMode == .compact { return .full }
+        if width < Layout.autoCollapseWidth, workspaceMode == .full { return .compact }
+        if width > Layout.autoExpandWidth, workspaceMode == .compact { return .full }
         return nil
     }
 

@@ -177,9 +177,9 @@ struct RrzipApp: App {
     var body: some Scene {
         Window("rrzip", id: "main") {
             ContentView(model: model)
-                // 最小尺寸按简化模式给，完整模式下由 applyModeWindowSize 提高下限，
-                // 否则窗口永远缩不进 720 宽，「简化」就是句空话
-                .frame(minWidth: 560, minHeight: 420)
+                // 最小尺寸与模式无关：简化与完整共用同一个下限，
+                // 否则窗口永远缩不进触发自动收起的宽度
+                .frame(minWidth: Layout.minWindowWidth, minHeight: Layout.minWindowHeight)
                 .onAppear { AppDelegate.model = model }
         }
         .defaultSize(width: 720, height: 520)
@@ -430,6 +430,8 @@ struct ContentView: View {
     /// 窗口变窄自动进简化模式。手动切过之后有冷却期，见 ArchiveModel.autoMode
     @AppStorage("rrzip.autoWorkspaceMode") private var autoWorkspaceMode = true
     @State private var windowWidth: Double = 1180
+    /// 宽度变化的防抖任务：拖动过程中只认最后一次
+    @State private var autoModeTask: Task<Void, Never>?
     /// 启动阶段先按记住的模式摆好窗口，再让宽度自适应接管，
     /// 否则「上次窗口 1180 宽」会在第一帧把简化模式弹成完整模式
     @State private var autoModeReady = false
@@ -455,13 +457,13 @@ struct ContentView: View {
                     HSplitView {
                         if showSidebar {
                             sidebar
-                                .frame(minWidth: 172, idealWidth: 198, maxWidth: 280)
+                                .frame(minWidth: Metrics.sidebarMin, idealWidth: 198, maxWidth: 280)
                         }
                         entryList
-                            .frame(minWidth: 360)
+                            .frame(minWidth: Metrics.contentMin)
                         if showInspector {
                             detailPane
-                                .frame(minWidth: 250, idealWidth: 288, maxWidth: 340)
+                                .frame(minWidth: Metrics.inspectorMin, idealWidth: 288, maxWidth: 340)
                         }
                     }
                     .frame(width: proxy.size.width, height: proxy.size.height)
@@ -498,9 +500,16 @@ struct ContentView: View {
             }
         )
         .onChange(of: windowWidth) { _, width in
-            guard autoModeReady, autoWorkspaceMode,
-                  let next = model.autoMode(forWidth: width) else { return }
-            model.setWorkspaceMode(next, manual: false)
+            guard autoModeReady, autoWorkspaceMode else { return }
+            // 拖动窗口时宽度是连续变化的，合并 100ms 再判定，
+            // 否则会在阈值附近反复切模式
+            autoModeTask?.cancel()
+            autoModeTask = Task {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                guard !Task.isCancelled else { return }
+                guard let next = model.autoMode(forWidth: width) else { return }
+                model.setWorkspaceMode(next, manual: false)
+            }
         }
         .preferredColorScheme(model.appearance.scheme)
         .onDrop(of: [.fileURL], isTargeted: $isDropTarget) { providers in
@@ -685,9 +694,11 @@ struct ContentView: View {
                 guard let window = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 400 })
                 else { return }
                 let compact = model.isCompactMode
-                window.minSize = compact
-                    ? NSSize(width: 560, height: 420)
-                    : NSSize(width: 1020, height: 600)
+                // 最小尺寸与模式解耦：完整模式也允许缩到简化尺寸。
+                // 旧版在这里把完整模式锁到 1020 宽，而自动收起判据是 < 760，
+                // 窗口根本窄不下去，那条分支一整版都没被触发过。
+                window.minSize = NSSize(width: Layout.minWindowWidth,
+                                       height: Layout.minWindowHeight)
                 var frame = window.frame
                 if compact {
                     // 上次在完整模式留下的宽窗口，进简化模式后收回来
@@ -892,9 +903,9 @@ struct ContentView: View {
                 ?? NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain })
         else { return }
         let compact = model.isCompactMode
-        window.minSize = compact
-            ? NSSize(width: 560, height: 420)
-            : NSSize(width: 1020, height: 600)
+        // 下限恒定，不随模式抬高；抬高就等于禁止用户把完整模式拉窄到自动收起阈值以下
+        window.minSize = NSSize(width: Layout.minWindowWidth,
+                               height: Layout.minWindowHeight)
         var frame = window.frame
         let target = compact
             ? NSSize(width: 720, height: 520)
@@ -1266,7 +1277,7 @@ struct ContentView: View {
                 .frame(width: proxy.size.width, height: proxy.size.height)
                 .overlay(alignment: .trailing) {
                     // 太窄时浮层会把列表压没，此时只保留空格快速查看
-                    if proxy.size.width >= 620,
+                    if proxy.size.width >= Layout.overlayPreviewMinWidth,
                        let entry = model.selectedEntry, !entry.isDirectory {
                         compactPreview
                             .padding(.trailing, Space.l)

@@ -52,8 +52,8 @@ private struct GeneralSettingsView: View {
                 Text("改这里会立即切换当前窗口；下次启动沿用这个模式。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Toggle("窗口变窄时自动切换模式（< 760 简化，> 900 完整）", isOn: $autoMode)
-                Text("手动切换后 5 分钟内不再自动切换，避免来回弹。")
+                Toggle("窗口变窄时自动切换模式", isOn: $autoMode)
+                Text("阈值跟着三栏宽度走，不写死数字；手动切换后 5 分钟内不再自动切换，避免来回弹。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
