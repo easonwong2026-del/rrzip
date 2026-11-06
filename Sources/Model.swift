@@ -909,7 +909,7 @@ final class ArchiveModel: ObservableObject {
                 break
             } catch ArchiveError.needsPassword {
                 if !askedPassword {
-                    guard let typed = askPassword(for: url, wrong: false) else { return finishLocked() }
+                    guard let typed = await askPassword(for: url, wrong: false) else { return finishLocked() }
                     askedPassword = true
                     passphrase = typed
                     passwords[url.path] = typed
@@ -930,7 +930,7 @@ final class ArchiveModel: ObservableObject {
                     continue
                 }
                 if Tar.looksEncrypted(message), !askedPassword {
-                    guard let typed = askPassword(for: url, wrong: false) else { return finishLocked() }
+                    guard let typed = await askPassword(for: url, wrong: false) else { return finishLocked() }
                     askedPassword = true
                     passphrase = typed
                     passwords[url.path] = typed
@@ -1239,24 +1239,33 @@ final class ArchiveModel: ObservableObject {
         status = "已加密，未解锁"
     }
 
-    private func askPassword(for archive: URL, wrong: Bool) -> String? {
-        let alert = NSAlert()
-        alert.messageText = wrong ? "密码不正确" : "该压缩包已加密"
-        alert.informativeText = "\(archive.lastPathComponent)\n输入密码后即可浏览与解压。"
-        alert.alertStyle = wrong ? .warning : .informational
+    // MARK: - 密码询问
 
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        field.placeholderString = "密码"
-        alert.accessoryView = field
+    /// 密码询问改用 SwiftUI 弹窗，不用 NSAlert.runModal。
+    /// runModal 会在主线程跑嵌套 runloop，从 async 上下文调用时偶尔根本不显示——
+    /// 表现就是「点了加密包，什么都没发生」。
+    struct PasswordRequest: Identifiable {
+        let id = UUID()
+        let archive: URL
+        let isRetry: Bool
+    }
 
-        alert.addButton(withTitle: "解锁")
-        alert.addButton(withTitle: "取消")
-        NSApp.activate(ignoringOtherApps: true)
-        alert.window.initialFirstResponder = field
+    @Published var passwordRequest: PasswordRequest?
+    private var passwordContinuation: CheckedContinuation<String?, Never>?
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        let value = field.stringValue
-        return value.isEmpty ? nil : value
+    private func askPassword(for archive: URL, wrong: Bool) async -> String? {
+        await withCheckedContinuation { continuation in
+            passwordContinuation = continuation
+            passwordRequest = PasswordRequest(archive: archive, isRetry: wrong)
+        }
+    }
+
+    /// 弹窗回调；nil 表示取消
+    func submitPassword(_ value: String?) {
+        guard passwordRequest != nil else { return }
+        passwordRequest = nil
+        passwordContinuation?.resume(returning: value)
+        passwordContinuation = nil
     }
 
     // MARK: - 嵌套浏览
@@ -1381,7 +1390,7 @@ final class ArchiveModel: ObservableObject {
                     }
                     return
                 } catch let ArchiveError.tool(message) where Tar.looksEncrypted(message) {
-                    guard attempt == 0, let typed = askPassword(for: frame.archive, wrong: passphrase != nil) else {
+                    guard attempt == 0, let typed = await askPassword(for: frame.archive, wrong: passphrase != nil) else {
                         errorMessage = "密码错误或已取消"
                         status = "解压失败"
                         isLoading = false
