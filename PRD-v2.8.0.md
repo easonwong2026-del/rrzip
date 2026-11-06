@@ -33,12 +33,12 @@
 | 右键破坏多选 | 成立：4 处 `selection = [entry.id]` 在 contextMenu 内 | `ContentView.swift:1556–1573` | ✅ v2.8.0 已修，改 `prepareContextSelection` |
 | 普通文件右键打不开 | 成立：`.disabled(!isDirectory && !isArchive)` | 同上 | ✅ v2.8.0 已修 |
 | 暂存导出同名覆盖 | 成立：全部解到同一目录，7-Zip 带 `-y` | `Model.swift:815` | → 模块 H（⬜） |
-| 批量固定 7-Zip | 成立：`SevenZip.extract` / `SevenZip.verify` 写死 | `Batch.swift:93,103` | → 模块 G（⬜） |
-| Quick Look 只走 Tar | 成立：`try Tar.list(url)`，无 7z 回退、无密码 | `QuickLook/PreviewProvider.swift:78` | → 模块 G（⬜） |
+| 批量固定 7-Zip | 成立：`SevenZip.extract` / `SevenZip.verify` 写死 | `Batch.swift:93,103` | ✅ 2.8.1 已改走 ArchiveService |
+| Quick Look 只走 Tar | 成立：`try Tar.list(url)`，无 7z 回退、无密码 | `QuickLook/PreviewProvider.swift:78` | ✅ 2.8.1 已走 ArchiveService |
 | 无独立设置窗口 | 成立：全库无 `Settings` scene | — | → 模块 D（⬜） |
 | Finder 仅 2 个 Services | 成立：Info.plist 只有 2 个 NSMessage | `build.sh` | → 模块 E（⬜） |
 | RELEASE_NOTES 写 MIT | 成立 | `RELEASE_NOTES.md:164` | ✅ v2.8.0 已修 |
-| 测试数量口径不一 | 部分成立：源码 55 处 `expect(` 调用点，但**实际运行 56 项**（含循环内多次调用） | `test.sh` 输出 | ✅ 统一按运行结果计数 |
+| 测试数量口径不一 | 部分成立：源码 55 处 `expect(` 调用点，但**实际运行 63 项**（含循环内多次调用） | `test.sh` 输出 | ✅ 统一按运行结果计数 |
 | COPYFILE_DISABLE=1 | 成立 | `Archive.swift:84` | → 模块 I（⬜，验证后再改） |
 
 ---
@@ -229,27 +229,31 @@ macOS 原生 `Settings` scene，5 个 tab，分组用 Form + Section，不堆开
 
 ---
 
-## 7. 统一 ArchiveService（工程整合）
+## 7. 统一 ArchiveService（工程整合）✅ 已交付
 
-现在打开、批量、暂存导出、Quick Look 各自选引擎，导致「单包能开、批量失败」。**下一批 B** 收口为一个服务：
+现在打开、批量、暂存导出、Quick Look 各自选引擎，导致「单包能开、批量失败」。**2.8.1 已收口**：
 
 ```swift
 enum ArchiveService {
+    static func engineOrder(for url: URL) -> [ArchiveEngine]
     static func list(_ url: URL, password: String?) throws -> [ArchiveEntry]
-    static func extract(_ url: URL, entries: [String], to: URL,
-                        password: String?, overwrite: OverwritePolicy) throws
+    static func extract(_ url: URL, entries: [String], to: URL, password: String?) throws
     static func verify(_ url: URL) throws
+    static func canOpen(_ url: URL) -> Bool
 }
 ```
 
-规则：
+已落地：
 
-- 内部按 `OpenGate.decide` → `prefersSevenZip` 选起始引擎，失败自动换另一个（复用 `performLoad` 的现有重试逻辑，抽出来共用）。
-- 批量解压、暂存导出、Quick Look 列表全部改调它。
-- 密码统一从调用方传入，服务内不弹 UI。
-- Quick Look 扩展是独立进程，需要把 `ArchiveService` 编进扩展 target（共享源文件，不重复实现）。
+- 内部按 `FormatDetector.prefersSevenZip` 决定起始引擎，失败自动换另一个；`needsPassword` 直抛，不换引擎。
+- 批量解压 / 批量校验、暂存导出、Quick Look 列表全部改调它。
+- Quick Look 扩展编译 `Archive.swift + FormatCatalog + FormatDetector + ArchiveService`，不重复实现。
+- 加密包语义统一：批量标记「已加密，需要密码」跳过；Quick Look 提示「请在 rrzip 里输入密码」。
 
-验收：同一批 4 个包（zip / 7z 加密头 / dmg / 截断包），单包打开与批量结果一致；Quick Look 能列 7z 加密头包（无密码时明确提示「需要密码」）。
+未做（留给下一批 ②）：
+
+- `extract` 的 `overwrite` 策略参数（需要和暂存冲突策略一起做）。
+- 打开路径 `performLoad` 保留自己的密码交互循环，只复用 `engineOrder`，没有强行套进 service（交互不该进纯函数层）。
 
 ---
 
@@ -277,7 +281,7 @@ enum ArchiveService {
 | T5 | 列表选 5 项后右键其中一项 | 仍是 5 项选中；菜单显示「解压 5 项到…」 | ✅ 已改代码 · 人工待验 |
 | T6 | 右键未选中的普通文件 | 切换为单选，「打开」可用 | ✅ 已改代码 · 人工待验 |
 | T7 | 无包状态下打开 `⌘,` | 五个 tab 全部可用，改外观立即生效 | ✅ 实机验证 |
-| T8 | 批量 4 个包（含 dmg、加密 7z） | 与单包打开结果一致；加密包标记跳过而非中断 | ⬜ 模块 G |
+| T8 | 批量 4 个包（含 dmg、加密 7z） | 与单包打开结果一致；加密包标记跳过而非中断 | 🔄 引擎已统一，4 包对照待跑 |
 | T9 | 暂存区两个同名 `logo.png` 导出 | 不覆盖，按包分目录或自动改名 | ⬜ 模块 H |
 | T10 | 访达选中文件夹右键 | 出现「压缩文件夹 / 压缩文件夹内容」 | ⬜ 模块 E |
 | T11 | 首次启动 | 一屏引导，可关闭；Quick Look 未启用时能一键跳设置 | ✅ 实机验证（同版本不重复弹） |
@@ -302,8 +306,8 @@ enum ArchiveService {
 
 | 批次 | 内容 | 状态 |
 |---|---|---|
-| **v2.8.0 已交付** | 简化/完整双模式（状态共享、浮层预览、⌃⌘M、宽度自适应、启动竞态修复）<br>移除独立 Mini 小窗<br>魔数入口统一 `OpenGate`、右键保留多选、右键打开普通文件、⋯ 菜单解禁、文档纠错<br>设置中心（`⌘,`，5 个分页，缓存清理）<br>首页（最近打开、快速压缩、使用指南/版本说明）+ 首次启动一屏<br>测试 56 项、`-strict-concurrency=complete` 零告警<br>**已合并 `a1d8734`（PR #2，squash）** | ✅ 2026-11-06 |
-| 下一批 ①（可与任何一项并行） | ArchiveService 收口：批量 / 暂存导出 / Quick Look 走同一套格式识别与引擎回退 | ⬜ |
+| **v2.8.0 已交付** | 简化/完整双模式（状态共享、浮层预览、⌃⌘M、宽度自适应、启动竞态修复）<br>移除独立 Mini 小窗<br>魔数入口统一 `OpenGate`、右键保留多选、右键打开普通文件、⋯ 菜单解禁、文档纠错<br>设置中心（`⌘,`，5 个分页，缓存清理）<br>首页（最近打开、快速压缩、使用指南/版本说明）+ 首次启动一屏<br>测试 63 项、`-strict-concurrency=complete` 零告警<br>**已合并 `a1d8734`（PR #2，squash）** | ✅ 2026-11-06 |
+| **2.8.1 已交付** | ArchiveService 收口：批量 / 批量校验 / 暂存导出 / Quick Look 统一引擎选择与回退<br>测试 63 项 | ✅ 2026-11-06 |
 | 下一批 ② | 暂存冲突策略、列排序与列管理 | ⬜ |
 | 下一批 ③ | FinderSync 扩展 + 进度窗口（需确认签名方案），同时补齐设置里的 Finder 菜单项勾选 | ⬜ |
 | v2.9 | 元数据保留验证（COPYFILE_DISABLE）、文件名编码覆盖、Developer ID 公证 | ⬜ |
@@ -320,4 +324,4 @@ enum ArchiveService {
 | 启动首帧「上次的宽窗口」把简化模式弹成完整 | 默认模式形同虚设 | `autoModeReady`：先摆窗口，0.6s 后才启用宽度判据 | ✅ 已修（实机验证） |
 | 自适应切换与用户手动操作打架 | 体验倒退 | 手动切换后 5 分钟冷却；⋯ 菜单可关 | ✅ 已实现 |
 | FinderSync 在 ad-hoc 签名下注册不稳定 | 右键时有时无 | 保留 Services 兜底，设置页显示扩展状态 | ⬜ 待评估 |
-| ArchiveService 收口改动面大 | 回归 | 先加测试再改调用方，逐处替换，每步跑 56 项 | ⬜ |
+| ArchiveService 收口改动面大 | 回归 | 先加测试再改调用方，逐处替换，每步跑 63 项 | ⬜ |

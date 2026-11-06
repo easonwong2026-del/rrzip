@@ -783,8 +783,9 @@ final class ArchiveModel: ObservableObject {
     private func performLoad(url: URL, resetTrail: Bool, restorePrefix: String? = nil) async {
         var passphrase = passwords[url.path]
         let detection = FormatDetector.detect(url)
-        // 磁盘映像类（dmg/vhd/qcow2…）libarchive 读不了，直接交给 7-Zip
-        var engine: ArchiveEngine = FormatDetector.prefersSevenZip(url) ? .sevenZip : .libarchive
+        // 磁盘映像类（dmg/vhd/qcow2…）libarchive 读不了，直接交给 7-Zip。
+        // 起始引擎跟批量解压 / 暂存导出一样，都由 ArchiveService 决定。
+        var engine: ArchiveEngine = ArchiveService.engineOrder(for: url).first ?? .libarchive
         var entries: [ArchiveEntry]?
         var askedPassword = false
         var switchedEngine = false
@@ -1023,8 +1024,9 @@ final class ArchiveModel: ObservableObject {
             for item in items {
                 do {
                     try await Task.detached(priority: .userInitiated) {
-                        try SevenZip.extract(item.archive, entries: [item.path],
-                                             to: destination, password: passwordMap[item.archive.path])
+                        try ArchiveService.extract(item.archive, entries: [item.path],
+                                                   to: destination,
+                                                   password: passwordMap[item.archive.path])
                     }.value
                 } catch {
                     failed += 1

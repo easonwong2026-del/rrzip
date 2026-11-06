@@ -348,6 +348,40 @@ do {
     expect(false, "快速压缩命名", "\(error)")
 }
 
+// 15. ArchiveService：打开 / 批量 / 暂存 / Quick Look 共用同一套引擎选择
+print("ArchiveService")
+do {
+    expect(ArchiveService.engineOrder(for: fixtures.appendingPathComponent("basic.zip")).first == .libarchive,
+           "zip 先用 libarchive")
+    expect(ArchiveService.engineOrder(for: URL(fileURLWithPath: "/tmp/demo.dmg")).first == .sevenZip,
+           "dmg 先用 7-Zip")
+
+    let entries = try ArchiveService.list(fixtures.appendingPathComponent("basic.zip"), password: nil)
+    expect(entries.count == 6, "list 结果与单引擎一致", "实际 \(entries.count)")
+    expect(ArchiveService.canOpen(fixtures.appendingPathComponent("basic.zip")), "canOpen 认得 zip")
+    expect(!ArchiveService.canOpen(URL(fileURLWithPath: "/tmp/rrzip-not-an-archive.txt")), "普通文本判为不能开")
+
+    let out = fixtures.appendingPathComponent("svc-out", isDirectory: true)
+    try? FileManager.default.removeItem(at: out)
+    try ArchiveService.extract(fixtures.appendingPathComponent("basic.zip"),
+                               entries: ["说明.txt"], to: out, password: nil)
+    expect(FileManager.default.fileExists(atPath: out.appendingPathComponent("说明.txt").path),
+           "extract 解出指定条目")
+} catch {
+    expect(false, "ArchiveService", "\(error)")
+}
+
+if SevenZip.isAvailable {
+    do {
+        _ = try ArchiveService.list(fixtures.appendingPathComponent("secret.7z"), password: nil)
+        expect(false, "加密包应抛 needsPassword")
+    } catch ArchiveError.needsPassword {
+        expect(true, "加密包抛 needsPassword")
+    } catch {
+        expect(false, "加密包应抛 needsPassword", "\(error)")
+    }
+}
+
 print("")
 print(failures == 0 ? "全部通过（\(checks) 项）" : "失败 \(failures)/\(checks)")
 exit(failures == 0 ? 0 : 1)

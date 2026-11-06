@@ -90,7 +90,7 @@ final class BatchRunner: ObservableObject {
                         guard let root = destination else { break }
                         let folder = Self.uniqueFolder(for: job.url, in: root)
                         try await Task.detached(priority: .userInitiated) {
-                            try SevenZip.extract(job.url, entries: [], to: folder, password: nil)
+                            try ArchiveService.extract(job.url, entries: [], to: folder, password: nil)
                         }.value
                         await MainActor.run {
                             if let index = self.jobs.firstIndex(where: { $0.id == job.id }) {
@@ -100,7 +100,7 @@ final class BatchRunner: ObservableObject {
                         }
                     case .verify:
                         try await Task.detached(priority: .userInitiated) {
-                            try SevenZip.verify(job.url)
+                            try ArchiveService.verify(job.url)
                         }.value
                         await MainActor.run {
                             if let index = self.jobs.firstIndex(where: { $0.id == job.id }) {
