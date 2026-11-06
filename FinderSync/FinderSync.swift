@@ -123,10 +123,13 @@ final class FinderSync: FIFinderSync {
 
             // 加密包：扩展发不出用户通知（appex 没这个权限），
             // 与其静默失败，不如把包交给主程序——用户本来也要在那里输密码。
+            // 顺手把「本来要解到哪」记下来，解锁后主程序接着解，不让这次点击白费。
             if !outcome.needsPassword.isEmpty {
                 let locked = archives.filter {
                     outcome.needsPassword.contains($0.lastPathComponent)
                 }
+                PendingExtraction.write(archives: locked,
+                                        mode: mode == .here ? .here : .newFolder)
                 DispatchQueue.main.async {
                     NSWorkspace.shared.open(locked, withApplicationAt: app,
                                             configuration: NSWorkspace.OpenConfiguration())

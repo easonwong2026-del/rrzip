@@ -760,6 +760,20 @@ final class ArchiveModel: ObservableObject {
         }
     }
 
+    /// 目录版：不拼扩展名
+    nonisolated static func uniqueDirectory(_ url: URL) -> URL {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return url }
+        let parent = url.deletingLastPathComponent()
+        let base = url.lastPathComponent
+        var index = 2
+        while true {
+            let candidate = parent.appendingPathComponent("\(base) \(index)", isDirectory: true)
+            if !fm.fileExists(atPath: candidate.path) { return candidate }
+            index += 1
+        }
+    }
+
     // MARK: - 工作目录
 
     private lazy var workspace: URL = {
@@ -976,6 +990,36 @@ final class ArchiveModel: ObservableObject {
         } else {
             status = "\(Self.children(of: "", in: entries).count) 个项目 · \(url.lastPathComponent)"
         }
+
+        // 这次打开如果是访达右键「解压」撞上加密包转过来的，解锁完就接着解
+        if resetTrail {
+            resumePendingExtractionIfNeeded(for: url)
+        }
+    }
+
+    /// 访达那边点的「解压到此处 / 解压到包名」因为要密码没做完。
+    /// 把包交过来只是手段，真正要做的事记在 PendingExtraction 里，这里收尾。
+    private func resumePendingExtractionIfNeeded(for url: URL) {
+        guard let pending = PendingExtraction.read(),
+              pending.archives.contains(url.path) else { return }
+        PendingExtraction.clear()
+
+        // 太久以前的记录不动手：用户可能只是顺手打开了同名的另一个包
+        guard Date().timeIntervalSince(pending.createdAt) < PendingExtraction.validInterval,
+              let frame = current, frame.archive.path == url.path else { return }
+
+        let destination: URL
+        switch pending.mode {
+        case .here:
+            destination = url.deletingLastPathComponent()
+        case .newFolder:
+            let parent = url.deletingLastPathComponent()
+            let base = url.deletingPathExtension().lastPathComponent
+            destination = Self.uniqueDirectory(
+                parent.appendingPathComponent(base.isEmpty ? "归档" : base, isDirectory: true))
+        }
+        status = "解压到 \(destination.lastPathComponent)…"
+        extract(entries: [], from: frame, to: destination)
     }
 
     // MARK: - 原地编辑
