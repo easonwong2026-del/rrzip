@@ -14,16 +14,25 @@ final class QuickLookController: NSObject, QLPreviewPanelDataSource, QLPreviewPa
 
     var isVisible: Bool { QLPreviewPanel.shared()?.isVisible ?? false }
 
+    /// 面板正显示这个临时文件，清缓存不能把它删掉。
+    /// 只 hold 当前这一个：换了或关了立刻释放，不留悬挂引用。
+    private func setPreviewURL(_ url: URL?) {
+        if let current = previewURL { ScratchUsage.shared.release(current) }
+        previewURL = url
+        if let url { ScratchUsage.shared.hold(url) }
+    }
+
     func toggle(entry: ArchiveEntry?, model: ArchiveModel) {
         if isVisible {
             QLPreviewPanel.shared()?.orderOut(nil)
+            setPreviewURL(nil)
             return
         }
         guard let entry, !entry.isDirectory else { return }
 
         model.payloadURL(for: entry) { [weak self] url in
             guard let self, let url else { return }
-            self.previewURL = url
+            self.setPreviewURL(url)
             guard let panel = QLPreviewPanel.shared() else {
                 NSWorkspace.shared.open(url)      // 兜底：交给系统默认程序
                 return
@@ -36,6 +45,7 @@ final class QuickLookController: NSObject, QLPreviewPanelDataSource, QLPreviewPa
 
     func close() {
         QLPreviewPanel.shared()?.orderOut(nil)
+        setPreviewURL(nil)
     }
 
     // MARK: - QLPreviewPanelDataSource
@@ -52,7 +62,7 @@ final class QuickLookController: NSObject, QLPreviewPanelDataSource, QLPreviewPa
 
     nonisolated func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
         guard event.type == .keyDown, event.keyCode == 49 else { return false }   // 空格关闭
-        MainActor.assumeIsolated { panel.orderOut(nil) }
+        MainActor.assumeIsolated { self.close() }
         return true
     }
 }

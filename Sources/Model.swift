@@ -1789,7 +1789,11 @@ final class ArchiveModel: ObservableObject {
         let destination = freshScratch()
         let passphrase = passwords[frame.archive.path]
         let engine = frame.engine
+        // 预览解压不走任务队列，清缓存看不到它。先在这里登记，
+        // 再派任务——顺序反了就没用：调用方紧接着清缓存会漏判。
+        ScratchUsage.shared.beginWork()
         Task {
+            defer { ScratchUsage.shared.endWork() }
             let url = try? await Task.detached { () -> URL in
                 switch engine {
                 case .libarchive:
@@ -1805,8 +1809,10 @@ final class ArchiveModel: ObservableObject {
             }.value
             if let url {
                 if payloadCache.count > 300 {
-                    // 只清字典会把解压出来的文件留在磁盘上，一并删掉
-                    for (_, cached) in payloadCache {
+                    // 只清字典会把解压出来的文件留在磁盘上，一并删掉。
+                    // 正被预览占着的那个留着：删了当前这一屏就白了
+                    for (_, cached) in payloadCache
+                    where !ScratchUsage.shared.isHeld(cached.path) {
                         try? FileManager.default.removeItem(at: cached.deletingLastPathComponent())
                     }
                     payloadCache.removeAll()
