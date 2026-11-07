@@ -132,18 +132,42 @@ struct FinderSettings: Codable, Equatable, Sendable {
 
 enum FinderSettingsStore {
 
-    /// 原子写：先写临时文件再替换，避免扩展读到半截 JSON。
-    /// 扩展每次开菜单都读这个文件，坏一次就是一整轮右键没反应。
-    static func save(_ settings: FinderSettings, to url: URL = FinderSettings.fileURL) {
+    /// 原子写：同目录临时文件 + `rename(2)` 覆盖目标。
+    ///
+    /// 为什么不用 `FileManager.replaceItemAt`：它在目标不存在时的行为不跨版本一致，
+    /// 失败只抛错、不写盘，而调用方又是 `try?`，于是「第一次保存」可能悄悄什么都没发生——
+    /// 用户改完设置、重启访达，菜单还是旧的。`rename` 的语义是明确的：
+    /// 目标存在就原子替换，不存在就原子创建，读者要么看到完整旧文件、要么看到完整新文件。
+    ///
+    /// 返回是否真的写成功。设置页据此提示，不再无条件显示「已保存」。
+    @discardableResult
+    static func save(_ settings: FinderSettings, to url: URL = FinderSettings.fileURL) -> Bool {
         let folder = url.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(settings) else { return }
+        guard let data = try? encoder.encode(settings) else { return false }
 
-        let staging = folder.appendingPathComponent(".finder.json.tmp")
-        guard (try? data.write(to: staging, options: .atomic)) != nil else { return }
-        _ = try? FileManager.default.replaceItemAt(url, withItemAt: staging)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        } catch {
+            return false
+        }
+
+        // 每次用独立临时名：连点开关时两次保存可能重叠，
+        // 共用一个固定名字会互相截断；残留也靠 UUID 区分，便于失败时只删自己那份。
+        let staging = folder.appendingPathComponent(".finder.json.\(UUID().uuidString).tmp")
+        do {
+            try data.write(to: staging, options: .atomic)
+        } catch {
+            return false
+        }
+
+        // rename 失败时目标文件保持原样（旧配置还在），临时文件不留在原地
+        guard rename(staging.path, url.path) == 0 else {
+            try? FileManager.default.removeItem(at: staging)
+            return false
+        }
+        return true
     }
 }

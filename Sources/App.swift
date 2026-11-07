@@ -368,7 +368,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// 用 rrzip 解压到此处：每个包解到它自己所在的目录
+    /// 用 rrzip 解压到此处：每个包解到它自己所在的目录。
+    /// 走 ServiceExtraction 而不是直接调 ArchiveService.extract——
+    /// 后者的默认策略是覆盖，服务入口没有确认界面，不能替用户覆盖同名文件。
     @objc func extractHereWithRrzip(_ pboard: NSPasteboard, userData: String,
                                     error: AutoreleasingUnsafeMutablePointer<NSString>) {
         let urls = readURLs(from: pboard).filter { ArchiveService.canOpen($0) }
@@ -378,9 +380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for url in urls {
                 do {
                     try await Task.detached(priority: .userInitiated) {
-                        try ArchiveService.extract(url, entries: [],
-                                                   to: url.deletingLastPathComponent(),
-                                                   password: nil)
+                        try ServiceExtraction.extract(url)
                     }.value
                 } catch {
                     failed.append(url.lastPathComponent)

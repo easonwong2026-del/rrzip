@@ -115,7 +115,7 @@ private struct GeneralSettingsView: View {
     var body: some View {
         Form {
             Section("启动与窗口") {
-                Picker("工作模式", selection: $model.workspaceMode) {
+                Picker("工作模式", selection: modeBinding) {
                     ForEach(WorkspaceMode.allCases) { mode in
                         Text(mode.title).tag(mode)
                     }
@@ -153,6 +153,15 @@ private struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// 设置页选模式必须走 manual 路径，否则冷却期不生效
+    /// （见 ArchiveModel.selectWorkspaceModeFromSettings）
+    private var modeBinding: Binding<WorkspaceMode> {
+        Binding(
+            get: { model.workspaceMode },
+            set: { model.selectWorkspaceModeFromSettings($0) }
+        )
     }
 }
 
@@ -192,13 +201,18 @@ private struct ExtractSettingsView: View {
             set: { ask in
                 if ask {
                     destination = ""
-                } else if destination.isEmpty {
-                    // 关掉「每次询问」时给一个明确默认，别把用户扔在空状态
-                    destination = FileManager.default.urls(for: .downloadsDirectory,
-                                                           in: .userDomainMask)[0].path
+                } else {
+                    // 关掉「每次询问」必须由用户点选目录。
+                    // 旧版在这里直接塞了下载目录：用户取消了面板，配置却已经改了，
+                    // 下次解压莫名其妙落到「下载」里，还以为是 bug。
+                    pickDestination()
                 }
             }
         )
+    }
+
+    private var resolution: ExtractDestinationSetting.Resolution {
+        ExtractDestinationSetting.resolve(destination)
     }
 
     var body: some View {
@@ -213,9 +227,15 @@ private struct ExtractSettingsView: View {
                             .font(TypeScale.mono)
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            .help(destination)
                         Spacer(minLength: 4)
                         Button("更改…") { pickDestination() }
                             .controlSize(.small)
+                    }
+                    if let problem = resolution.problem {
+                        Label(problem, systemImage: "exclamationmark.triangle.fill")
+                            .font(TypeScale.caption)
+                            .foregroundStyle(.orange)
                     }
                 }
                 Text("选择固定目录后，⌘E 与「解压到文件夹…」不再弹面板。")
@@ -241,6 +261,7 @@ private struct ExtractSettingsView: View {
         .formStyle(.grouped)
     }
 
+    /// 面板取消时不动配置：调用方那一次切换就是不生效。
     private func pickDestination() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -248,9 +269,9 @@ private struct ExtractSettingsView: View {
         panel.canCreateDirectories = true
         panel.prompt = "选用此目录"
         panel.message = "选择默认的解压目标文件夹"
-        if panel.runModal() == .OK, let url = panel.url {
-            destination = url.path
-        }
+        if let current = resolution.url { panel.directoryURL = current }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        destination = ExtractDestinationSetting.store(url.path)
     }
 }
 
@@ -262,6 +283,9 @@ private struct IntegrationSettingsView: View {
     @State private var settings = FinderSettings.load()
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var confirmRestartFinder = false
+    /// 落盘失败必须说出来：以前 try? 吞掉错误，界面照旧显示已勾选，
+    /// 用户以为设好了，重启访达发现菜单没变
+    @State private var saveFailed = false
 
     var body: some View {
         Form {
@@ -296,6 +320,11 @@ private struct IntegrationSettingsView: View {
                 ForEach(FinderAction.allCases, id: \.self) { action in
                     Toggle(action.title, isOn: binding(for: action))
                         .disabled(action == .compressSevenZip)
+                }
+                if saveFailed {
+                    Label("设置没能写入，重启访达后会回到上一次保存的配置", systemImage: "exclamationmark.triangle.fill")
+                        .font(TypeScale.caption)
+                        .foregroundStyle(.orange)
                 }
                 Text("访达扩展是沙盒进程，压不了 7Z（用不了包内 7zz），这一项先在右键里停用；7Z 请在主程序里新建。")
                     .font(.caption)
@@ -341,7 +370,9 @@ private struct IntegrationSettingsView: View {
         }
         .formStyle(.grouped)
         .onAppear(perform: refresh)
-        .onChange(of: settings) { _, newValue in FinderSettingsStore.save(newValue) }
+        .onChange(of: settings) { _, newValue in
+            saveFailed = !FinderSettingsStore.save(newValue)
+        }
         .alert("重新启动访达？", isPresented: $confirmRestartFinder) {
             Button("取消", role: .cancel) {}
             Button("重启", role: .destructive) { restartFinder() }
