@@ -5,14 +5,7 @@
 //  右侧详情栏
 //  拆自 ContentView.swift，成员全部是 extension，不持有状态。
 
-import AppKit
-import PDFKit
-import QuickLook
 import SwiftUI
-import UniformTypeIdentifiers
-// UNUserNotificationCenter 没标 Sendable，但它的方法本身就是线程安全的；
-// 用 @preconcurrency 压掉严格并发下的误报，不绕过检查本身
-@preconcurrency import UserNotifications
 
 extension ContentView {
     var detailKind: FileKind {
@@ -23,11 +16,12 @@ extension ContentView {
     var detailPane: some View {
         VStack(spacing: 0) {
             detailHeader
-            infoCard
+            archiveSummary
                 .padding(.horizontal, 12)
-                .padding(.top, 10)
-                .padding(.bottom, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 10)
             Hairline()
+            // 预览拿回原来被五条元信息占走的高度
             PreviewPane(model: model)
         }
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.35))
@@ -35,8 +29,8 @@ extension ContentView {
 
     var detailHeader: some View {
         let kind = detailKind
-        return VStack(spacing: 7) {
-            KindBadge(kind: kind, side: 44, corner: 11)
+        return VStack(spacing: 6) {
+            KindBadge(kind: kind, side: 38, corner: 10)
             Text(model.current?.archive.lastPathComponent ?? "")
                 .font(TypeScale.title)
                 .multilineTextAlignment(.center)
@@ -59,50 +53,33 @@ extension ContentView {
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 13)
+        .padding(.vertical, 10)
         .background(
             LinearGradient(colors: [kind.tint.opacity(0.07), kind.tint.opacity(0.015)],
                            startPoint: .top, endPoint: .bottom)
         )
     }
 
-    var infoCard: some View {
-        VStack(spacing: 0) {
-            infoRow("大小", model.archiveSizeText)
-            rowDivider
-            infoRow("条目", "\(model.totalEntryCount)")
-            rowDivider
-            infoRow("加密", model.isEncrypted ? "是" : "否")
-            rowDivider
-            infoRow("修改", model.archiveModifiedText)
-            rowDivider
-            infoRow("识别", model.detectionSourceText)
+    /// 常驻信息只留一行：大小 + 条目数。
+    /// 修改时间与识别来源属于「要看的时候才看」，挂在提示里；
+    /// 加密状态在头部已经有胶囊，这里不再重复一行「加密：否」。
+    var archiveSummary: some View {
+        HStack(spacing: 5) {
+            Text(model.archiveSizeText)
+                .monospacedDigit()
+            Text("·")
+                .foregroundStyle(.quaternary)
+            Text("\(model.totalEntryCount) 项")
+                .monospacedDigit()
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 10)
+        .font(TypeScale.data(10.5))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .padding(.horizontal, 9)
         .padding(.vertical, 5)
         .cardSurface()
-    }
-
-    var rowDivider: some View {
-        Rectangle()
-            .fill(Color.primary.opacity(0.055))
-            .frame(height: 1)
-            .padding(.leading, 2)
-    }
-
-    func infoRow(_ title: String, _ value: String) -> some View {
-        HStack(spacing: 8) {
-            Text(title)
-                .font(TypeScale.label)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 4)
-            Text(value)
-                .font(TypeScale.data())
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .padding(.vertical, 4.5)
+        .help("修改：\(model.archiveModifiedText)\n识别：\(model.detectionSourceText)")
     }
 
     // MARK: 简化模式

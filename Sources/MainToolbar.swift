@@ -6,75 +6,17 @@
 //  拆自 ContentView.swift，成员全部是 extension，不持有状态。
 
 import AppKit
-import PDFKit
-import QuickLook
 import SwiftUI
-import UniformTypeIdentifiers
-// UNUserNotificationCenter 没标 Sendable，但它的方法本身就是线程安全的；
-// 用 @preconcurrency 压掉严格并发下的误报，不绕过检查本身
-@preconcurrency import UserNotifications
 
 extension ContentView {
     var toolbar: some View {
         HStack(spacing: 6) {
-            // 简化模式没有目录树，这个开关自然也不该在
-            if !model.isCompactMode {
-                ToolButton(symbol: "sidebar.leading",
-                           help: showSidebar ? "隐藏目录栏" : "显示目录栏") {
-                    showSidebar.toggle()
-                }
-            }
-
-            Button {
-                model.openWithPanel()
-            } label: {
-                Label("打开", systemImage: "folder")
-                    .font(TypeScale.bodySmall.weight(.medium))
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(Palette.brand)
-            .help("打开压缩包（⌘O）")
-
-            // 解压只留一个入口：有选中解选中、没选中解全部；
-            // 旁边的小三角给出明确选项，比两个长得几乎一样的图标好懂
-            HStack(spacing: 0) {
-                Button {
-                    if model.selection.isEmpty { model.extractAll() } else { model.extractSelection() }
-                } label: {
-                    Label("解压", systemImage: "tray.and.arrow.down")
-                        .font(TypeScale.bodySmall.weight(.medium))
-                }
-                .buttonStyle(.bordered)
-                .disabled(model.current == nil)
-                .help(model.selection.isEmpty ? "全部解压（⌘E）" : "解压选中的 \(model.selection.count) 项（⇧⌘E）")
-
-                Menu {
-                    Button("全部解压") { model.extractAll() }
-                        .disabled(model.current == nil)
-                    Button("只解压选中项") { model.extractSelection() }
-                        .disabled(model.selection.isEmpty)
-                } label: {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 7.5, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 16, height: 20)
-                        .contentShape(Rectangle())
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .disabled(model.current == nil)
-                .help("选择解压范围")
-            }
-
-            Button {
-                model.createArchive()
-            } label: {
-                Label("新建", systemImage: "archivebox")
-                    .font(TypeScale.bodySmall.weight(.medium))
-            }
-            .buttonStyle(.bordered)
-            .help("新建压缩包（⌘N）")
+            // 左侧只放对归档的动作：打开 / 解压 / 新建。
+            // 布局开关（目录栏、详情栏、视图）统一挪到右边，
+            // 否则「这一栏显示什么」和「对这个包做什么」混在一排里，主次分不出来。
+            openButton
+            extractGroup
+            newButton
 
             groupDivider
 
@@ -88,6 +30,13 @@ extension ContentView {
             searchField
             if !model.isCompactMode {
                 viewSwitcher
+                // 目录树只在有归档时才有内容，没开包时这个开关没有意义
+                if model.current != nil {
+                    ToolButton(symbol: "sidebar.leading",
+                               help: showSidebar ? "隐藏目录栏" : "显示目录栏") {
+                        showSidebar.toggle()
+                    }
+                }
                 ToolButton(symbol: "sidebar.right",
                            help: showInspector ? "隐藏详情栏" : "显示详情栏",
                            inactive: model.current == nil) {
@@ -114,6 +63,76 @@ extension ContentView {
         .padding(.horizontal, Metrics.gutter)
         .frame(height: Metrics.toolbarHeight)
         .background(Palette.chrome)
+    }
+
+    /// 首页的主操作已经是页面里那张卡片，工具栏不再用品牌色重复强调；
+    /// 打开归档之后它退成图标，把唯一的品牌色留给「解压」。
+    @ViewBuilder
+    var openButton: some View {
+        if model.current == nil {
+            Button {
+                model.openWithPanel()
+            } label: {
+                Label("打开", systemImage: "folder")
+                    .font(TypeScale.bodySmall.weight(.medium))
+            }
+            .buttonStyle(.bordered)
+            .help("打开压缩包（⌘O）")
+        } else {
+            ToolButton(symbol: "folder", help: "打开压缩包（⌘O）") {
+                model.openWithPanel()
+            }
+        }
+    }
+
+    /// 解压：有选中解选中、没选中解全部；旁边的小三角给出明确范围。
+    /// 没有归档时留一个禁用图标，既不可误触，也不占一整块横向空间。
+    @ViewBuilder
+    var extractGroup: some View {
+        if model.current == nil {
+            ToolButton(symbol: "tray.and.arrow.down",
+                       help: "先打开一个压缩包",
+                       inactive: true) {}
+        } else {
+            HStack(spacing: 0) {
+                Button {
+                    if model.selection.isEmpty { model.extractAll() } else { model.extractSelection() }
+                } label: {
+                    Label("解压", systemImage: "tray.and.arrow.down")
+                        .font(TypeScale.bodySmall.weight(.medium))
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.brand)
+                .help(model.selection.isEmpty ? "全部解压（⌘E）" : "解压选中的 \(model.selection.count) 项（⇧⌘E）")
+
+                Menu {
+                    Button("全部解压") { model.extractAll() }
+                    Button("只解压选中项") { model.extractSelection() }
+                        .disabled(model.selection.isEmpty)
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7.5, weight: .bold))
+                        .foregroundStyle(Palette.brand)
+                        .frame(width: 16, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("选择解压范围")
+            }
+        }
+    }
+
+    var newButton: some View {
+        Button {
+            model.createArchive()
+        } label: {
+            Label("新建", systemImage: "archivebox")
+                .font(TypeScale.bodySmall.weight(.medium))
+        }
+        .buttonStyle(.bordered)
+        .help("新建压缩包（⌘N）")
     }
 
     var groupDivider: some View {

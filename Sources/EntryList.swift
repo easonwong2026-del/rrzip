@@ -6,13 +6,8 @@
 //  拆自 ContentView.swift，成员全部是 extension，不持有状态。
 
 import AppKit
-import PDFKit
-import QuickLook
 import SwiftUI
 import UniformTypeIdentifiers
-// UNUserNotificationCenter 没标 Sendable，但它的方法本身就是线程安全的；
-// 用 @preconcurrency 压掉严格并发下的误报，不绕过检查本身
-@preconcurrency import UserNotifications
 
 extension ContentView {
     var compactWorkspace: some View {
@@ -27,7 +22,7 @@ extension ContentView {
                             .padding(.trailing, Space.l)
                             .padding(.top, Space.l)
                             // 给底部选中操作条让位，否则浮层压住「解压到文件夹…」
-                            .padding(.bottom, 44)
+                            .padding(.bottom, Metrics.flowBarHeight + Space.m)
                     }
                 }
         }
@@ -36,7 +31,7 @@ extension ContentView {
 
     var compactPreview: some View {
         PreviewPane(model: model)
-            .frame(width: 280)
+            .frame(width: Metrics.overlayPreviewWidth)
             .frame(maxHeight: .infinity)
             .clipShape(RoundedRectangle(cornerRadius: Metrics.radiusCard, style: .continuous))
             .overlay(
@@ -278,14 +273,27 @@ extension ContentView {
         .background(Color(nsColor: .textBackgroundColor))
     }
 
-    /// 选中后浮出的快捷操作条
+    /// 选中后浮出的快捷操作条。
+    /// 三栏收到最窄（818）时按钮会被挤出可视区、只剩「解压…」三个字，
+    /// 所以给它一个更短的版式，由 ViewThatFits 按实际宽度挑。
     var flowBar: some View {
+        ViewThatFits(in: .horizontal) {
+            flowBarRow(compact: false)
+            flowBarRow(compact: true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(.bar)
+        .overlay(alignment: .top) { Hairline() }
+    }
+
+    func flowBarRow(compact: Bool) -> some View {
         HStack(spacing: 8) {
             HStack(spacing: 4) {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 9.5))
                     .foregroundStyle(Palette.brand)
-                Text("已选 \(model.selection.count) 项")
+                Text(compact ? "\(model.selection.count) 项" : "已选 \(model.selection.count) 项")
                     .font(TypeScale.label.weight(.medium))
                     .lineLimit(1)
                     .fixedSize()
@@ -294,11 +302,12 @@ extension ContentView {
             .padding(.vertical, 2.5)
             .background(Palette.brand.opacity(0.10), in: Capsule())
 
-            Spacer()
+            Spacer(minLength: 8)
 
-            Button("解压到文件夹…") { model.extractSelection() }
+            Button(compact ? "解压…" : "解压到文件夹…") { model.extractSelection() }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .help("解压选中的 \(model.selection.count) 项到文件夹…")
             if let entry = model.selectedEntry,
                SaveAsFlow.allowsSingleFileExport(selectionCount: model.selection.count,
                                                  isDirectory: entry.isDirectory) {
@@ -315,10 +324,6 @@ extension ContentView {
                 .tint(.red)
             ToolButton(symbol: "xmark", help: "取消选择（Esc）") { model.selection = [] }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(.bar)
-        .overlay(alignment: .top) { Hairline() }
     }
 
     func exportSelected() {
@@ -481,7 +486,11 @@ struct EntryRow: View {
             }
 
             if entry.isArchive && !entry.isDirectory {
-                TintPill(text: "嵌套", tint: FileKind.archive.tint)
+                // 只是一条提示：以前用「嵌套」胶囊，34pt 全是从文件名那里借的
+                Image(systemName: "shippingbox.fill")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(FileKind.archive.tint.opacity(0.85))
+                    .help("嵌套压缩包，双击展开")
             }
 
             Spacer(minLength: 8)

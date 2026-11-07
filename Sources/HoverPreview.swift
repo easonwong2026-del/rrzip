@@ -164,9 +164,7 @@ struct HoverCard: View {
             return
         }
 
-        let url: URL? = await withCheckedContinuation { continuation in
-            model.payloadURL(for: entry) { continuation.resume(returning: $0) }
-        }
+        let url = await model.payloadURL(for: entry)
         guard let url,
               let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
             await MainActor.run { failed = true }

@@ -117,11 +117,16 @@ enum Metrics {
     /// 列表里「大小 / 修改时间」两列宽度，表头与行必须共用
     static let sizeColumn: CGFloat = 84
     static let dateColumn: CGFloat = 118
+    /// 选中操作条的实际高度（7 + 20 + 7 + 1pt 分隔线）。
+    /// 进度卡上移、浮层让位都按它算，别在视图里各写一个 36
+    static let flowBarHeight: CGFloat = 36
     /// 三栏各自的最小宽度：既是布局下限，也是自动切换阈值的推导输入。
     /// 外观改版调这三个数，Layout 的阈值会跟着走，不用回来改 autoMode。
     static let sidebarMin: CGFloat = 172
     static let contentMin: CGFloat = 360
     static let inspectorMin: CGFloat = 250
+    /// 简化模式浮层预览的宽度（断点由它和内容区最小宽度推导，见 Layout）
+    static let overlayPreviewWidth: CGFloat = 280
 }
 
 /// 窗口与模式切换的几何口径。
@@ -152,8 +157,12 @@ enum Layout {
     static let minWindowWidth: CGFloat = 560
     static let minWindowHeight: CGFloat = 420
 
-    /// 简化模式浮层预览的断点：窗口更窄时不浮层，改用空格快速查看
-    static let overlayPreviewMinWidth: CGFloat = 620
+    /// 简化模式浮层预览的断点。
+    /// 以前写 620：那时列表只剩 330，比 `contentMin` 还窄，文件名被挤成四五个字。
+    /// 现在要求「浮层 + 两侧留白之后列表仍然放得下」，低于它就只用空格快速查看。
+    static var overlayPreviewMinWidth: CGFloat {
+        Metrics.contentMin + Metrics.overlayPreviewWidth + Space.l * 2
+    }
 }
 
 enum FileKind {

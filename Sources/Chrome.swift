@@ -5,14 +5,7 @@
 //  面包屑、状态条、提示条、拖放遮罩
 //  拆自 ContentView.swift，成员全部是 extension，不持有状态。
 
-import AppKit
-import PDFKit
-import QuickLook
 import SwiftUI
-import UniformTypeIdentifiers
-// UNUserNotificationCenter 没标 Sendable，但它的方法本身就是线程安全的；
-// 用 @preconcurrency 压掉严格并发下的误报，不绕过检查本身
-@preconcurrency import UserNotifications
 
 extension ContentView {
     // MARK: 一次性提示
@@ -179,30 +172,15 @@ extension ContentView {
 
             Spacer(minLength: 8)
 
-            if model.isSearching {
-                statusItem("\(model.displayEntries.count) 个结果")
-                if !model.selection.isEmpty { statusDot }
-            }
-            if !model.selection.isEmpty {
-                Text("已选 \(model.selection.count) 项")
-                    .font(TypeScale.caption.weight(.medium))
-                    .foregroundStyle(Palette.brand)
-                statusDot
-            }
+            // 结果数在面包屑、已选数在选中操作条，各自只出现一次；
+            // 状态栏只留「这个包有多大」这类没有别处可看的信息
             if !model.archiveSizeText.isEmpty {
-                if !model.isSearching || !model.selection.isEmpty { statusDot }
                 statusItem(model.archiveSizeText, mono: true)
             }
         }
         .padding(.horizontal, Metrics.gutter)
         .frame(height: Metrics.statusHeight)
         .background(Palette.chrome)
-    }
-
-    var statusDot: some View {
-        Circle()
-            .fill(Color.primary.opacity(0.18))
-            .frame(width: 2.5, height: 2.5)
     }
 
     func statusItem(_ text: String, mono: Bool = false) -> some View {
