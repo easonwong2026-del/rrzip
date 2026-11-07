@@ -1312,8 +1312,30 @@ final class ArchiveModel: ObservableObject {
     @Published var passwordRequest: PasswordRequest?
     /// 非 nil 时主界面弹「创建压缩包」sheet
     @Published var pendingCreate: PendingCreate?
-    /// 非 nil 时主界面显示进度卡片
+    /// 非 nil 表示有任务在跑
     @Published var task: TaskProgress?
+    /// 卡片要不要露出来。任务立刻开始，但只有超过 0.8 秒才显示——
+    /// 压一个小文件闪一下进度条，比没有进度更烦。
+    @Published var taskVisible = false
+    private var taskReveal: Task<Void, Never>?
+
+    func beginTask(_ progress: TaskProgress) {
+        task = progress
+        taskVisible = false
+        taskReveal?.cancel()
+        taskReveal = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard let self, !Task.isCancelled, self.task != nil else { return }
+            withAnimation(.easeOut(duration: 0.18)) { self.taskVisible = true }
+        }
+    }
+
+    func endTask() {
+        taskReveal?.cancel()
+        taskReveal = nil
+        taskVisible = false
+        task = nil
+    }
 
     /// 取消只负责发信号。状态留给真正收尾的那段代码改——
     /// 点了取消就立刻写「已取消」，但如果进程还卡在写盘，用户会以为已经停了。
@@ -1440,9 +1462,9 @@ final class ArchiveModel: ObservableObject {
     private func extract(entries paths: [String], from frame: Frame, to destination: URL) {
         isLoading = true
         status = "正在解压…"
-        task = TaskProgress(title: "正在解压", detail: frame.archive.lastPathComponent, fraction: nil)
+        beginTask(TaskProgress(title: "正在解压", detail: frame.archive.lastPathComponent, fraction: nil))
         Task {
-            defer { task = nil }
+            defer { endTask() }
             var passphrase = passwords[frame.archive.path]
             for attempt in 0..<2 {
                 do {
@@ -1734,12 +1756,29 @@ final class ArchiveModel: ObservableObject {
         let password = plain ? "" : options.password
         let volume = plain ? nil : options.volume.argument
 
+        // 分卷包在保存面板里是「看不见」的：目录里只有 abc.zip.001，
+        // 没有 abc.zip 这个实体，所以面板不会提示「已存在」。
+        // 但提交时会把整组旧分卷换掉——补一次确认，别让它变成静默覆盖。
+        if volume != nil {
+            let existing = ArchiveModel.volumeFiles(of: output)
+            if !existing.isEmpty {
+                let alert = NSAlert()
+                alert.messageText = "已存在同名的分卷压缩包"
+                alert.informativeText = "\(output.lastPathComponent).001 等 \(existing.count) 个文件会被替换。"
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "替换")
+                alert.addButton(withTitle: "取消")
+                NSApp.activate(ignoringOtherApps: true)
+                guard alert.runModal() == .alertFirstButtonReturn else { return }
+            }
+        }
+
         isLoading = true
         status = "正在压缩…"
-        task = TaskProgress(title: "正在压缩", detail: output.lastPathComponent, fraction: nil)
+        beginTask(TaskProgress(title: "正在压缩", detail: output.lastPathComponent, fraction: nil))
 
         Task {
-            defer { task = nil }
+            defer { endTask() }
             do {
                 let onProgress: @Sendable (Double) -> Void = { [weak self] value in
                     Task { @MainActor in self?.task?.fraction = value }
@@ -1753,9 +1792,15 @@ final class ArchiveModel: ObservableObject {
                         onProgress: onProgress
                     )
                 }.value
-                status = "已创建 \(output.lastPathComponent)"
                 isLoading = false
-                NSWorkspace.shared.activateFileViewerSelecting([output])
+                if volume != nil {
+                    let parts = ArchiveModel.volumeFiles(of: output)
+                    status = "已创建 \(output.lastPathComponent).001（分 \(parts.count) 卷）"
+                    NSWorkspace.shared.activateFileViewerSelecting(Array(parts.prefix(1)))
+                } else {
+                    status = "已创建 \(output.lastPathComponent)"
+                    NSWorkspace.shared.activateFileViewerSelecting([output])
+                }
             } catch ArchiveError.cancelled {
                 status = "已取消"
                 isLoading = false

@@ -134,7 +134,7 @@ struct ContentView: View {
 
     @ViewBuilder
     var taskOverlay: some View {
-        if let task = model.task {
+        if model.taskVisible, let task = model.task {
             TaskCard(task: task) { model.cancelTask() }
                 .padding(.bottom, 44)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
