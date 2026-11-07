@@ -21,6 +21,25 @@ func expect(_ condition: Bool, _ name: String, _ detail: @autoclosure () -> Stri
 
 let fixtures = URL(fileURLWithPath: CommandLine.arguments[1])
 
+/// 跑主线程 runloop 直到条件成立或超时。测试里等队列里的异步任务用，
+/// 别用固定 sleep：机器快慢不一样，固定等待不是慢就是脆。
+@discardableResult
+func waitUntil(_ seconds: TimeInterval = 15, _ condition: () -> Bool) -> Bool {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        if condition() { return true }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+    }
+    return condition()
+}
+
+/// 暂存打包用的临时目录（rrzip-stash-*）。取消 / 失败后不该留下任何一个。
+func stashTempDirs() -> Set<String> {
+    let tmp = FileManager.default.temporaryDirectory
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: tmp.path)) ?? []
+    return Set(names.filter { $0.hasPrefix("rrzip-stash-") })
+}
+
 func finish() {
     print("")
     print(failures == 0 ? "全部通过（\(checks) 项）" : "失败 \(failures)/\(checks)")

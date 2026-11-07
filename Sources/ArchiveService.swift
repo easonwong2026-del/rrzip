@@ -71,6 +71,10 @@ enum ArchiveService {
                                          jobID: jobID, onProgress: onProgress)
                 }
                 return
+            } catch ArchiveError.cancelled {
+                // 用户取消不是「这个引擎不行」。被当成引擎失败去换下一个的话，
+                // 取消会变成「再战一次」——任务卡住，用户还得再按一遍。
+                throw ArchiveError.cancelled
             } catch ArchiveError.needsPassword {
                 throw ArchiveError.needsPassword
             } catch {

@@ -1294,54 +1294,107 @@ final class ArchiveModel: ObservableObject {
         panel.nameFieldStringValue = "暂存.zip"
         panel.allowedContentTypes = [.zip]
         guard panel.runModal() == .OK, let output = panel.url else { return }
+        packStash(to: output)
+    }
 
+    /// 落点已定时的打包入口：面板走上面那个，测试直接调这个。
+    ///
+    /// 「解出暂存项 → 压成一个 ZIP」整段都在队列里，而不是只有最后一步：
+    /// 以前它自己起一个 Task，压大目录时点打包会真的并行跑两个进程，
+    /// 取消也管不着它。
+    func packStash(to output: URL) {
+        guard !stash.isEmpty else { return }
         let items = stash
         let passwordMap = passwords
-        isLoading = true
-        status = "正在打包 \(items.count) 项…"
-        Task {
-            let staging = FileManager.default.temporaryDirectory
-                .appendingPathComponent("rrzip-stash-\(UUID().uuidString)", isDirectory: true)
-            try? FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: staging) }
+        submitJob(title: "正在打包暂存", detail: output.lastPathComponent) { [weak self] jobID in
+            guard let self else { return .cancelled }
+            return await self.runStashPackJob(output: output, items: items,
+                                              passwords: passwordMap, jobID: jobID)
+        }
+    }
+
+    /// 暂存打包的执行体。每一步都可能失败，失败了就停：
+    /// 以前解压用 `try?` 吞掉错误，照样把「预期路径」塞进打包清单，
+    /// 最后得到一个缺文件的包，用户还以为是成功的。
+    private func runStashPackJob(output: URL, items: [StashItem],
+                                 passwords passwordMap: [String: String],
+                                 jobID: UUID) async -> JobResult {
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rrzip-stash-\(UUID().uuidString)", isDirectory: true)
+        // 成功、失败、取消都从这里收尾：临时解出来的东西一个不留
+        defer { try? FileManager.default.removeItem(at: staging) }
+
+        func checkCancelled() throws {
+            if TaskRegistry.wasCancelled(jobID) { throw ArchiveError.cancelled }
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
 
             var files: [URL] = []
-            for item in items {
-                let folder = staging.appendingPathComponent(item.archive.deletingPathExtension().lastPathComponent,
-                                                           isDirectory: true)
-                try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                try? await Task.detached(priority: .userInitiated) {
-                    try ArchiveService.extract(item.archive, entries: [item.path],
-                                               to: folder, password: passwordMap[item.archive.path])
-                }.value
+            for (index, item) in items.enumerated() {
+                try checkCancelled()
+                status = "正在解压暂存项 \(index + 1)/\(items.count)…"
+
+                let folder = staging.appendingPathComponent(
+                    item.archive.deletingPathExtension().lastPathComponent, isDirectory: true)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+                do {
+                    try await Task.detached(priority: .userInitiated) {
+                        try ArchiveService.extract(item.archive, entries: [item.path],
+                                                   to: folder,
+                                                   password: passwordMap[item.archive.path],
+                                                   jobID: jobID)
+                    }.value
+                } catch ArchiveError.cancelled {
+                    throw ArchiveError.cancelled
+                } catch {
+                    // 是哪个文件、为什么，一样都不能省：打包结果得对得上用户的预期
+                    throw ArchiveError.tool("「\(item.name)」解压失败：\(error.localizedDescription)")
+                }
+
                 var file = folder.appendingPathComponent(item.path)
-                if FileManager.default.fileExists(atPath: file.path) {
-                    // 同名时加包名前缀，避免互相覆盖
-                    let ext = file.pathExtension
-                    let base = file.deletingPathExtension().lastPathComponent
-                    let renamed = folder.appendingPathComponent("\(base)-\(item.archive.deletingPathExtension().lastPathComponent)")
-                        .appendingPathExtension(ext)
-                    try? FileManager.default.moveItem(at: file, to: renamed)
+                // 引擎没报错但文件不在，同样算失败——继续压只会漏文件
+                guard FileManager.default.fileExists(atPath: file.path) else {
+                    throw ArchiveError.tool("「\(item.name)」没有解出来，已停止打包")
+                }
+                // 同名时加包名前缀：7-Zip 不接受两个不同目录下的同名文件
+                let ext = file.pathExtension
+                let base = file.deletingPathExtension().lastPathComponent
+                let renamed = folder
+                    .appendingPathComponent("\(base)-\(item.archive.deletingPathExtension().lastPathComponent)")
+                    .appendingPathExtension(ext)
+                if (try? FileManager.default.moveItem(at: file, to: renamed)) != nil {
                     file = renamed
                 }
                 files.append(file)
             }
 
-            do {
-                // 快照成常量：Swift 6 不允许并发闭包捕获可变变量
-                let filesToArchive = files
-                try await Task.detached(priority: .userInitiated) {
-                    try Self.writeArchive(at: output, from: filesToArchive,
-                                          format: .zip, password: "", volume: nil)
-                }.value
-                isLoading = false
-                status = "已打包 \(files.count) 项 · \(output.lastPathComponent)"
-                NSWorkspace.shared.activateFileViewerSelecting([output])
-            } catch {
-                isLoading = false
-                status = "打包失败"
-                errorMessage = error.localizedDescription
+            // 解压阶段耗掉的时间里用户可能已经点了取消，别再往下压了
+            try checkCancelled()
+            status = "正在打包 \(files.count) 项…"
+            let filesToArchive = files
+            let onProgress: @Sendable (Double) -> Void = { [weak self] value in
+                self?.reportProgress(value, for: jobID)
             }
+            try await Task.detached(priority: .userInitiated) {
+                try Self.writeArchive(at: output, from: filesToArchive,
+                                      format: .zip, password: "", volume: nil,
+                                      level: CompressLevel.normal.argument,
+                                      jobID: jobID, onProgress: onProgress)
+            }.value
+
+            status = "已打包 \(files.count) 项 · \(output.lastPathComponent)"
+            NSWorkspace.shared.activateFileViewerSelecting([output])
+            return .succeeded
+        } catch ArchiveError.cancelled {
+            status = "已取消"
+            return .cancelled
+        } catch {
+            status = "打包失败"
+            errorMessage = error.localizedDescription
+            return .failed(error.localizedDescription)
         }
     }
 
@@ -1423,7 +1476,9 @@ final class ArchiveModel: ObservableObject {
             // 提交后、进程启动前就被取消的情况，在这里拦下来，连进程都不启动
             try TaskRegistry.claim(next.id)
         } catch {
+            // 还没开始执行就被取消：work 根本没跑，状态得在这里收
             jobBusy = false
+            status = "已取消"
             finishJob(.cancelled)
             return
         }
@@ -1459,7 +1514,8 @@ final class ArchiveModel: ObservableObject {
 
         if case .failed(let message) = result {
             errorMessage = message
-            status = "失败"
+            // 状态文案由执行体自己写（「压缩失败」「打包失败」「解压失败」），
+            // 这里再盖一个「失败」只会把话说得更含糊
         }
         // 队列里还有就接着跑
         pumpJobs()
@@ -1760,6 +1816,9 @@ final class ArchiveModel: ObservableObject {
             // 压完了但取消信号刚好赶到：这时候交出产物等于没取消。
             // 拿掉这一行，用户点了取消却仍然得到一个包（旧的同名包还会被替换）。
             if let jobID, TaskRegistry.wasCancelled(jobID) { throw ArchiveError.cancelled }
+            // 从这里开始是不可中断的收尾：要么整组换上去，要么按
+            // commitStaged 里的备份 / 回滚收场。分卷是多文件，中途被打断
+            // 就会两头空，所以这一段刻意不再看取消信号。
             try commitStaged(staged, to: output, hasVolumes: volume != nil)
         } catch {
             cleanupStaged()

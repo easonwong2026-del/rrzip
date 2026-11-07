@@ -705,6 +705,169 @@ func testQuickCompressQueue() {
     }
 }
 
+/// 暂存打包也要排队：A 在压缩时提交 B，B 等着；取消 A，B 照常跑完。
+func testStashPackQueuesBehindCompress() {
+    MainActor.assumeIsolated {
+        print("暂存打包排队")
+        guard SevenZip.isAvailable else {
+            print("  - 跳过：7zz 不可用")
+            return
+        }
+
+        let root = fixtures.appendingPathComponent("stash-queue", isDirectory: true)
+        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let bigDir = root.appendingPathComponent("big", isDirectory: true)
+        try? FileManager.default.createDirectory(at: bigDir, withIntermediateDirectories: true)
+        makeNoiseFile(at: bigDir.appendingPathComponent("big.bin"), megabytes: 30)
+        let aOut = root.appendingPathComponent("a.zip")
+        let bOut = root.appendingPathComponent("b.zip")
+
+        final class Box: @unchecked Sendable { var aResult: JobResult? }
+        let box = Box()
+
+        let model = ArchiveModel()
+        model.addToStash(archive: fixtures.appendingPathComponent("basic.zip"),
+                         path: "说明.txt", size: 6)
+
+        model.submitJob(title: "压缩 A", detail: "a.zip") { jobID in
+            let result: JobResult
+            do {
+                try await Task.detached {
+                    try ArchiveModel.writeArchive(at: aOut, from: [bigDir], format: .zip,
+                                                  password: "", volume: nil, level: 9,
+                                                  jobID: jobID)
+                }.value
+                result = .succeeded
+            } catch ArchiveError.cancelled {
+                result = .cancelled
+            } catch {
+                result = .failed(error.localizedDescription)
+            }
+            box.aResult = result
+            return result
+        }
+        expect(model.job?.title == "压缩 A", "A 先跑")
+
+        // 等 7zz 真的压起来，取消才有意义
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+
+        model.packStash(to: bOut)
+        expect(model.queuedCount == 1, "暂存打包排队，不与 A 并行")
+        expect(model.job?.title == "压缩 A", "前台任务没被顶掉")
+        expect(!FileManager.default.fileExists(atPath: bOut.path), "排队期间不产出 ZIP")
+
+        model.cancelJob()
+        let drained = waitUntil(20) { model.job == nil && model.queuedCount == 0 }
+        expect(drained, "取消 A 之后队列继续跑空")
+        expect(box.aResult == .cancelled, "A 确实被取消", String(describing: box.aResult))
+        expect(FileManager.default.fileExists(atPath: bOut.path), "B 照常产出 ZIP")
+        let listed = (try? SevenZip.list(bOut))?.map(\.path) ?? []
+        expect(listed.contains { $0.contains("说明") }, "ZIP 里是暂存项",
+               listed.joined(separator: ","))
+        expect(model.status.hasPrefix("已打包"), "状态栏是 B 的完成文案", model.status)
+    }
+}
+
+/// 取消暂存打包：不动用户已有的同名 ZIP、清掉临时目录、不影响排队的下一个任务。
+func testStashPackCancel() {
+    MainActor.assumeIsolated {
+        print("暂存打包取消")
+        guard SevenZip.isAvailable else {
+            print("  - 跳过：7zz 不可用")
+            return
+        }
+
+        let root = fixtures.appendingPathComponent("stash-cancel", isDirectory: true)
+        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let bigDir = root.appendingPathComponent("big", isDirectory: true)
+        try? FileManager.default.createDirectory(at: bigDir, withIntermediateDirectories: true)
+        makeNoiseFile(at: bigDir.appendingPathComponent("big.bin"), megabytes: 30)
+
+        // 存储级别的 7z：建包快，解出来的东西够大，取消有时间窗口
+        let srcArchive = root.appendingPathComponent("src.7z")
+        do {
+            try SevenZip.create(at: srcArchive, from: [bigDir], format: "7z",
+                                password: nil, volume: nil, level: 0)
+        } catch {
+            expect(false, "准备加密包", "\(error)")
+            return
+        }
+
+        let out = root.appendingPathComponent("keep.zip")
+        let old = Data("这是用户已有的同名 ZIP".utf8)
+        try? old.write(to: out)
+
+        final class Box: @unchecked Sendable {
+            var nextRan = false
+        }
+        let box = Box()
+
+        let model = ArchiveModel()
+        model.addToStash(archive: srcArchive, path: "big/big.bin", size: 30 * 1024 * 1024)
+
+        model.packStash(to: out)
+        model.submitJob(title: "C", detail: "") { _ in
+            box.nextRan = true
+            return .succeeded
+        }
+        expect(model.job?.title == "正在打包暂存", "暂存打包开始")
+        expect(model.queuedCount == 1, "C 排在后面")
+
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        let before = stashTempDirs()
+        model.cancelJob()
+
+        let drained = waitUntil(20) { model.job == nil && model.queuedCount == 0 }
+        expect(drained, "取消后队列跑空")
+        expect(model.status == "已取消", "暂存打包的结果是取消", model.status)
+        expect(box.nextRan, "取消 B 不影响排队的 C")
+        let after = (try? Data(contentsOf: out)) ?? Data()
+        expect(after == old, "取消不动用户已有的同名 ZIP")
+        let leftovers = stashTempDirs().filter { before.contains($0) }
+        expect(leftovers.isEmpty, "解出来的临时目录已清理", leftovers.joined(separator: ","))
+    }
+}
+
+/// 暂存项解不出来时必须停：不给一个缺文件的 ZIP。
+func testStashPackFailsWhenItemMissing() {
+    MainActor.assumeIsolated {
+        print("暂存打包失败即停")
+        let root = fixtures.appendingPathComponent("stash-fail", isDirectory: true)
+        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        // 1. 包里根本没有这个条目
+        let out = root.appendingPathComponent("missing.zip")
+        let before = stashTempDirs()
+        let model = ArchiveModel()
+        model.addToStash(archive: fixtures.appendingPathComponent("basic.zip"),
+                         path: "根本没有.txt", size: 10)
+        model.packStash(to: out)
+        let finished = waitUntil(10) { model.job == nil }
+        expect(finished, "任务结束，不会卡住")
+        expect(!FileManager.default.fileExists(atPath: out.path), "失败不产出 ZIP")
+        expect(model.errorMessage?.contains("根本没有") == true, "失败原因指名道姓",
+               model.errorMessage ?? "nil")
+        expect(model.status == "打包失败", "状态是打包失败", model.status)
+        let leftovers = stashTempDirs().subtracting(before)
+        expect(leftovers.isEmpty, "失败后不留临时目录", leftovers.joined(separator: ","))
+
+        // 2. 加密包但没给密码：引擎报错也要变成失败，而不是空包
+        let secret = fixtures.appendingPathComponent("secret.7z")
+        if FileManager.default.fileExists(atPath: secret.path) {
+            let out2 = root.appendingPathComponent("secret.zip")
+            let model2 = ArchiveModel()
+            model2.addToStash(archive: secret, path: "说明.txt", size: 6)
+            model2.packStash(to: out2)
+            _ = waitUntil(10) { model2.job == nil }
+            expect(!FileManager.default.fileExists(atPath: out2.path), "加密包没密码也不产出 ZIP")
+            expect(model2.errorMessage != nil, "加密包失败有原因", model2.errorMessage ?? "nil")
+        }
+    }
+}
+
 func runModelTests() {
     testBatchDestination()
     testOpenGate()
@@ -717,6 +880,9 @@ func runModelTests() {
     testEncryptedRetryStillCancellable()
     testRegistryConcurrency()
     testQuickCompressQueue()
+    testStashPackQueuesBehindCompress()
+    testStashPackCancel()
+    testStashPackFailsWhenItemMissing()
     testWorkspaceMode()
     testHome()
     testArchiveService()
