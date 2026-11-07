@@ -638,16 +638,17 @@ func testSortAndStaging() {
             try? FileManager.default.removeItem(at: perArchive)
             try FileManager.default.createDirectory(at: perArchive, withIntermediateDirectories: true)
             let placed = try ArchiveModel.exportStashItem(item, to: perArchive, layout: .perArchive, password: nil)
-            expect(FileManager.default.fileExists(atPath: placed.path), "按包分目录导出成功")
-            expect(placed.path.contains("/basic/"), "落在包名子目录里", placed.path)
+            expect(FileManager.default.fileExists(atPath: placed.url.path), "按包分目录导出成功")
+            expect(placed.url.path.contains("/basic/"), "落在包名子目录里", placed.url.path)
+            expect(!placed.skipped, "新文件不算跳过")
 
             let flat = fixtures.appendingPathComponent("stash-flat", isDirectory: true)
             try? FileManager.default.removeItem(at: flat)
             try FileManager.default.createDirectory(at: flat, withIntermediateDirectories: true)
             let first = try ArchiveModel.exportStashItem(item, to: flat, layout: .flat, password: nil)
             let second = try ArchiveModel.exportStashItem(item, to: flat, layout: .flat, password: nil)
-            expect(first.lastPathComponent == "说明.txt", "平铺保留原文件名", first.lastPathComponent)
-            expect(second.lastPathComponent == "说明 2.txt", "同名自动加序号", second.lastPathComponent)
+            expect(first.url.lastPathComponent == "说明.txt", "平铺保留原文件名", first.url.lastPathComponent)
+            expect(second.url.lastPathComponent == "说明 2.txt", "同名自动加序号", second.url.lastPathComponent)
         } catch {
             expect(false, "暂存落盘", "\(error)")
         }
@@ -868,6 +869,115 @@ func testStashPackFailsWhenItemMissing() {
     }
 }
 
+/// 暂存导出绝不覆盖同名文件：旧内容逐字节不变，并如实报「跳过」
+func testStashExportDoesNotOverwrite() {
+    do {
+        print("暂存导出不覆盖")
+        let item = StashItem(archive: fixtures.appendingPathComponent("basic.zip"),
+                             path: "说明.txt", size: 0)
+        let old = Data("这是用户原来的文件".utf8)
+
+        // 按包分目录：目标/basic/说明.txt 已存在
+        let perArchive = fixtures.appendingPathComponent("export-keep-per", isDirectory: true)
+        try? FileManager.default.removeItem(at: perArchive)
+        let inner = perArchive.appendingPathComponent("basic", isDirectory: true)
+        try FileManager.default.createDirectory(at: inner, withIntermediateDirectories: true)
+        try old.write(to: inner.appendingPathComponent("说明.txt"))
+
+        let skippedOne = try ArchiveModel.exportStashItem(item, to: perArchive,
+                                                          layout: .perArchive, password: nil)
+        expect(skippedOne.skipped, "已存在时报跳过")
+        let keptPer = (try? Data(contentsOf: inner.appendingPathComponent("说明.txt"))) ?? Data()
+        expect(keptPer == old, "按包分目录：旧文件没被覆盖")
+
+        // 保留原始路径：目标/说明.txt 已存在
+        let original = fixtures.appendingPathComponent("export-keep-orig", isDirectory: true)
+        try? FileManager.default.removeItem(at: original)
+        try FileManager.default.createDirectory(at: original, withIntermediateDirectories: true)
+        try old.write(to: original.appendingPathComponent("说明.txt"))
+
+        let skippedOrig = try ArchiveModel.exportStashItem(item, to: original,
+                                                           layout: .original, password: nil)
+        expect(skippedOrig.skipped, "保留路径布局也报跳过")
+        let keptOrig = (try? Data(contentsOf: original.appendingPathComponent("说明.txt"))) ?? Data()
+        expect(keptOrig == old, "保留路径布局：旧文件没被覆盖")
+
+        // 平铺本来就让名，不算跳过，也不碰旧文件
+        let flat = fixtures.appendingPathComponent("export-keep-flat", isDirectory: true)
+        try? FileManager.default.removeItem(at: flat)
+        try FileManager.default.createDirectory(at: flat, withIntermediateDirectories: true)
+        try old.write(to: flat.appendingPathComponent("说明.txt"))
+        let flattened = try ArchiveModel.exportStashItem(item, to: flat, layout: .flat, password: nil)
+        expect(!flattened.skipped, "平铺不是跳过")
+        expect(flattened.url.lastPathComponent == "说明 2.txt", "平铺让出名字",
+               flattened.url.lastPathComponent)
+        let keptFlat = (try? Data(contentsOf: flat.appendingPathComponent("说明.txt"))) ?? Data()
+        expect(keptFlat == old, "平铺也不碰旧文件")
+    } catch {
+        expect(false, "暂存导出不覆盖 抛出异常", "\(error)")
+    }
+}
+
+/// 导出排队、可取消：取消只停自己，状态如实说「可能留有部分文件」，暂存项留着
+func testStashExportQueuesAndCancels() {
+    MainActor.assumeIsolated {
+        print("暂存导出排队与取消")
+        let dest = fixtures.appendingPathComponent("export-queue", isDirectory: true)
+        try? FileManager.default.removeItem(at: dest)
+        try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+
+        final class Box: @unchecked Sendable { var nextRan = false }
+        let box = Box()
+
+        let model = ArchiveModel()
+        model.addToStash(archive: fixtures.appendingPathComponent("basic.zip"),
+                         path: "说明.txt", size: 6)
+
+        model.exportStash(to: dest)
+        expect(model.job?.title == "正在导出暂存", "导出进了队列")
+        model.submitJob(title: "C", detail: "") { _ in
+            box.nextRan = true
+            return .succeeded
+        }
+        expect(model.queuedCount == 1, "C 排在导出后面")
+
+        model.cancelJob()
+        expect(waitUntil(15) { model.job == nil && model.queuedCount == 0 }, "队列跑空")
+        expect(model.status.hasPrefix("已取消"), "状态说清楚了取消的遗留", model.status)
+        expect(box.nextRan, "取消导出不影响排队的 C")
+        expect(!model.isLoading, "忙碌状态正常复位")
+        expect(model.stash.count == 1, "取消后暂存项还在")
+        expect(!FileManager.default.fileExists(atPath: dest.appendingPathComponent("basic/说明.txt").path),
+               "取消后没有半截文件")
+    }
+}
+
+/// 逐项失败要说清楚是哪个文件；失败的导出不产出文件、也不清暂存
+func testStashExportReportsFailures() {
+    MainActor.assumeIsolated {
+        print("暂存导出失败反馈")
+        let dest = fixtures.appendingPathComponent("export-fail", isDirectory: true)
+        try? FileManager.default.removeItem(at: dest)
+        try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+
+        let model = ArchiveModel()
+        model.addToStash(archive: fixtures.appendingPathComponent("basic.zip"),
+                         path: "根本没有.txt", size: 10)
+        model.exportStash(to: dest)
+        expect(waitUntil(15) { model.job == nil }, "任务结束")
+
+        expect(model.errorMessage?.contains("根本没有") == true, "失败原因指名道姓",
+               model.errorMessage ?? "nil")
+        expect(model.stash.count == 1, "失败后暂存项不会被清掉")
+        let produced = dest.appendingPathComponent("basic/根本没有.txt")
+        expect(!FileManager.default.fileExists(atPath: produced.path), "失败的条目没有落盘")
+
+        expect(ArchiveModel.previewList(["a", "b", "c", "d"]) == "a、b、c 等 4 项",
+               "名单缩略成三段")
+        expect(ArchiveModel.previewList(["a", "b"]) == "a、b", "不多不少时不加后缀")
+    }
+}
+
 func runModelTests() {
     testBatchDestination()
     testOpenGate()
@@ -883,6 +993,9 @@ func runModelTests() {
     testStashPackQueuesBehindCompress()
     testStashPackCancel()
     testStashPackFailsWhenItemMissing()
+    testStashExportDoesNotOverwrite()
+    testStashExportQueuesAndCancels()
+    testStashExportReportsFailures()
     testWorkspaceMode()
     testHome()
     testArchiveService()
