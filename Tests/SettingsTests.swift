@@ -204,9 +204,93 @@ func testWorkspaceModeFromSettings() {
     }
 }
 
+/// 缓存清理：结果必须是真的，忙的时候不碰文件
+func testCacheMaintenance() {
+    do {
+        print("缓存清理")
+        let fm = FileManager.default
+        let root = fixtures.appendingPathComponent("cache-test", isDirectory: true)
+        try? fm.removeItem(at: root)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let nested = root.appendingPathComponent("scratch/预览", isDirectory: true)
+        try fm.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data(count: 400).write(to: root.appendingPathComponent("thumb.png"))
+        try Data(count: 600).write(to: nested.appendingPathComponent("payload.bin"))
+
+        expect(CacheMaintenance.size(of: root) == 1000, "占用算的是文件字节总和",
+               "\(CacheMaintenance.size(of: root))")
+
+        // 有任务在跑：一个字节都不许动
+        let blocked = CacheMaintenance.purge([root], busy: true)
+        expect(blocked.blocked, "忙碌时直接拒绝清理")
+        expect(blocked.freedBytes == 0, "忙碌时没有释放")
+        expect(CacheMaintenance.size(of: root) == 1000, "忙碌时文件原样保留")
+        expect(blocked.text.contains("任务"), "忙碌时有可展示的原因", blocked.text)
+
+        // 正常清理：内容清空，目录本身留着
+        let report = CacheMaintenance.purge([root], busy: false)
+        expect(report.freedBytes == 1000, "释放量等于原占用", "\(report.freedBytes)")
+        expect(report.remainingBytes == 0, "清理后剩余为 0")
+        expect(report.succeeded, "无失败项")
+        expect(fm.fileExists(atPath: root.path), "根目录保留")
+        let left = (try? fm.contentsOfDirectory(atPath: root.path)) ?? []
+        expect(left.isEmpty, "子项全部清掉", "\(left)")
+
+        // 已经空了：要说「没有可清理的缓存」，不能假装清了东西
+        let empty = CacheMaintenance.purge([root], busy: false)
+        expect(empty.freedBytes == 0 && empty.text.contains("没有"), "空目录如实回复", empty.text)
+
+        // 删不掉的条目要计数，不能报成功
+        let locked = root.appendingPathComponent("locked", isDirectory: true)
+        try fm.createDirectory(at: locked, withIntermediateDirectories: true)
+        try Data(count: 100).write(to: locked.appendingPathComponent("busy.bin"))
+        try fm.setAttributes([.posixPermissions: 0o500], ofItemAtPath: locked.path)
+        let partial = CacheMaintenance.purge([root], busy: false)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+        expect(partial.failures > 0, "删不掉的条目计入失败", "\(partial.failures)")
+        expect(!partial.succeeded, "有失败项时不算成功")
+        expect(partial.text.contains("未能删除"), "失败有可展示的说明", partial.text)
+
+        try? fm.removeItem(at: root)
+    } catch {
+        expect(false, "缓存清理 抛出异常", "\(error)")
+    }
+}
+
+/// 旧配置兼容：界面拿掉的选项，数据不能跟着丢
+func testFinderConfigCompat() {
+    do {
+        print("访达配置兼容")
+        let file = fixtures.appendingPathComponent("finder-compat.json")
+        try? FileManager.default.removeItem(at: file)
+
+        // 上一版本用户可能存着「压缩为 7Z」和 extractStrategy
+        let legacy = Data(#"""
+        {"secondLevel":true,"enabled":["open","compressSevenZip"],"extractStrategy":"here"}
+        """#.utf8)
+        let settings = try JSONDecoder().decode(FinderSettings.self, from: legacy)
+        expect(settings.isEnabled(.compressSevenZip), "旧配置里的 7Z 开关仍能读入")
+        expect(settings.extractStrategy == .here, "旧配置里的 extractStrategy 仍能读入")
+
+        // 设置页不再给这一项开关，但保存整份配置时不能把它丢掉
+        _ = FinderSettingsStore.save(settings, to: file)
+        let reloaded = FinderSettings.load(from: file)
+        expect(reloaded.isEnabled(.compressSevenZip), "写回后 7Z 开关还在")
+        expect(reloaded.enabled == settings.enabled, "开启列表逐项一致")
+        expect(reloaded.extractStrategy == .here, "extractStrategy 原样保留")
+
+        try? FileManager.default.removeItem(at: file)
+    } catch {
+        expect(false, "访达配置兼容 抛出异常", "\(error)")
+    }
+}
+
 func runSettingsTests() {
     testServiceExtraction()
     testFinderSettingsStore()
     testExtractDestinationSetting()
     testWorkspaceModeFromSettings()
+    testCacheMaintenance()
+    testFinderConfigCompat()
 }

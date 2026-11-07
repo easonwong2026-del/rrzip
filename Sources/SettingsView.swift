@@ -4,7 +4,12 @@
 //  SettingsView.swift
 //  rrzip
 //
-//  独立设置中心（⌘,）。每项都对应真实行为，不放没有实现的开关。
+//  独立设置中心（⌘,）。四页：通用 / 文件操作 / 访达与扩展 / 关于与维护。
+//
+//  设计约束（改动前先看这里）：
+//  - 每项都对应真实行为，不放没有实现的开关；验证不了的状态不显示。
+//  - 分组名 → 设置项 → 必要时一行说明。技术细节进 footer，不占常驻空间。
+//  - 沿用 Palette 的品牌青绿，只用于选中态，不做大面积色块。
 //
 
 import AppKit
@@ -17,20 +22,18 @@ struct SettingsView: View {
 
     enum Tab: String, CaseIterable, Identifiable {
         case general = "通用"
-        case compress = "压缩"
-        case extract = "解压"
-        case integration = "访达"
-        case advanced = "高级"
+        case files = "文件操作"
+        case integration = "访达与扩展"
+        case about = "关于与维护"
 
         var id: String { rawValue }
 
         var symbol: String {
             switch self {
             case .general: return "gearshape"
-            case .compress: return "archivebox"
-            case .extract: return "tray.and.arrow.down"
+            case .files: return "archivebox"
             case .integration: return "square.on.square"
-            case .advanced: return "slider.horizontal.3"
+            case .about: return "info.circle"
             }
         }
     }
@@ -42,15 +45,17 @@ struct SettingsView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 660, height: 560)
+        // 660 放不下「固定解压目录 + 更改按钮」那一行：路径会被挤成三截。
+        // 只加到 680，不为长路径继续加宽（路径本来就中间省略）。
+        .frame(width: 680, height: 620)
         // 设置窗口跟主窗口一个外观，不要一个浅色一个深色
         .preferredColorScheme(model.appearance.scheme)
     }
 
-    /// 左栏：跟设计稿一致，选中项是青绿底条而不是系统 TabView 的顶部标签
+    /// 左栏：选中项是青绿底条，而不是系统 TabView 的顶部标签
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 8) {
+            HStack(spacing: Space.m) {
                 Image(nsImage: NSApp.applicationIconImage)
                     .resizable()
                     .frame(width: 22, height: 22)
@@ -65,7 +70,7 @@ struct SettingsView: View {
                 Button {
                     tab = item
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.m) {
                         Image(systemName: item.symbol)
                             .font(.system(size: 12, weight: .medium))
                             .frame(width: 16)
@@ -73,7 +78,7 @@ struct SettingsView: View {
                             .font(.system(size: 12.5))
                         Spacer(minLength: 0)
                     }
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, Space.l)
                     .frame(height: 30)
                     .foregroundStyle(tab == item ? Palette.brand : Color.primary.opacity(0.85))
                     .background(
@@ -83,7 +88,7 @@ struct SettingsView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, Space.m)
             }
 
             Spacer()
@@ -96,10 +101,9 @@ struct SettingsView: View {
     private var content: some View {
         switch tab {
         case .general: GeneralSettingsView(model: model)
-        case .compress: CreateSettingsView()
-        case .extract: ExtractSettingsView(model: model)
+        case .files: FilesSettingsView(model: model)
         case .integration: IntegrationSettingsView()
-        case .advanced: AdvancedSettingsView(model: model)
+        case .about: AboutSettingsView(model: model)
         }
     }
 }
@@ -114,42 +118,47 @@ private struct GeneralSettingsView: View {
 
     var body: some View {
         Form {
-            Section("启动与窗口") {
-                Picker("工作模式", selection: modeBinding) {
-                    ForEach(WorkspaceMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                Text("改这里会立即切换当前窗口；下次启动沿用这个模式。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Toggle("窗口变窄时自动切换模式", isOn: $autoMode)
-                Text("阈值跟着三栏宽度走，不写死数字；手动切换后 5 分钟内不再自动切换，避免来回弹。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("外观") {
+            Section {
                 Picker("主题", selection: $model.appearance) {
                     ForEach(AppearanceMode.allCases) { mode in
                         Text(mode.title).tag(mode)
                     }
                 }
                 .pickerStyle(.segmented)
+
                 Picker("默认视图", selection: $model.viewMode) {
                     ForEach(ArchiveViewMode.allCases) { mode in
                         Text(mode.title).tag(mode)
                     }
                 }
-                Text("简化模式固定用列表；这里是展开成完整模式后的初始视图。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            } header: {
+                Text("外观")
+            } footer: {
+                Text("默认视图只在完整模式下生效，简化模式固定用列表。")
             }
 
-            Section("完整模式的侧栏") {
+            Section {
+                Picker("默认工作模式", selection: modeBinding) {
+                    ForEach(WorkspaceMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Toggle("随窗口宽度自动切换", isOn: $autoMode)
+            } header: {
+                Text("工作模式")
+            } footer: {
+                Text("手动切换后 5 分钟内不会被自动切换改回，再次启动沿用最后选择。")
+            }
+
+            Section {
                 Toggle("显示目录栏", isOn: $showSidebar)
                 Toggle("显示详情栏", isOn: $showInspector)
+            } header: {
+                Text("窗口布局")
+            } footer: {
+                Text("仅完整模式，简化模式始终单栏。")
             }
         }
         .formStyle(.grouped)
@@ -165,32 +174,11 @@ private struct GeneralSettingsView: View {
     }
 }
 
-// MARK: - 压缩
+// MARK: - 文件操作
 
-private struct CreateSettingsView: View {
-    @AppStorage("rrzip.defaultCreateFormat") private var formatRaw = CreateFormat.zip.rawValue
-
-    var body: some View {
-        Form {
-            Section("默认格式") {
-                Picker("新建压缩包时预选", selection: $formatRaw) {
-                    ForEach(CreateFormat.allCases) { format in
-                        Text(format.title).tag(format.rawValue)
-                    }
-                }
-                Text("新建时仍可在选项面板里改。TAR / TAR.GZ 本身不支持密码与分卷。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
-// MARK: - 解压
-
-private struct ExtractSettingsView: View {
+private struct FilesSettingsView: View {
     @ObservedObject var model: ArchiveModel
+    @AppStorage("rrzip.defaultCreateFormat") private var formatRaw = CreateFormat.zip.rawValue
     /// 空串 = 每次询问
     @AppStorage("rrzip.extractDestination") private var destination = ""
     @AppStorage("rrzip.revealAfterExtract") private var revealAfterExtract = true
@@ -217,10 +205,23 @@ private struct ExtractSettingsView: View {
 
     var body: some View {
         Form {
-            Section("解压位置") {
-                Toggle("每次询问解压位置", isOn: askEveryTime)
+            Section {
+                Picker("默认格式", selection: $formatRaw) {
+                    ForEach(CreateFormat.allCases) { format in
+                        Text(format.title).tag(format.rawValue)
+                    }
+                }
+            } header: {
+                Text("压缩")
+            } footer: {
+                Text("创建压缩包时仍可修改格式和压缩级别。")
+            }
+
+            Section {
+                Toggle("每次询问位置", isOn: askEveryTime)
+
                 if !destination.isEmpty {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.m) {
                         Image(systemName: "folder")
                             .foregroundStyle(.secondary)
                         Text(destination)
@@ -228,7 +229,7 @@ private struct ExtractSettingsView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .help(destination)
-                        Spacer(minLength: 4)
+                        Spacer(minLength: Space.xs)
                         Button("更改…") { pickDestination() }
                             .controlSize(.small)
                     }
@@ -238,30 +239,30 @@ private struct ExtractSettingsView: View {
                             .foregroundStyle(.orange)
                     }
                 }
-                Text("选择固定目录后，⌘E 与「解压到文件夹…」不再弹面板。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+
+                Toggle("完成后在访达中显示", isOn: $revealAfterExtract)
+            } header: {
+                Text("解压")
+            } footer: {
+                Text("选定固定目录后，⌘E 与「解压到文件夹…」不再弹面板。")
             }
 
-            Section("完成后") {
-                Toggle("在访达中显示解压结果", isOn: $revealAfterExtract)
-            }
-
-            Section("暂存区导出") {
-                Picker("同名文件怎么放", selection: $model.stashLayout) {
+            Section {
+                Picker("同名文件", selection: $model.stashLayout) {
                     ForEach(StashLayout.allCases) { layout in
                         Text(layout.title).tag(layout)
                     }
                 }
+            } header: {
+                Text("暂存区导出")
+            } footer: {
                 Text(model.stashLayout.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
     }
 
-    /// 面板取消时不动配置：调用方那一次切换就是不生效。
+    /// 面板取消时不动配置：那一次切换就是不生效。
     private func pickDestination() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -275,7 +276,7 @@ private struct ExtractSettingsView: View {
     }
 }
 
-// MARK: - Finder 与预览
+// MARK: - 访达与扩展
 
 private struct IntegrationSettingsView: View {
     @State private var quickLookInstalled = false
@@ -287,85 +288,57 @@ private struct IntegrationSettingsView: View {
     /// 用户以为设好了，重启访达发现菜单没变
     @State private var saveFailed = false
 
+    /// 界面上的顺序：先打开与解压，再压缩。
+    /// 「压缩为 7Z」不在列表里——沙盒扩展压不了，摆一个灰掉的开关只是噪音；
+    /// 旧配置里已有的这一项原样留在 finder.json 里，不删字段。
+    private static let openExtractActions: [FinderAction] = [.open, .extractHere, .extractToFolder]
+    private static let compressActions: [FinderAction] = [.compressZip, .compressEach]
+
     var body: some View {
         Form {
-            Section("快速查看") {
-                statusRow(ok: quickLookInstalled,
-                          okText: "扩展已内置，按空格即可看包内条目",
-                          badText: "未找到扩展，重新构建应用可恢复")
-                Button("打开「登录项与扩展」设置") { openExtensionSettings() }
-                    .controlSize(.small)
-                Text("若空格仍无反应：系统设置 → 通用 → 登录项与扩展 → 快速查看，勾选 rrzip。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("访达右键") {
-                statusRow(ok: finderInstalled,
-                          okText: "访达扩展已随应用安装",
-                          badText: "未找到访达扩展，重新构建应用可恢复")
-                Text("系统设置 → 通用 → 登录项与扩展 → 访达扩展，勾选 rrzip。这里判断不了你有没有勾——macOS 没有公开接口，所以只给步骤，不做假状态灯。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Section {
+                extensionRow("访达右键扩展", installed: finderInstalled)
+                extensionRow("快速查看扩展", installed: quickLookInstalled)
                 HStack(spacing: Space.m) {
-                    Button("打开「登录项与扩展」") { openExtensionSettings() }
+                    Text("任务通知")
+                    Spacer(minLength: Space.m)
+                    Text(notificationText)
+                        .foregroundStyle(.secondary)
+                    actionButton
+                }
+                // 三个动作都是「让扩展真正生效」要按的按钮，放在一行里
+                HStack(spacing: Space.m) {
+                    Button("打开系统扩展设置") { openExtensionSettings() }
                     Button("重新启动访达") { confirmRestartFinder = true }
-                    Spacer()
+                    Spacer(minLength: 0)
                 }
                 .controlSize(.small)
+            } header: {
+                Text("扩展与通知")
+            } footer: {
+                Text("「已安装」只说明扩展随应用构建，是否启用由系统设置决定。改动右键菜单后需重启访达。")
             }
 
-            Section("右键菜单") {
-                Toggle("放进 rrzip 二级菜单", isOn: $settings.secondLevel)
-                ForEach(FinderAction.allCases, id: \.self) { action in
+            Section {
+                Toggle("收进 rrzip 子菜单", isOn: $settings.secondLevel)
+                groupLabel("打开与解压")
+                ForEach(Self.openExtractActions, id: \.self) { action in
                     Toggle(action.title, isOn: binding(for: action))
-                        .disabled(action == .compressSevenZip)
                 }
+                groupLabel("压缩")
+                ForEach(Self.compressActions, id: \.self) { action in
+                    Toggle(action.title, isOn: binding(for: action))
+                }
+            } header: {
+                Text("右键菜单")
+            } footer: {
                 if saveFailed {
-                    Label("设置没能写入，重启访达后会回到上一次保存的配置", systemImage: "exclamationmark.triangle.fill")
-                        .font(TypeScale.caption)
+                    Label("设置没能写入，重启访达后会回到上一次保存的配置",
+                          systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
+                } else {
+                    Text("全部关闭则不再显示菜单。7Z 需要主程序内的引擎，右键不提供。")
                 }
-                Text("访达扩展是沙盒进程，压不了 7Z（用不了包内 7zz），这一项先在右键里停用；7Z 请在主程序里新建。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("其余项改动后需重启访达生效；全部关掉就不显示菜单。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("解压位置") {
-                Picker("解压到", selection: $settings.extractStrategy) {
-                    Text("「包名」文件夹").tag(FinderSettings.ExtractStrategy.newFolder)
-                    Text("压缩包所在目录").tag(FinderSettings.ExtractStrategy.here)
-                }
-                .pickerStyle(.segmented)
-                Text("同名文件一律跳过，不会覆盖；重名文件夹自动加序号。加密包只提示，不解压。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("通知") {
-                HStack(spacing: 8) {
-                    Image(systemName: notificationIcon)
-                        .foregroundStyle(notificationColor)
-                    Text(notificationText)
-                        .font(TypeScale.bodySmall)
-                    Spacer()
-                    switch notificationStatus {
-                    case .notDetermined:
-                        Button("请求权限") { requestNotifications() }
-                            .controlSize(.small)
-                    case .denied:
-                        Button("打开通知设置") { openNotificationSettings() }
-                            .controlSize(.small)
-                    default:
-                        EmptyView()
-                    }
-                }
-                Text("访达右键任务完成后靠通知汇报结果。扩展自己申请不了授权，只能由这里申请一次。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -381,41 +354,47 @@ private struct IntegrationSettingsView: View {
         }
     }
 
-    // MARK: 状态
+    // MARK: 行
 
-    private var notificationIcon: String {
-        switch notificationStatus {
-        case .authorized, .provisional: return "checkmark.circle.fill"
-        case .denied: return "xmark.circle.fill"
-        default: return "questionmark.circle.fill"
+    private func extensionRow(_ title: String, installed: Bool) -> some View {
+        HStack(spacing: Space.m) {
+            Text(title)
+            Spacer(minLength: Space.m)
+            Text(installed ? "已安装" : "未找到")
+                .foregroundStyle(installed ? Color.secondary : Color.orange)
         }
     }
 
-    private var notificationColor: Color {
-        switch notificationStatus {
-        case .authorized, .provisional: return .green
-        case .denied: return .red
-        default: return .secondary
-        }
+    /// 组内小标题：把「打开与解压」和「压缩」分开，不额外占一个分组的高度
+    private func groupLabel(_ title: String) -> some View {
+        Text(title)
+            .font(TypeScale.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, Space.xs)
     }
 
     private var notificationText: String {
         switch notificationStatus {
-        case .authorized: return "已授权，任务完成会发通知"
-        case .provisional: return "临时授权，通知会静默投递"
-        case .denied: return "已拒绝，任务照常完成但不会提示"
-        case .notDetermined: return "还没询问过"
-        @unknown default: return "状态未知"
+        case .authorized: return "已授权"
+        case .provisional: return "临时授权"
+        case .denied: return "已拒绝"
+        case .notDetermined: return "未询问"
+        @unknown default: return "未知"
         }
     }
 
     @ViewBuilder
-    private func statusRow(ok: Bool, okText: String, badText: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(ok ? Color.green : Color.orange)
-            Text(ok ? okText : badText)
-                .font(TypeScale.bodySmall)
+    private var actionButton: some View {
+        switch notificationStatus {
+        case .notDetermined:
+            Button("允许通知") { requestNotifications() }
+                .controlSize(.small)
+        case .denied:
+            Button("打开系统设置") { openNotificationSettings() }
+                .controlSize(.small)
+        default:
+            EmptyView()
         }
     }
 
@@ -431,11 +410,11 @@ private struct IntegrationSettingsView: View {
     private func refresh() {
         let plugins = Bundle.main.builtInPlugInsURL
         let fm = FileManager.default
-        if let url = plugins?.appendingPathComponent("ArchivePreview.appex") {
-            quickLookInstalled = fm.fileExists(atPath: url.path)
-        }
         if let url = plugins?.appendingPathComponent("ArchiveFinder.appex") {
             finderInstalled = fm.fileExists(atPath: url.path)
+        }
+        if let url = plugins?.appendingPathComponent("ArchivePreview.appex") {
+            quickLookInstalled = fm.fileExists(atPath: url.path)
         }
         settings = FinderSettings.load()
 
@@ -480,83 +459,127 @@ private struct IntegrationSettingsView: View {
     }
 }
 
-// MARK: - 高级
+// MARK: - 关于与维护
 
-private struct AdvancedSettingsView: View {
+private struct AboutSettingsView: View {
     @ObservedObject var model: ArchiveModel
-    @State private var cacheSize: String = "—"
-    @State private var cleared = false
+    @State private var cacheBytes: Int64 = 0
+    @State private var cleanupReport: CacheCleanupReport?
 
     var body: some View {
         Form {
-            Section("缓存与临时文件") {
-                HStack {
-                    Text("占用")
-                    Spacer()
-                    Text(cacheSize)
-                        .font(TypeScale.data())
-                        .foregroundStyle(.secondary)
-                }
-                HStack(spacing: 8) {
-                    Button("清理缓存") { clear() }
-                        .controlSize(.small)
-                    if cleared {
-                        Text("已清理")
-                            .font(TypeScale.caption)
+            Section {
+                HStack(spacing: Space.xl) {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .frame(width: 44, height: 44)
+                    VStack(alignment: .leading, spacing: Space.xxs) {
+                        Text("rrzip")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("版本 \(Self.version)")
+                            .font(TypeScale.label)
                             .foregroundStyle(.secondary)
                     }
+                    Spacer(minLength: 0)
                 }
-                Text("缩略图、预览解出的临时副本都在这里，清理不影响任何压缩包。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                .padding(.vertical, Space.xxs)
             }
 
-            Section("关于") {
-                HStack {
-                    Text("版本")
-                    Spacer()
-                    Text(Self.version)
+            Section {
+                infoRow("版本更新说明", value: "", button: "查看") { openReleaseNotes() }
+                infoRow("GitHub 项目", value: "easonwong2026-del/rrzip", button: "打开") {
+                    open(URL(string: "https://github.com/easonwong2026-del/rrzip"))
+                }
+                infoRow("开源许可", value: "GPL-3.0", button: "查看") { openLicense() }
+            }
+
+            Section {
+                HStack(spacing: Space.m) {
+                    Text("占用")
+                    Spacer(minLength: Space.m)
+                    Text(ByteFormatter.string(cacheBytes))
                         .font(TypeScale.data())
                         .foregroundStyle(.secondary)
                 }
-                HStack {
-                    Text("许可")
-                    Spacer()
-                    Text("GPL-3.0")
-                        .font(TypeScale.data())
-                        .foregroundStyle(.secondary)
+                HStack(spacing: Space.m) {
+                    Button("清理缓存") { clear() }
+                        .controlSize(.small)
+                    if let report = cleanupReport {
+                        Text(report.text)
+                            .font(TypeScale.caption)
+                            .foregroundStyle(report.succeeded ? Color.secondary : Color.orange)
+                    }
                 }
-                Button("查看版本说明") { openReleaseNotes() }
-                    .controlSize(.small)
+            } header: {
+                Text("缓存")
+            } footer: {
+                Text("缩略图与预览解出的临时副本，不影响压缩包和其他文件。")
             }
         }
         .formStyle(.grouped)
         .onAppear { refreshSize() }
     }
 
+    // MARK: 行
+
+    private func infoRow(_ title: String, value: String, button: String,
+                         action: @escaping () -> Void) -> some View {
+        HStack(spacing: Space.m) {
+            Text(title)
+            Spacer(minLength: Space.m)
+            if !value.isEmpty {
+                Text(value)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Button(button, action: action)
+                .controlSize(.small)
+        }
+    }
+
+    // MARK: 数据
+
     private static var version: String {
         let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-        return "\(short) (\(build))"
+        return "\(short)（\(build)）"
     }
 
     private func refreshSize() {
-        cacheSize = ByteFormatter.string(model.cacheSizeOnDisk())
+        cacheBytes = model.cacheSizeOnDisk()
     }
 
     private func clear() {
-        model.clearCaches()
-        cleared = true
+        let report = model.clearCaches()
+        cleanupReport = report
         refreshSize()
     }
 
+    private func open(_ url: URL?) {
+        guard let url else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// 本地 RELEASE_NOTES 优先，没有就跳 Releases 页
     private func openReleaseNotes() {
         let local = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/RELEASE_NOTES.md")
         if FileManager.default.fileExists(atPath: local.path) {
             NSWorkspace.shared.open(local)
-        } else if let remote = URL(string: "https://github.com/easonwong2026-del/rrzip/releases") {
-            NSWorkspace.shared.open(remote)
+        } else {
+            open(URL(string: "https://github.com/easonwong2026-del/rrzip/releases"))
+        }
+    }
+
+    /// 许可全文随应用一起放在 Resources 里；读不到再回退到仓库
+    private func openLicense() {
+        let local = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Resources/LICENSE")
+        if FileManager.default.fileExists(atPath: local.path) {
+            NSWorkspace.shared.open(local)
+        } else {
+            open(URL(string: "https://github.com/easonwong2026-del/rrzip/blob/main/LICENSE"))
         }
     }
 }

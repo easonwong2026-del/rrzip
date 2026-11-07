@@ -120,6 +120,11 @@ if [ -f RELEASE_NOTES.md ]; then
     cp RELEASE_NOTES.md "$BUNDLE/Contents/Resources/RELEASE_NOTES.md"
 fi
 
+# 「关于与维护 → 开源许可」读包内全文，离线也能看
+if [ -f LICENSE ]; then
+    cp LICENSE "$BUNDLE/Contents/Resources/LICENSE"
+fi
+
 echo "==> 构建快速查看扩展"
 APEXPATH="$BUNDLE/Contents/PlugIns/ArchivePreview.appex"
 mkdir -p "$APEXPATH/Contents/MacOS"

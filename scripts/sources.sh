@@ -28,6 +28,7 @@ SHARED_STATE=(
 # 但测试要跑真实行为，Model.swift 依赖它，这里必须列进来。
 APP_ONLY=(
     Sources/ExtractDestination.swift
+    Sources/CacheMaintenance.swift
 )
 
 # 访达扩展的菜单判定与任务执行

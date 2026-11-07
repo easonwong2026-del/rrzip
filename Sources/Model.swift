@@ -879,29 +879,23 @@ final class ArchiveModel: ObservableObject {
 
     /// 缓存与临时目录占用，设置页显示
     func cacheSizeOnDisk() -> Int64 {
-        Self.directorySize(workspace)
+        CacheMaintenance.size(of: workspace)
     }
 
-    /// 清掉缩略图、预览临时副本与解压缓存；不动任何压缩包
-    func clearCaches() {
+    /// 清掉缩略图、预览临时副本与解压缓存；不动任何压缩包。
+    /// 队列里有任务在跑就直接返回「忙」，不去动它正在读的文件。
+    @discardableResult
+    func clearCaches() -> CacheCleanupReport {
+        let report = CacheMaintenance.purge([workspace], busy: job != nil)
+        guard !report.blocked else { return report }
+
         ThumbnailStore.shared.clear()
         payloadCache.removeAll()
-        try? FileManager.default.removeItem(at: workspace)
+        // 目录本身留着：删掉再建会让正在进行的预览当场失败，也没这个必要
         try? FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
-        status = "缓存已清理"
-    }
-
-    private static func directorySize(_ url: URL) -> Int64 {
-        guard let enumerator = FileManager.default.enumerator(
-            at: url, includingPropertiesForKeys: [.fileSizeKey]
-        ) else { return 0 }
-        var total: Int64 = 0
-        for case let file as URL in enumerator {
-            let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            total += Int64(size)
-        }
-        return total
+        status = report.text
+        return report
     }
 
     // MARK: - 打开
