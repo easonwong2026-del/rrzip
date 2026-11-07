@@ -137,6 +137,99 @@ func testJobQueue() {
     }
 }
 
+/// 进程归属：临时进程不能顶掉当前任务，取消只认自己的 ID
+func testProcessOwnership() {
+    do {
+        print("进程归属")
+        let a = UUID()
+        let b = UUID()
+
+        try TaskRegistry.claim(a)
+        expect(TaskRegistry.currentOwner == a, "队列任务占位成功")
+
+        // 批量、预览这些入口启动进程时不传 jobID，不该接管 owner
+        _ = try? Tar.run(["--version"], jobID: nil)
+        expect(TaskRegistry.currentOwner == a, "临时进程不覆盖当前任务")
+
+        // 取消别的任务，不能动当前这个
+        TaskRegistry.cancel(b)
+        expect(TaskRegistry.currentOwner == a, "取消别的 ID 不动 owner")
+
+        TaskRegistry.finish(a)
+        expect(TaskRegistry.currentOwner == nil, "完成后释放归属")
+        // 取消的是 b，不是 a：a 完成时不该替 b 清掉信号
+        expect(TaskRegistry.pendingCancel == b, "别的任务的取消信号不会被顺手清掉")
+
+        // 提交后立刻取消：claim 直接拦下，连进程都不启动
+        let c = UUID()
+        TaskRegistry.cancel(c)
+        var threw = false
+        do { try TaskRegistry.claim(c) } catch { threw = true }
+        expect(threw, "提交后立刻取消，claim 拦下不启动进程")
+
+        // 上一个取消信号不能误伤下一个任务
+        let d = UUID()
+        try TaskRegistry.claim(d)
+        expect(TaskRegistry.currentOwner == d, "过期信号不误伤下一个任务")
+        TaskRegistry.finish(d)
+    } catch {
+        expect(false, "进程归属 抛出异常", "\(error)")
+    }
+}
+
+/// 真进程取消：不是模拟返回 .cancelled，而是真的把 7zz 杀掉
+func testRealProcessCancel() {
+    do {
+        print("真进程取消")
+        guard SevenZip.isAvailable else {
+            print("  - 跳过：7zz 不可用")
+            return
+        }
+
+        let dir = fixtures.appendingPathComponent("cancel-src", isDirectory: true)
+        try? FileManager.default.removeItem(at: dir)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        // 30 MB 随机数据：压不动，-mx=9 要跑好几秒，取消才有机会插进去
+        var blob = Data(count: 30 * 1024 * 1024)
+        blob.withUnsafeMutableBytes { raw in
+            var seed: UInt64 = 0x1234_5678
+            for i in 0..<raw.count {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                raw[i] = UInt8(truncatingIfNeeded: seed >> 33)
+            }
+        }
+        try blob.write(to: dir.appendingPathComponent("big.bin"))
+
+        let out = fixtures.appendingPathComponent("cancel-real.7z")
+        try? FileManager.default.removeItem(at: out)
+
+        let id = UUID()
+        try TaskRegistry.claim(id)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+            TaskRegistry.cancel(id)
+        }
+
+        let start = Date()
+        var caught = false
+        do {
+            try SevenZip.create(at: out, from: [dir], format: "7z",
+                                password: nil, volume: nil, level: 9, jobID: id)
+        } catch ArchiveError.cancelled {
+            caught = true
+        } catch {
+            // 被 SIGTERM 杀掉时退出码非 0；如果这里走了普通失败，
+            // 说明 wasCancelled 没认出来，下面的断言会失败
+        }
+        let elapsed = Date().timeIntervalSince(start)
+
+        expect(caught, "真进程被取消，抛的是 cancelled")
+        expect(elapsed < 8, "取消后很快返回，不是等它压完", "\(Int(elapsed * 1000))ms")
+    } catch {
+        expect(false, "真进程取消 抛出异常", "\(error)")
+    }
+}
+
 /// 工作模式
 func testWorkspaceMode() {
     do {
@@ -309,6 +402,8 @@ func runModelTests() {
     testBatchDestination()
     testOpenGate()
     testJobQueue()
+    testProcessOwnership()
+    testRealProcessCancel()
     testWorkspaceMode()
     testHome()
     testArchiveService()

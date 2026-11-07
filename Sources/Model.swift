@@ -1351,9 +1351,11 @@ final class ArchiveModel: ObservableObject {
     /// 只取消当前任务。串行执行保证 TaskRegistry 里的进程就是它，
     /// 不会出现「两个任务同时跑、取消关错进程」。
     func cancelJob() {
-        guard job != nil else { return }
+        guard let job else { return }
         status = "正在取消…"
-        TaskRegistry.cancel()
+        // 带 ID：只终止这个任务的进程。批量/预览那些临时进程不归队列管，
+        // 不会被这里误杀。
+        TaskRegistry.cancel(job.id)
     }
 
     /// 执行体在后台线程回调，切回主线程写进对应任务。
@@ -1370,7 +1372,18 @@ final class ArchiveModel: ObservableObject {
         jobBusy = true
         let next = jobQueue.removeFirst()
         queuedCount = jobQueue.count
+
+        do {
+            // 提交后、进程启动前就被取消的情况，在这里拦下来，连进程都不启动
+            try TaskRegistry.claim(next.id)
+        } catch {
+            jobBusy = false
+            finishJob(.cancelled)
+            return
+        }
+
         job = TaskJob(id: next.id, title: next.title, detail: next.detail, queued: jobQueue.count)
+        isLoading = true
 
         jobVisible = false
         jobReveal?.cancel()
@@ -1520,10 +1533,9 @@ final class ArchiveModel: ObservableObject {
     }
 
     private func extract(entries paths: [String], from frame: Frame, to destination: URL) {
-        isLoading = true
-        status = "正在解压…"
         submitJob(title: "正在解压", detail: frame.archive.lastPathComponent) { [weak self] jobID in
             guard let self else { return .cancelled }
+            self.status = "正在解压…"
             var passphrase = self.passwords[frame.archive.path]
 
             for attempt in 0..<2 {
@@ -1537,10 +1549,11 @@ final class ArchiveModel: ObservableObject {
                         case .libarchive:
                             // tar 没有进度输出，界面保持不确定态
                             try Tar.extract(frame.archive, entries: paths, to: destination,
-                                            passphrase: currentPassphrase)
+                                            passphrase: currentPassphrase, jobID: jobID)
                         case .sevenZip:
                             try SevenZip.extract(frame.archive, entries: paths, to: destination,
                                                  password: currentPassphrase,
+                                                 jobID: jobID,
                                                  onProgress: onProgress)
                         }
                     }.value
@@ -1633,6 +1646,7 @@ final class ArchiveModel: ObservableObject {
         password: String,
         volume: String?,
         level: Int = 5,
+        jobID: UUID? = nil,
         onProgress: (@Sendable (Double) -> Void)? = nil
     ) throws {
         let fm = FileManager.default
@@ -1668,6 +1682,7 @@ final class ArchiveModel: ObservableObject {
                     password: password.isEmpty ? nil : password,
                     volume: volume,
                     level: level,
+                    jobID: jobID,
                     onProgress: onProgress
                 )
             } else if prefersSevenZip {
@@ -1832,10 +1847,11 @@ final class ArchiveModel: ObservableObject {
             }
         }
 
-        isLoading = true
-        status = "正在压缩…"
         submitJob(title: "正在压缩", detail: output.lastPathComponent) { [weak self] jobID in
             guard let self else { return .cancelled }
+            // 状态在真正开始执行时才写。入队时就写，会让状态栏提前显示
+            // 「正在压缩」，而实际还在等前一个任务。
+            self.status = "正在压缩…"
             do {
                 let onProgress: @Sendable (Double) -> Void = { [weak self] value in
                     self?.reportProgress(value, for: jobID)
@@ -1846,6 +1862,7 @@ final class ArchiveModel: ObservableObject {
                         at: output, from: items, format: options.format,
                         password: password, volume: volume,
                         level: options.level.argument,
+                        jobID: jobID,
                         onProgress: onProgress
                     )
                 }.value

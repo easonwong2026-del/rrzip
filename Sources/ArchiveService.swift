@@ -55,6 +55,7 @@ enum ArchiveService {
     static func extract(_ url: URL, entries: [String], to destination: URL,
                         password: String?,
                         onConflict: ArchiveConflictPolicy = .overwrite,
+                        jobID: UUID? = nil,
                         onProgress: (@Sendable (Double) -> Void)? = nil) throws {
         var lastError: Error?
         for engine in engineOrder(for: url) {
@@ -62,11 +63,12 @@ enum ArchiveService {
                 switch engine {
                 case .libarchive:
                     try Tar.extract(url, entries: entries, to: destination,
-                                     passphrase: password, keepExisting: onConflict == .skip)
+                                     passphrase: password, keepExisting: onConflict == .skip,
+                                     jobID: jobID)
                 case .sevenZip:
                     try SevenZip.extract(url, entries: entries, to: destination,
                                          password: password, skipExisting: onConflict == .skip,
-                                         onProgress: onProgress)
+                                         jobID: jobID, onProgress: onProgress)
                 }
                 return
             } catch ArchiveError.needsPassword {

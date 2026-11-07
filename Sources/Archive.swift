@@ -73,7 +73,7 @@ enum Tar {
     static let binary = "/usr/bin/tar"
 
     @discardableResult
-    static func run(_ args: [String], cwd: URL? = nil) throws -> String {
+    static func run(_ args: [String], cwd: URL? = nil, jobID: UUID? = nil) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binary)
         process.arguments = args
@@ -94,13 +94,14 @@ enum Tar {
         process.standardOutput = out
         process.standardError = errHandle
         try process.run()
-        // 也要注册：2026-11-06 审计发现只有 7zz 注册了，zip/tar 的「取消」点了没用
-        TaskRegistry.begin(process)
+        // 只有队列任务才登记进程归属。批量、预览这些临时进程不登记，
+        // 否则会把当前任务的句柄顶掉，取消就打到别人身上了。
+        if let jobID { TaskRegistry.begin(process, for: jobID) }
 
         let outData = out.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        let wasCancelled = TaskRegistry.cancelled
-        TaskRegistry.finish()
+        let wasCancelled = jobID.map { TaskRegistry.wasCancelled($0) } ?? false
+        if let jobID { TaskRegistry.finish(jobID) }
         try? errHandle.close()
         let errData = (try? Data(contentsOf: errFile)) ?? Data()
         try? FileManager.default.removeItem(at: errFile)
@@ -191,7 +192,8 @@ enum Tar {
     }
 
     static func extract(_ archive: URL, entries: [String], to destination: URL,
-                        passphrase: String? = nil, keepExisting: Bool = false) throws {
+                        passphrase: String? = nil, keepExisting: Bool = false,
+                        jobID: UUID? = nil) throws {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         var args: [String] = []
         if let passphrase, !passphrase.isEmpty { args += ["--passphrase", passphrase] }
@@ -199,10 +201,11 @@ enum Tar {
         if keepExisting { args.append("--keep-old-files") }
         args += ["-xf", archive.path, "-C", destination.path]
         if !entries.isEmpty { args.append(contentsOf: entries) }
-        try run(args)
+        try run(args, jobID: jobID)
     }
 
-    static func create(at output: URL, from items: [URL], format: String) throws {
+    static func create(at output: URL, from items: [URL], format: String,
+                       jobID: UUID? = nil) throws {
         var args: [String] = []
         switch format {
         case "zip": args = ["-a", "-cf", output.path]
@@ -222,7 +225,7 @@ enum Tar {
                 : item.path   // 跨目录的少数情况退回绝对路径，至少不丢内容
         }
         args.append(contentsOf: relatives)
-        try run(args, cwd: parent)
+        try run(args, cwd: parent, jobID: jobID)
     }
 
     /// 用系统 ditto 打 zip。单源压缩走这条路：
@@ -254,29 +257,63 @@ enum Tar {
     }
 }
 
-/// 当前正在跑的外部进程。取消按钮直接 terminate 它，不用层层传句柄。
+/// 当前任务的进程归属。
 ///
-/// `cancelled` 是必要的：被 terminate 的进程退出码也是非 0，
-/// 只看退出码会把「用户主动取消」当成「任务失败」弹错误框。
-/// 应用同一时刻只跑一个任务（PRD 明确不做并发），所以用一个布尔就够。
+/// 只有队列任务（`submitJob`）才有 jobID；批量、预览、校验这些临时进程
+/// **不注册**，否则会覆盖 current，让「取消 A」终止掉 B 的进程。
+///
+/// 还有一个时序要处理：用户可能在任务提交后、子进程还没 spawn 时就点了取消。
+/// 那时 `current` 是 nil，terminate 无处可打；所以 `cancelRequested` 先记下来，
+/// `claim` 和 `begin` 各拦一次。
 enum TaskRegistry {
-    nonisolated(unsafe) static var current: Process?
-    nonisolated(unsafe) static var cancelled = false
+    nonisolated(unsafe) private static var current: Process?
+    nonisolated(unsafe) private static var owner: UUID?
+    /// 记的是「哪个任务要被取消」，不是一个布尔。
+    /// 用布尔的话，取消 A 之后排队中的 B 一 claim 就会误吞这个标志。
+    nonisolated(unsafe) private static var cancelRequested: UUID?
 
-    static func begin(_ process: Process) {
+    /// 任务开始前占位。已经请求过取消就直接抛错，连进程都不启动。
+    static func claim(_ id: UUID) throws {
+        if cancelRequested == id {
+            cancelRequested = nil
+            owner = nil
+            throw ArchiveError.cancelled
+        }
+        // 过期的取消信号（针对已完成的任务）在这里丢掉
+        cancelRequested = nil
+        owner = id
+    }
+
+    /// 子进程启动后登记。不属于 owner 的进程一律不接管。
+    static func begin(_ process: Process, for id: UUID) {
+        guard owner == id else { return }
         current = process
-        cancelled = false
+        // claim 之后、begin 之前来的取消，在这里补一刀
+        if cancelRequested == id { process.terminate() }
     }
 
-    static func finish() {
+    static func finish(_ id: UUID) {
+        guard owner == id else { return }
         current = nil
-        cancelled = false
+        owner = nil
+        if cancelRequested == id { cancelRequested = nil }
     }
 
-    static func cancel() {
-        cancelled = true
-        current?.terminate()
+    /// 只对当前 owner 生效。串行保证了同一时刻只有一个任务，
+    /// 但临时进程可能正在跑——它们的取消由自己的调用方负责。
+    static func cancel(_ id: UUID) {
+        cancelRequested = id
+        if owner == id { current?.terminate() }
     }
+
+    /// 进程退出后判断：是我这个任务被取消了吗
+    static func wasCancelled(_ id: UUID) -> Bool {
+        owner == id && cancelRequested == id
+    }
+
+    // 测试用
+    static var currentOwner: UUID? { owner }
+    static var pendingCancel: UUID? { cancelRequested }
 }
 
 /// 应用内附带的 7-Zip 26.05（arm64）
@@ -321,6 +358,7 @@ enum SevenZip {
 
     @discardableResult
     static func run(_ args: [String], cwd: URL? = nil,
+                    jobID: UUID? = nil,
                     onProgress: ((Double) -> Void)? = nil) throws -> String {
         guard let binary else { throw ArchiveError.engineUnavailable }
         let process = Process()
@@ -347,7 +385,7 @@ enum SevenZip {
         process.standardOutput = out
         process.standardError = errHandle
         try process.run()
-        TaskRegistry.begin(process)
+        if let jobID { TaskRegistry.begin(process, for: jobID) }
 
         // 有进度回调时边读边解析，不能等 EOF 再读——那要等任务跑完才拿到数据
         var outData = Data()
@@ -366,8 +404,8 @@ enum SevenZip {
         }
 
         process.waitUntilExit()
-        let wasCancelled = TaskRegistry.cancelled
-        TaskRegistry.finish()
+        let wasCancelled = jobID.map { TaskRegistry.wasCancelled($0) } ?? false
+        if let jobID { TaskRegistry.finish(jobID) }
         try? errHandle.close()
         let errData = (try? Data(contentsOf: errFile)) ?? Data()
         try? FileManager.default.removeItem(at: errFile)
@@ -451,6 +489,7 @@ enum SevenZip {
 
     static func extract(_ archive: URL, entries: [String], to destination: URL,
                         password: String? = nil, skipExisting: Bool = false,
+                        jobID: UUID? = nil,
                         onProgress: ((Double) -> Void)? = nil) throws {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         var args = ["x", "-y"]
@@ -460,7 +499,7 @@ enum SevenZip {
         if let password, !password.isEmpty { args.append("-p\(password)") }
         args.append(archive.path)
         if !entries.isEmpty { args.append(contentsOf: entries) }
-        try run(args, onProgress: onProgress)
+        try run(args, jobID: jobID, onProgress: onProgress)
     }
 
     /// format: "zip" | "7z" | "tar"
@@ -471,6 +510,7 @@ enum SevenZip {
         password: String?,
         volume: String?,
         level: Int? = nil,
+        jobID: UUID? = nil,
         onProgress: ((Double) -> Void)? = nil
     ) throws {
         // 7-Zip 按文件基名入包，两个不同目录下的同名文件会直接失败：
@@ -489,7 +529,7 @@ enum SevenZip {
         if let volume, !volume.isEmpty { args.append("-v\(volume)") }
         args.append(output.path)
         args.append(contentsOf: items.map(\.path))
-        try run(args, onProgress: onProgress)
+        try run(args, jobID: jobID, onProgress: onProgress)
     }
 
     /// 不同目录下的同名项：7-Zip 会拒绝，提前给可读的提示。
