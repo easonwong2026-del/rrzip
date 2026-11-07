@@ -756,7 +756,11 @@ final class ArchiveModel: ObservableObject {
     // MARK: - 快速压缩（首页）
 
     /// 首页拖入：不弹选项，直接在同目录生成 ZIP。重名自动加序号。
-    func quickCompress(_ urls: [URL]) {
+    ///
+    /// 走的是和「新建压缩包」同一条队列：前台正在解压时不会插队并行，
+    /// 取消也只停自己这一条。`completion` 在任务真正有结局后才回调——
+    /// 以前是发起压缩后立刻写「已生成 ZIP」，包还没影子就先报成功了。
+    func quickCompress(_ urls: [URL], completion: (@MainActor (JobResult, URL) -> Void)? = nil) {
         guard !urls.isEmpty else { return }
         let folder = urls[0].deletingLastPathComponent()
         let base: String
@@ -767,25 +771,67 @@ final class ArchiveModel: ObservableObject {
             let name = folder.lastPathComponent
             base = name.isEmpty ? "归档" : name
         }
-        let output = Self.uniqueOutput(folder.appendingPathComponent(base)
-            .appendingPathExtension("zip"))
-        isLoading = true
-        status = "正在压缩 \(urls.count) 项…"
-        Task {
-            do {
-                let items = urls
-                try await Task.detached(priority: .userInitiated) {
-                    try Self.writeArchive(at: output, from: items, format: .zip,
-                                           password: "", volume: nil)
-                }.value
-                isLoading = false
-                status = "已生成 \(output.lastPathComponent)"
-                NSWorkspace.shared.activateFileViewerSelecting([output])
-            } catch {
-                isLoading = false
-                status = "压缩失败"
-                errorMessage = error.localizedDescription
+        // 落点等任务真正开始跑时再算：排队期间前一个同名任务可能已经把
+        // 「A.zip」占了，提交时就算好会让第二个任务覆盖掉第一个的产物。
+        let target = folder.appendingPathComponent(base).appendingPathExtension("zip")
+
+        submitJob(title: "正在压缩", detail: target.lastPathComponent) { [weak self] jobID in
+            guard let self else { return .cancelled }
+            let output = Self.uniqueOutput(target)
+            let result = await self.runArchiveJob(
+                output: output, items: urls, format: .zip,
+                password: "", volume: nil, level: CompressLevel.normal.argument,
+                runningText: "正在压缩 \(urls.count) 项…", doneVerb: "已生成",
+                jobID: jobID
+            )
+            completion?(result, output)
+            return result
+        }
+    }
+
+    /// 压缩任务的公共执行体：状态、写盘、完成后在访达里选中产物、取消与失败的落账。
+    /// 新建面板和首页快速压缩只差几句文案，其余不该各写一遍——
+    /// 上一次写两遍的结果就是一边漏传 jobID，取消按下去没反应。
+    private func runArchiveJob(
+        output: URL, items: [URL], format: CreateFormat,
+        password: String, volume: String?, level: Int,
+        runningText: String, doneVerb: String,
+        jobID: UUID
+    ) async -> JobResult {
+        // 状态在真正开始执行时才写。入队时就写，会让状态栏提前显示
+        // 「正在压缩」，而实际还在等前一个任务。
+        status = runningText
+        do {
+            let onProgress: @Sendable (Double) -> Void = { [weak self] value in
+                self?.reportProgress(value, for: jobID)
             }
+            try await Task.detached {
+                // 先写临时文件，成功后才替换同名旧包：失败时原文件不动
+                try Self.writeArchive(
+                    at: output, from: items, format: format,
+                    password: password, volume: volume,
+                    level: level, jobID: jobID, onProgress: onProgress
+                )
+            }.value
+            if volume != nil {
+                let parts = ArchiveModel.volumeFiles(of: output)
+                status = "\(doneVerb) \(output.lastPathComponent).001（分 \(parts.count) 卷）"
+                NSWorkspace.shared.activateFileViewerSelecting(Array(parts.prefix(1)))
+            } else {
+                status = "\(doneVerb) \(output.lastPathComponent)"
+                NSWorkspace.shared.activateFileViewerSelecting([output])
+            }
+            return .succeeded
+        } catch ArchiveError.cancelled {
+            status = "已取消"
+            // 临时产物由 writeArchive 自己清（staged 与它的分卷）。
+            // 这里千万不能碰 output：用户可能选了一个已存在的同名包，
+            // 在「取消」这个动作上删掉它，等于把旧文件毁了。
+            return .cancelled
+        } catch {
+            errorMessage = error.localizedDescription
+            status = "压缩失败"
+            return .failed(error.localizedDescription)
         }
     }
 
@@ -1403,8 +1449,13 @@ final class ArchiveModel: ObservableObject {
         jobReveal?.cancel()
         jobReveal = nil
         jobVisible = false
+        let finishedID = job?.id
         job = nil
         jobBusy = false
+
+        // 任务到此结束，才释放进程归属。子进程退出时只注销那一个进程
+        // （见 TaskRegistry.endProcess），否则加密解压的第二次重试就取消不了了。
+        if let finishedID { TaskRegistry.release(finishedID) }
 
         if case .failed(let message) = result {
             errorMessage = message
@@ -1692,6 +1743,7 @@ final class ArchiveModel: ObservableObject {
                     password: nil,
                     volume: nil,
                     level: level,
+                    jobID: jobID,
                     onProgress: onProgress
                 )
             } else if format == .zip {
@@ -1699,10 +1751,15 @@ final class ArchiveModel: ObservableObject {
                 // 多源只剩 bsdtar 的 store，四档级别彻底失效。
                 // 与其静默给一个「压了等于没压」的包，不如明说引擎缺失。
                 guard items.count == 1 else { throw ArchiveError.engineUnavailable }
-                try Tar.createZip(at: staged, from: items[0])
+                try Tar.createZip(at: staged, from: items[0], jobID: jobID)
             } else {
-                try Tar.create(at: staged, from: items, format: format.ext)
+                // TAR / TGZ 走 bsdtar。它也支持取消：
+                // 不传 jobID 的话，这两个格式的任务按「取消」不会有任何反应。
+                try Tar.create(at: staged, from: items, format: format.ext, jobID: jobID)
             }
+            // 压完了但取消信号刚好赶到：这时候交出产物等于没取消。
+            // 拿掉这一行，用户点了取消却仍然得到一个包（旧的同名包还会被替换）。
+            if let jobID, TaskRegistry.wasCancelled(jobID) { throw ArchiveError.cancelled }
             try commitStaged(staged, to: output, hasVolumes: volume != nil)
         } catch {
             cleanupStaged()
@@ -1849,43 +1906,12 @@ final class ArchiveModel: ObservableObject {
 
         submitJob(title: "正在压缩", detail: output.lastPathComponent) { [weak self] jobID in
             guard let self else { return .cancelled }
-            // 状态在真正开始执行时才写。入队时就写，会让状态栏提前显示
-            // 「正在压缩」，而实际还在等前一个任务。
-            self.status = "正在压缩…"
-            do {
-                let onProgress: @Sendable (Double) -> Void = { [weak self] value in
-                    self?.reportProgress(value, for: jobID)
-                }
-                try await Task.detached {
-                    // 先写临时文件，成功后才替换同名旧包：失败时原文件不动
-                    try Self.writeArchive(
-                        at: output, from: items, format: options.format,
-                        password: password, volume: volume,
-                        level: options.level.argument,
-                        jobID: jobID,
-                        onProgress: onProgress
-                    )
-                }.value
-                if volume != nil {
-                    let parts = ArchiveModel.volumeFiles(of: output)
-                    self.status = "已创建 \(output.lastPathComponent).001（分 \(parts.count) 卷）"
-                    NSWorkspace.shared.activateFileViewerSelecting(Array(parts.prefix(1)))
-                } else {
-                    self.status = "已创建 \(output.lastPathComponent)"
-                    NSWorkspace.shared.activateFileViewerSelecting([output])
-                }
-                return .succeeded
-            } catch ArchiveError.cancelled {
-                self.status = "已取消"
-                // 临时产物由 writeArchive 自己清（staged 与它的分卷）。
-                // 这里千万不能碰 output：用户可能选了一个已存在的同名包，
-                // 在「取消」这个动作上删掉它，等于把旧文件毁了。
-                return .cancelled
-            } catch {
-                self.errorMessage = error.localizedDescription
-                self.status = "创建失败"
-                return .failed(error.localizedDescription)
-            }
+            return await self.runArchiveJob(
+                output: output, items: items, format: options.format,
+                password: password, volume: volume, level: options.level.argument,
+                runningText: "正在压缩…", doneVerb: "已创建",
+                jobID: jobID
+            )
         }
     }
 

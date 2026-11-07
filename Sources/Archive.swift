@@ -101,7 +101,8 @@ enum Tar {
         let outData = out.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         let wasCancelled = jobID.map { TaskRegistry.wasCancelled($0) } ?? false
-        if let jobID { TaskRegistry.finish(jobID) }
+        // 只注销这个进程，别释放任务归属——解压重试还要用同一个 jobID
+        if let jobID { TaskRegistry.endProcess(process, for: jobID) }
         try? errHandle.close()
         let errData = (try? Data(contentsOf: errFile)) ?? Data()
         try? FileManager.default.removeItem(at: errFile)
@@ -231,7 +232,10 @@ enum Tar {
     /// 用系统 ditto 打 zip。单源压缩走这条路：
     /// tar 的 zip 实现只 store（不压缩），1.3 GB 的目录压完还是 1.3 GB；
     /// ditto 走 deflate，而且 `--keepParent` 天然只保留源文件名，不会带绝对路径。
-    static func createZip(at output: URL, from item: URL) throws {
+    ///
+    /// 它是真进程，所以也要登记归属：没有 7zz 的机器上这是唯一的 ZIP 路径，
+    /// 不登记的话「取消」按下去什么都不会发生。
+    static func createZip(at output: URL, from item: URL, jobID: UUID? = nil) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         process.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent",
@@ -246,8 +250,16 @@ enum Tar {
         process.standardError = errPipe
 
         try process.run()
+        if let jobID { TaskRegistry.begin(process, for: jobID) }
+
         let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        let wasCancelled = jobID.map { TaskRegistry.wasCancelled($0) } ?? false
+        if let jobID { TaskRegistry.endProcess(process, for: jobID) }
+
+        // 被取消时 ditto 的退出码也是非 0，得先分辨出来，
+        // 否则用户点「取消」会收到一条「压缩失败」的错误框
+        if wasCancelled { throw ArchiveError.cancelled }
 
         guard process.terminationStatus == 0 else {
             let message = String(decoding: errData, as: UTF8.self)
@@ -262,58 +274,113 @@ enum Tar {
 /// 只有队列任务（`submitJob`）才有 jobID；批量、预览、校验这些临时进程
 /// **不注册**，否则会覆盖 current，让「取消 A」终止掉 B 的进程。
 ///
-/// 还有一个时序要处理：用户可能在任务提交后、子进程还没 spawn 时就点了取消。
-/// 那时 `current` 是 nil，terminate 无处可打；所以 `cancelRequested` 先记下来，
-/// `claim` 和 `begin` 各拦一次。
+/// 时序上有三件事要分开：
+/// - `claim` 占位（任务开始）
+/// - `begin` / `endProcess` 登记与注销**单个子进程**
+/// - `release` 释放整个任务
+///
+/// 中间那层必须单独存在：加密解压第一次密码错了会重试，第一个进程退出时
+/// 就把 owner 清掉的话，第二次重试虽然还在跑，取消却已经无处可打。
+///
+/// 这几个方法是跨线程调的（主线程 claim / 取消，detached 里 spawn），
+/// 所以状态统一收进 `State`，由 NSLock 保护。`nonisolated(unsafe)` 只是
+/// 让编译器别管这块静态存储——并发安全由锁负责，不是靠它豁免掉的。
 enum TaskRegistry {
-    nonisolated(unsafe) private static var current: Process?
-    nonisolated(unsafe) private static var owner: UUID?
-    /// 记的是「哪个任务要被取消」，不是一个布尔。
-    /// 用布尔的话，取消 A 之后排队中的 B 一 claim 就会误吞这个标志。
-    nonisolated(unsafe) private static var cancelRequested: UUID?
+    private struct State {
+        var current: Process?
+        var owner: UUID?
+        /// 记的是「哪个任务要被取消」，不是一个布尔。
+        /// 用布尔的话，取消 A 之后排队中的 B 一 claim 就会误吞这个标志。
+        var cancelRequested: UUID?
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var state = State()
+
+    /// 所有读写都在锁里；返回值带出来，避免在锁内调外部代码（terminate 之类）
+    private static func withState<T>(_ body: (inout State) -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&state)
+    }
 
     /// 任务开始前占位。已经请求过取消就直接抛错，连进程都不启动。
     static func claim(_ id: UUID) throws {
-        if cancelRequested == id {
-            cancelRequested = nil
-            owner = nil
-            throw ArchiveError.cancelled
+        let rejected = withState { state -> Bool in
+            if state.cancelRequested == id {
+                state.cancelRequested = nil
+                state.owner = nil
+                state.current = nil
+                return true
+            }
+            // 过期的取消信号（针对已完成的任务）在这里丢掉
+            state.cancelRequested = nil
+            state.owner = id
+            state.current = nil
+            return false
         }
-        // 过期的取消信号（针对已完成的任务）在这里丢掉
-        cancelRequested = nil
-        owner = id
+        if rejected { throw ArchiveError.cancelled }
     }
 
     /// 子进程启动后登记。不属于 owner 的进程一律不接管。
     static func begin(_ process: Process, for id: UUID) {
-        guard owner == id else { return }
-        current = process
-        // claim 之后、begin 之前来的取消，在这里补一刀
-        if cancelRequested == id { process.terminate() }
+        let terminate = withState { state -> Bool in
+            guard state.owner == id else { return false }
+            state.current = process
+            // claim 之后、begin 之前来的取消，在这里补一刀
+            return state.cancelRequested == id
+        }
+        // terminate 对「还没启动」的 Process 会抛 NSInvalidArgumentException，
+        // 对「已经退出」的则是空操作；这里再确认一次，别让取消变成崩溃。
+        if terminate, process.isRunning { process.terminate() }
     }
 
-    static func finish(_ id: UUID) {
-        guard owner == id else { return }
-        current = nil
-        owner = nil
-        if cancelRequested == id { cancelRequested = nil }
+    /// 单个子进程退出：只注销这一个进程，owner 留给任务本身。
+    /// 重试用第二个进程时，`begin` 还能把它挂上，取消照样打得着。
+    static func endProcess(_ process: Process, for id: UUID) {
+        withState { state in
+            guard state.owner == id else { return }
+            // 只清自己登记的那一个：万一有更新换代的进程，别把新的抹掉
+            if state.current === process { state.current = nil }
+        }
+    }
+
+    /// 任务真正结束（`finishJob` 里调）。这里才释放归属。
+    static func release(_ id: UUID) {
+        let leftover = withState { state -> Process? in
+            guard state.owner == id else { return nil }
+            let running = state.current
+            state.current = nil
+            state.owner = nil
+            if state.cancelRequested == id { state.cancelRequested = nil }
+            return running
+        }
+        // 正常路径不会走到这儿（进程都已 waitUntilExit）；真留下活进程就是有 bug，
+        // 与其让它在后台继续写用户的磁盘，不如收掉。
+        if let leftover, leftover.isRunning { leftover.terminate() }
     }
 
     /// 只对当前 owner 生效。串行保证了同一时刻只有一个任务，
     /// 但临时进程可能正在跑——它们的取消由自己的调用方负责。
     static func cancel(_ id: UUID) {
-        cancelRequested = id
-        if owner == id { current?.terminate() }
+        let target = withState { state -> Process? in
+            state.cancelRequested = id
+            return state.owner == id ? state.current : nil
+        }
+        // 已经退出的进程 terminate 是空操作；这里防的是「查的时候还在、杀的时候没了」
+        if let target, target.isRunning { target.terminate() }
     }
 
-    /// 进程退出后判断：是我这个任务被取消了吗
+    /// 进程退出后判断：是我这个任务被取消了吗。
+    /// 必须在 `endProcess` 之前问——owner 一放掉就无从判断了。
     static func wasCancelled(_ id: UUID) -> Bool {
-        owner == id && cancelRequested == id
+        withState { $0.owner == id && $0.cancelRequested == id }
     }
 
     // 测试用
-    static var currentOwner: UUID? { owner }
-    static var pendingCancel: UUID? { cancelRequested }
+    static var currentOwner: UUID? { withState { $0.owner } }
+    static var pendingCancel: UUID? { withState { $0.cancelRequested } }
+    static var hasProcess: Bool { withState { $0.current != nil } }
 }
 
 /// 应用内附带的 7-Zip 26.05（arm64）
@@ -405,7 +472,8 @@ enum SevenZip {
 
         process.waitUntilExit()
         let wasCancelled = jobID.map { TaskRegistry.wasCancelled($0) } ?? false
-        if let jobID { TaskRegistry.finish(jobID) }
+        // 只注销这个进程，别释放任务归属——解压重试还要用同一个 jobID
+        if let jobID { TaskRegistry.endProcess(process, for: jobID) }
         try? errHandle.close()
         let errData = (try? Data(contentsOf: errFile)) ?? Data()
         try? FileManager.default.removeItem(at: errFile)
