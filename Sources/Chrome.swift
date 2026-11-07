@@ -23,7 +23,8 @@ extension ContentView {
                 .background(.regularMaterial, in: Capsule())
                 .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
                 .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
-                .padding(.bottom, Metrics.statusHeight + Space.l)
+                // 有选中操作条时一起让开，否则「已保存 xxx」正好盖住删除/暂存
+                .padding(.bottom, bottomOverlayInset)
                 .allowsHitTesting(false)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
         }
