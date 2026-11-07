@@ -9,5 +9,6 @@ import Foundation
 runArchiveTests()
 runModelTests()
 runFinderTests()
+runSettingsTests()
 runCompressTests()
 finish()

@@ -23,6 +23,13 @@ SHARED_STATE=(
     Sources/UniquePath.swift
 )
 
+# 只有主程序和测试用得到的设置解析层。
+# 扩展不需要（它们不读解压位置），所以不并进 SHARED_STATE；
+# 但测试要跑真实行为，Model.swift 依赖它，这里必须列进来。
+APP_ONLY=(
+    Sources/ExtractDestination.swift
+)
+
 # 访达扩展的菜单判定与任务执行
 FINDER_CORE=(
     FinderSync/MenuBuilder.swift

@@ -701,6 +701,15 @@ final class ArchiveModel: ObservableObject {
         workspaceMode = mode
     }
 
+    /// 设置页里选工作模式，等于用户手动切换。
+    ///
+    /// 设置页曾经直接绑 `$model.workspaceMode`：值改了、界面也切换了，
+    /// 但 `modePinnedAt` 没更新，冷却期不生效——用户刚在设置里选完完整模式，
+    /// 随便拖一下窗口就被自动模式抢回去，看起来像「设置不管用」。
+    func selectWorkspaceModeFromSettings(_ mode: WorkspaceMode) {
+        setWorkspaceMode(mode, manual: true)
+    }
+
     /// 上一帧的窗口宽度，用来判断拖动方向
     private var lastAutoWidth: Double?
 
@@ -712,11 +721,11 @@ final class ArchiveModel: ObservableObject {
     ///
     /// 阈值来自 Layout（由三栏最小宽度推导），不写死。
     /// 手动切过之后 5 分钟内不抢控制权，避免「刚展开又被弹回去」。
-    func autoMode(forWidth width: Double) -> WorkspaceMode? {
+    func autoMode(forWidth width: Double, now: Date = Date()) -> WorkspaceMode? {
         let previous = lastAutoWidth
         lastAutoWidth = width
         // 冷却期也要记宽度，否则 5 分钟后的第一帧方向是错的
-        guard Date().timeIntervalSince(modePinnedAt) > 300 else { return nil }
+        guard now.timeIntervalSince(modePinnedAt) > 300 else { return nil }
         // 第一帧没有方向信息，或宽度没变，不做判断
         guard let previous, previous != width else { return nil }
 
@@ -1677,50 +1686,42 @@ final class ArchiveModel: ObservableObject {
 
     // MARK: - 解压
 
-    /// 设置里选了固定目录就直接用；没选才弹面板
-    private var fixedExtractDestination: URL? {
-        let path = UserDefaults.standard.string(forKey: "rrzip.extractDestination") ?? ""
-        guard !path.isEmpty else { return nil }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
-              isDirectory.boolValue else { return nil }
-        return URL(fileURLWithPath: path, isDirectory: true)
+    /// 设置里的固定目录。`problem` 非空表示用户设过、但现在用不了，
+    /// 要明确告诉他而不是静默弹面板——他不知道自己的设置为什么没生效。
+    private var fixedExtractDestination: (url: URL?, problem: String?) {
+        let raw = UserDefaults.standard.string(forKey: ExtractDestinationSetting.defaultsKey) ?? ""
+        let resolution = ExtractDestinationSetting.resolve(raw)
+        return (resolution.url, resolution.problem)
     }
 
     func extractAll() {
         guard let frame = current else { return }
-        let destination: URL
-        if let fixed = fixedExtractDestination {
-            destination = fixed
-        } else {
-            let panel = NSOpenPanel()
-            panel.canChooseDirectories = true
-            panel.canChooseFiles = false
-            panel.canCreateDirectories = true
-            panel.prompt = "解压到此处"
-            panel.message = "选择解压目标文件夹"
-            guard panel.runModal() == .OK, let url = panel.url else { return }
-            destination = url
-        }
+        guard let destination = resolveDestination(message: "选择解压目标文件夹") else { return }
         extract(entries: [], from: frame, to: destination)
+    }
+
+    /// 固定目录优先；没设或失效才弹面板。返回 nil = 用户取消，调用方直接返回。
+    private func resolveDestination(message: String) -> URL? {
+        let fixed = fixedExtractDestination
+        if let problem = fixed.problem { notice = problem }
+        if let url = fixed.url { return url }
+
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "解压到此处"
+        panel.message = message
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return url
     }
 
     func extractSelection() {
         guard let frame = current else { return }
         let chosen = entries.filter { selection.contains($0.id) }
         guard !chosen.isEmpty else { return }
-        let destination: URL
-        if let fixed = fixedExtractDestination {
-            destination = fixed
-        } else {
-            let panel = NSOpenPanel()
-            panel.canChooseDirectories = true
-            panel.canChooseFiles = false
-            panel.canCreateDirectories = true
-            panel.prompt = "解压到此处"
-            panel.message = "解压选中的 \(chosen.count) 个项目"
-            guard panel.runModal() == .OK, let url = panel.url else { return }
-            destination = url
+        guard let destination = resolveDestination(message: "解压选中的 \(chosen.count) 个项目") else {
+            return
         }
         extract(entries: chosen.map(\.path), from: frame, to: destination)
     }
