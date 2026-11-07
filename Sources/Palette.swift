@@ -144,11 +144,9 @@ enum Layout {
     /// 低于它从完整模式收起（= 818，等于三栏几何下限）
     static var autoCollapseWidth: CGFloat { fullModeMinWidth + comfortMargin }
 
-    /// 收缩与展开之间留滞回，避免拖动时来回弹
-    static let hysteresis: CGFloat = 80
-
-    /// 高于它从简化模式展开（= 898，留 80 的滞回）
-    static var autoExpandWidth: CGFloat { autoCollapseWidth + hysteresis }
+    // 展开和收起共用这一个阈值，靠拖动方向区分（见 ArchiveModel.autoMode）。
+    // 曾经在两者之间留 80pt 滞回，结果用户从 720 拉到 850 完全没反应——
+    // 「拉宽了却不变」比拖动时偶尔抖一下更伤人。
 
     /// 窗口最小尺寸与模式无关：只有解耦，窄窗口才可能真正出现
     static let minWindowWidth: CGFloat = 560

@@ -702,14 +702,28 @@ final class ArchiveModel: ObservableObject {
         workspaceMode = mode
     }
 
+    /// 上一帧的窗口宽度，用来判断拖动方向
+    private var lastAutoWidth: Double?
+
     /// 窗口宽度变化时该不该跟着换模式；nil = 不动。
-    /// 阈值来自 Layout（由三栏最小宽度推导），不写死——
-    /// 上一版把 760 写死，而完整模式又把窗口最小宽度锁在 1020，这条分支永远走不到。
+    ///
+    /// 判据是「方向 + 阈值」，不是滞回：同一个 818，往宽拉就展开、往窄拉就收起。
+    /// 以前在收起和展开之间留 80pt 滞回，用户从 720 拉到 850 完全没反应，
+    /// 体感就是「自动切换坏了」——这已经是第二次因为阈值被抱怨。
+    ///
+    /// 阈值来自 Layout（由三栏最小宽度推导），不写死。
     /// 手动切过之后 5 分钟内不抢控制权，避免「刚展开又被弹回去」。
     func autoMode(forWidth width: Double) -> WorkspaceMode? {
+        let previous = lastAutoWidth
+        lastAutoWidth = width
+        // 冷却期也要记宽度，否则 5 分钟后的第一帧方向是错的
         guard Date().timeIntervalSince(modePinnedAt) > 300 else { return nil }
-        if width < Layout.autoCollapseWidth, workspaceMode == .full { return .compact }
-        if width > Layout.autoExpandWidth, workspaceMode == .compact { return .full }
+        // 第一帧没有方向信息，或宽度没变，不做判断
+        guard let previous, previous != width else { return nil }
+
+        let edge = Layout.autoCollapseWidth
+        if workspaceMode == .compact, width >= edge, width > previous { return .full }
+        if workspaceMode == .full, width < edge { return .compact }
         return nil
     }
 

@@ -103,7 +103,9 @@
 | 卡片圆角 | 12 | 沿用 |
 | 按钮圆角 | 8 | 沿用 |
 
-**宽度与阈值一律不动**：`Metrics.sidebarMin` / `inspectorMin` 保持原值，`Layout.autoCollapseWidth` 仍是 818、`autoExpandWidth` 仍是 898。
+**宽度与阈值一律不动**：`Metrics.sidebarMin` / `inspectorMin` 保持原值，`Layout.autoCollapseWidth` 仍是 818。
+> 后续（2.12.4）：80pt 滞回被改成方向感知——用户从 720 拉到 850 完全没反应，
+> 同一个阈值改为「往宽拉展开、往窄拉收起」，`autoExpandWidth` 已删除。
 视觉改造只换颜色、圆角、图标与自绘骨架，不碰决定「什么时候切模式」的那几个数——
 上一版刚把它们从 1078 压到 898，不能再因为设计稿加宽侧栏又推上去。
 
