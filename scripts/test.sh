@@ -33,7 +33,7 @@ xcrun swiftc -O -swift-version 5 \
     -framework UserNotifications \
     -o build/rrzip-tests \
     "${ARCHIVE_CORE[@]}" "${SHARED_STATE[@]}" "${APP_ONLY[@]}" "${FINDER_CORE[@]}" \
-    Sources/Model.swift Sources/Palette.swift Sources/Batch.swift Sources/Thumbnails.swift \
+    Sources/Model.swift Sources/Palette.swift Sources/Batch.swift Sources/Thumbnails.swift Sources/SaveAs.swift \
     Tests/*.swift
 
 if [ -x "$ROOT/Assets/7zz" ]; then cp "$ROOT/Assets/7zz" build/7zz; fi
