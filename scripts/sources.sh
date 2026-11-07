@@ -16,6 +16,7 @@ ARCHIVE_CORE=(
 
 # 扩展与主程序之间的跨进程协作：设置、待解压、待提示、唯一命名
 SHARED_STATE=(
+    Sources/JobCenter.swift
     Sources/FinderSettings.swift
     Sources/PendingExtraction.swift
     Sources/PendingNotice.swift

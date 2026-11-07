@@ -68,6 +68,75 @@ func testOpenGate() {
     }
 }
 
+/// 任务队列：单任务串行，第二个排队
+func testJobQueue() {
+    do {
+        print("任务队列")
+        MainActor.assumeIsolated {
+            let model = ArchiveModel()
+            expect(model.job == nil, "初始没有任务")
+
+            final class Box: @unchecked Sendable { var order: [String] = [] }
+            let box = Box()
+
+            model.submitJob(title: "A", detail: "") { _ in
+                try? await Task.sleep(nanoseconds: 80_000_000)
+                box.order.append("A")
+                return .succeeded
+            }
+            model.submitJob(title: "B", detail: "") { _ in
+                box.order.append("B")
+                return .succeeded
+            }
+
+            expect(model.job?.title == "A", "第一个立即开始")
+            expect(model.queuedCount == 1, "第二个排队，不并行")
+            expect(model.job?.queued == 1, "卡片上能看到排队数")
+
+            var waited = 0
+            while model.job != nil && waited < 300 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+                waited += 1
+            }
+            expect(box.order == ["A", "B"], "串行执行且顺序不乱",
+                   box.order.joined(separator: ","))
+            expect(model.job == nil, "全部结束后没有当前任务")
+            expect(model.queuedCount == 0, "队列已清空")
+
+            // 失败要落成错误，且不能卡住队列
+            model.submitJob(title: "C", detail: "") { _ in .failed("故意失败") }
+            model.submitJob(title: "D", detail: "") { _ in .succeeded }
+            expect(model.job?.title == "C", "失败的任务也会开始")
+            waited = 0
+            while model.job != nil && waited < 300 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+                waited += 1
+            }
+            expect(model.errorMessage == "故意失败", "失败原因落在 errorMessage",
+                   model.errorMessage ?? "nil")
+            expect(model.queuedCount == 0, "失败不阻塞后面的任务")
+
+            // 取消：只在有任务时有效，且不清空队列里排着的
+            model.submitJob(title: "E", detail: "") { _ in
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                return .cancelled
+            }
+            model.submitJob(title: "F", detail: "") { _ in .succeeded }
+            expect(model.job?.title == "E", "E 开始")
+            model.cancelJob()
+            expect(model.status == "正在取消…", "取消先显示「正在取消」")
+            waited = 0
+            while model.job != nil && waited < 300 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+                waited += 1
+            }
+            expect(model.queuedCount == 0, "取消后队列继续跑完")
+        }
+    } catch {
+        expect(false, "任务队列 抛出异常", "\(error)")
+    }
+}
+
 /// 工作模式
 func testWorkspaceMode() {
     do {
@@ -239,6 +308,7 @@ func testSortAndStaging() {
 func runModelTests() {
     testBatchDestination()
     testOpenGate()
+    testJobQueue()
     testWorkspaceMode()
     testHome()
     testArchiveService()
