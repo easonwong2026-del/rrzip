@@ -80,27 +80,25 @@ func testWorkspaceMode() {
 
             // 阈值全部从 Layout 推导，不再有写死的 760 / 900
             let collapse = Layout.autoCollapseWidth
-            let expand = Layout.autoExpandWidth
 
-            // 冷却期外（刚启动）的自动判据
-            expect(model.autoMode(forWidth: expand + 10) == .full, "超过展开阈值自动展开",
-                   "expand=\(expand)")
-            expect(model.autoMode(forWidth: collapse + 10) == nil, "滞回区内不切换")
-            expect(model.autoMode(forWidth: collapse - 10) == nil, "简化模式下更窄也不再重复切")
+            // 方向感知：同一个阈值，往宽拉展开、往窄拉收起，中间没有滞回死区。
+            // 留 80pt 滞回那版，用户从 720 拉到 850 完全没反应。
+            expect(model.autoMode(forWidth: 700) == nil, "第一帧没有方向信息，不动")
+            expect(model.autoMode(forWidth: collapse + 10) == .full,
+                   "往宽拉过阈值就展开", "collapse=\(collapse)")
+            model.setWorkspaceMode(.full, manual: false)
+            expect(model.autoMode(forWidth: collapse + 20) == nil, "已是完整模式，继续拉宽不动")
 
             // 阈值本身要自洽：这是上一版的 bug——判据低于窗口最小宽度，分支永远走不到
             expect(collapse >= Layout.fullModeMinWidth, "收起阈值不低于三栏几何下限",
                    "collapse=\(collapse)")
-            expect(expand > collapse, "展开阈值高于收起阈值（留滞回）")
             expect(collapse <= 1020, "收起阈值不超过旧版窗口最小宽度，否则又会不可达",
                    "collapse=\(collapse)")
-            // 体感锁：阈值一旦被推到用户够不到的宽度，自动切换就等于不存在
-            expect(expand < 950, "展开阈值要落在 800 多，不能推高", "expand=\(expand)")
 
             // 完整模式被拖窄必须能收起（旧版这条永远返回 nil）
-            model.setWorkspaceMode(.full, manual: false)
-            expect(model.autoMode(forWidth: collapse - 1) == .compact, "完整模式变窄自动收起")
-            expect(model.autoMode(forWidth: collapse + 1) == nil, "留在滞回区内不来回弹")
+            expect(model.autoMode(forWidth: collapse - 1) == .compact, "拉窄到阈值以下自动收起")
+            model.setWorkspaceMode(.compact, manual: false)
+            expect(model.autoMode(forWidth: collapse + 1) == .full, "再拉宽回来又展开")
 
             model.selection = ["a", "b"]
             model.setWorkspaceMode(.full, manual: true)
