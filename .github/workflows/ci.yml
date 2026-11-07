@@ -46,6 +46,19 @@ jobs:
             exit 1
           fi
 
+      # CreateArchiveSheet 曾经定义了两个月却从没挂到界面上，
+      # pendingCreate 设了没人看——编译器不会报，只能靠这条拦住
+      - name: 检查视图接线
+        run: |
+          for v in CreateArchiveSheet BatchSheet TaskCard; do
+            n=$(grep -rn "$v(" Sources/ --include=*.swift | grep -v "struct $v" | wc -l | tr -d ' ')
+            if [ "$n" -lt 1 ]; then
+              echo "::error::$v 定义了但没有调用点，功能是断的"
+              exit 1
+            fi
+            echo "$v 调用点 $n"
+          done
+
       - name: 并发严格检查
         run: |
           # 输出落文件再转成 ::error::，失败时不用抓日志就能看到具体哪一行
