@@ -81,9 +81,12 @@ final class ThumbnailStore: ObservableObject {
                 Task { @MainActor in self.inFlight.remove(key as String) }
                 return
             }
+            // 渲染要读这个临时文件；这段期间清缓存不能把它删了
+            ScratchUsage.shared.beginWork()
             Task.detached(priority: .utility) {
                 let image = Self.render(url: url, ext: ext, maxPixel: maxPixel)
                 await MainActor.run {
+                    ScratchUsage.shared.endWork()
                     self.inFlight.remove(key as String)
                     guard let image else {
                         self.failed.insert(key as String)
@@ -118,9 +121,11 @@ final class ThumbnailStore: ObservableObject {
                 Task { @MainActor in self.inFlight.remove(key as String) }
                 return completion(nil)
             }
+            ScratchUsage.shared.beginWork()
             Task.detached(priority: .utility) {
                 let image = Self.render(url: url, ext: ext, maxPixel: maxPixel)
                 await MainActor.run {
+                    ScratchUsage.shared.endWork()
                     self.inFlight.remove(key as String)
                     if let image {
                         self.cache.setObject(CGImageBox(image), forKey: key)

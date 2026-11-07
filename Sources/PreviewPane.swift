@@ -41,6 +41,8 @@ struct PreviewPane: View {
         }
         .background(Color(nsColor: .textBackgroundColor))
         .task(id: previewKey) { await load() }
+        // 面板收起来（隐藏详情栏 / 关窗）时释放对临时文件的占用
+        .onDisappear { reset() }
     }
 
     private var header: some View {
@@ -304,6 +306,10 @@ struct PreviewPane: View {
 
     private func reset() {
         zoom = 0
+        // 内嵌预览会一直读这个临时文件：音视频由 AVPlayer 边播边读，
+        // 而解压 worker 早就结束了——不 hold 的话，清缓存会把正在播的文件删掉。
+        // 换条目、取消选中、收起面板都走这里，占用跟着释放。
+        if let payload { ScratchUsage.shared.release(payload) }
         payload = nil; image = nil; text = nil; pdf = nil
         player?.pause()
         player = nil
@@ -329,6 +335,9 @@ struct PreviewPane: View {
         guard !Task.isCancelled, selectedEntry?.id == token else { return }
         loading = false
         guard let url else { return }
+        // 登记占用再挂到界面上：此时解压 worker 已结束，
+        // 只剩「界面还在用」这一条线索能挡住清缓存
+        ScratchUsage.shared.hold(url)
         payload = url
 
         let ext = entry.ext
