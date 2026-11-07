@@ -32,7 +32,7 @@ xcrun swiftc -O -swift-version 5 \
     -target arm64-apple-macos14.0 \
     -framework UserNotifications \
     -o build/rrzip-tests \
-    "${ARCHIVE_CORE[@]}" "${SHARED_STATE[@]}" "${FINDER_CORE[@]}" \
+    "${ARCHIVE_CORE[@]}" "${SHARED_STATE[@]}" "${APP_ONLY[@]}" "${FINDER_CORE[@]}" \
     Sources/Model.swift Sources/Palette.swift Sources/Batch.swift Sources/Thumbnails.swift \
     Tests/*.swift
 

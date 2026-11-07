@@ -100,3 +100,38 @@ enum ArchiveService {
         }
     }
 }
+
+// MARK: - 系统「服务」入口
+
+/// 服务菜单（App.swift 的 `extractHereWithRrzip`）解压时的落点与冲突策略。
+///
+/// 与访达右键的「解压到此处」对齐：解到包所在目录，同名文件一律跳过。
+///
+/// 单独立一个类型不是为了好看：这条入口原先直接调 `ArchiveService.extract`，
+/// 而那个方法的默认策略是 `.overwrite`，等于用户在访达里点「用 rrzip 解压到此处」
+/// 就把同目录里同名文件静默换掉了。服务入口没有确认界面、没有进度、没有回滚，
+/// 替用户做这个决定就是丢数据。
+///
+/// 抽出来还多一个好处：`App.swift` 不在测试编译范围内，
+/// 逻辑留在这里才能真正被测试覆盖到（见 Tests/SettingsTests.swift）。
+struct ServiceExtractPlan: Equatable, Sendable {
+    let destination: URL
+    let onConflict: ArchiveConflictPolicy
+}
+
+enum ServiceExtraction {
+
+    /// 服务入口的固定语义：解到包旁边，已存在的同名文件不碰
+    static func plan(for archive: URL) -> ServiceExtractPlan {
+        ServiceExtractPlan(destination: archive.deletingLastPathComponent(),
+                           onConflict: .skip)
+    }
+
+    /// 服务入口执行解压。`password` 目前恒为 nil（服务菜单收不到密码），
+    /// 留参数是为了和 ArchiveService.extract 的签名对齐，不额外造分支。
+    static func extract(_ archive: URL, password: String? = nil) throws {
+        let plan = plan(for: archive)
+        try ArchiveService.extract(archive, entries: [], to: plan.destination,
+                                   password: password, onConflict: plan.onConflict)
+    }
+}
