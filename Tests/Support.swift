@@ -23,12 +23,14 @@ let fixtures = URL(fileURLWithPath: CommandLine.arguments[1])
 
 /// 跑主线程 runloop 直到条件成立或超时。测试里等队列里的异步任务用，
 /// 别用固定 sleep：机器快慢不一样，固定等待不是慢就是脆。
+/// interval 可调小，用来抓「进程刚好在跑」这种短窗口。
 @discardableResult
-func waitUntil(_ seconds: TimeInterval = 15, _ condition: () -> Bool) -> Bool {
+func waitUntil(_ seconds: TimeInterval = 15, interval: TimeInterval = 0.02,
+               _ condition: () -> Bool) -> Bool {
     let deadline = Date().addingTimeInterval(seconds)
     while Date() < deadline {
         if condition() { return true }
-        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        RunLoop.current.run(until: Date().addingTimeInterval(interval))
     }
     return condition()
 }

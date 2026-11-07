@@ -164,6 +164,13 @@ struct StashItem: Identifiable, Hashable {
     var displaySize: String { ByteFormatter.string(size) }
 }
 
+/// 一次暂存导出的结果
+struct StashExport {
+    let url: URL
+    /// 目标已有同名文件，按「不覆盖」跳过了
+    let skipped: Bool
+}
+
 /// 首页「最近打开」的一条。非沙盒应用按路径记就够，失效时置灰提示。
 struct RecentArchive: Identifiable, Codable, Hashable {
     var id: String { path }
@@ -1229,62 +1236,141 @@ final class ArchiveModel: ObservableObject {
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let destination = panel.url else { return }
+        exportStash(to: destination)
+    }
 
+    /// 落点已定时的导出入口：面板走上面那个，测试直接调这个。
+    /// 和压缩、暂存打包共用同一条队列，取消只停自己。
+    func exportStash(to destination: URL) {
+        guard !stash.isEmpty else { return }
         let items = stash
         let passwordMap = passwords
         let layout = stashLayout
-        isLoading = true
-        status = "正在导出 \(items.count) 项…"
-        Task {
-            var failed = 0
-            for item in items {
-                do {
-                    try await Task.detached(priority: .userInitiated) {
-                        _ = try Self.exportStashItem(item, to: destination, layout: layout,
-                                                     password: passwordMap[item.archive.path])
-                    }.value
-                } catch {
-                    failed += 1
-                }
-            }
-            isLoading = false
-            status = failed == 0 ? "已导出 \(items.count) 项" : "导出完成，\(failed) 项失败"
-            if failed == 0 { stash.removeAll(); isStashVisible = false }
+        submitJob(title: "正在导出暂存", detail: "\(items.count) 项") { [weak self] jobID in
+            guard let self else { return .cancelled }
+            return await self.runStashExportJob(to: destination, items: items,
+                                                passwords: passwordMap,
+                                                layout: layout, jobID: jobID)
         }
     }
 
-    /// 单个暂存项的落盘：按布局决定目标目录，平铺时用临时目录过渡并去重
-    nonisolated static func exportStashItem(_ item: StashItem, to destination: URL,
-                                           layout: StashLayout, password: String?) throws -> URL {
+    private func runStashExportJob(to destination: URL, items: [StashItem],
+                                   passwords passwordMap: [String: String],
+                                   layout: StashLayout, jobID: UUID) async -> JobResult {
+        var exported = 0
+        /// 目标已存在、按「不覆盖」跳过的
+        var skipped: [String] = []
+        /// 真的失败了的，连原因一起记
+        var failed: [String] = []
+
+        do {
+            for (index, item) in items.enumerated() {
+                if TaskRegistry.wasCancelled(jobID) { throw ArchiveError.cancelled }
+                status = "正在导出 \(index + 1)/\(items.count)…"
+                do {
+                    let outcome = try await Task.detached(priority: .userInitiated) {
+                        try Self.exportStashItem(item, to: destination, layout: layout,
+                                                 password: passwordMap[item.archive.path],
+                                                 jobID: jobID)
+                    }.value
+                    if outcome.skipped { skipped.append(item.name) } else { exported += 1 }
+                } catch ArchiveError.cancelled {
+                    throw ArchiveError.cancelled
+                } catch {
+                    failed.append("\(item.name)：\(error.localizedDescription)")
+                }
+            }
+        } catch ArchiveError.cancelled {
+            // 和导出到一半的目录一样，这里只能如实说，不假装干净
+            status = "已取消，目标目录可能留有部分已导出文件"
+            return .cancelled
+        } catch {
+            status = "导出失败"
+            return .failed(error.localizedDescription)
+        }
+
+        if !skipped.isEmpty {
+            // 状态栏放不下长长的名单，浮条里说清楚哪些没导
+            notice = "未覆盖已存在的文件：" + Self.previewList(skipped)
+        }
+        if !failed.isEmpty {
+            status = exported > 0 ? "已导出 \(exported) 项 · \(failed.count) 项失败"
+                                  : "导出失败"
+            return .failed("这些没导出来：\n" + Self.previewList(failed, limit: 5))
+        }
+
+        status = skipped.isEmpty ? "已导出 \(exported) 项"
+                                 : "已导出 \(exported) 项 · \(skipped.count) 项已存在，未覆盖"
+        // 有跳过就留着暂存项：用户可能想换个目录再导一次
+        if skipped.isEmpty { stash.removeAll(); isStashVisible = false }
+        return .succeeded
+    }
+
+    /// 「a、b、c 等 N 项」——错误框和浮条共用
+    nonisolated static func previewList(_ names: [String], limit: Int = 3) -> String {
+        let head = names.prefix(limit).joined(separator: "、")
+        return names.count > limit ? "\(head) 等 \(names.count) 项" : head
+    }
+
+    /// 把临时解出来的文件放进目标位置。目标已存在时不覆盖，返回 false。
+    ///
+    /// 用 move 而不是「先查再改名」：move 遇到同名目标自己就失败，
+    /// 查完到落位之间被别人建了文件也不会盖掉——这正是「预检查之后才出现」
+    /// 那条竞态的兜底，也是能稳定测到的那条路径。
+    nonisolated static func installExport(_ produced: URL, to target: URL) throws -> Bool {
         let fm = FileManager.default
+        do {
+            try fm.moveItem(at: produced, to: target)
+            return true
+        } catch {
+            if fm.fileExists(atPath: target.path) { return false }
+            throw error
+        }
+    }
+
+    /// 单个暂存项的落盘：按布局决定落点。
+    /// 先解到目标同卷的隐藏目录，再 move 过去——同卷是改名，不额外拷一份；
+    /// 取消或失败时目标目录里一个字节都不会出现，只留下待删的临时目录。
+    nonisolated static func exportStashItem(_ item: StashItem, to destination: URL,
+                                           layout: StashLayout, password: String?,
+                                           jobID: UUID? = nil) throws -> StashExport {
+        let fm = FileManager.default
+
+        let target: URL
         switch layout {
         case .perArchive:
-            let folder = destination
+            target = destination
                 .appendingPathComponent(item.archive.deletingPathExtension().lastPathComponent,
                                         isDirectory: true)
-            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
-            try ArchiveService.extract(item.archive, entries: [item.path], to: folder,
-                                       password: password)
-            return folder.appendingPathComponent(item.path)
-
+                .appendingPathComponent(item.path)
         case .original:
-            try ArchiveService.extract(item.archive, entries: [item.path], to: destination,
-                                       password: password)
-            return destination.appendingPathComponent(item.path)
-
+            target = destination.appendingPathComponent(item.path)
         case .flat:
-            // 先解到临时目录，再挑一个不撞名的地方放进去
-            let staging = fm.temporaryDirectory
-                .appendingPathComponent("rrzip-flat-\(UUID().uuidString)", isDirectory: true)
-            try fm.createDirectory(at: staging, withIntermediateDirectories: true)
-            defer { try? fm.removeItem(at: staging) }
-            try ArchiveService.extract(item.archive, entries: [item.path], to: staging,
-                                       password: password)
-            let produced = staging.appendingPathComponent(item.path)
-            let target = uniqueOutput(destination.appendingPathComponent(produced.lastPathComponent))
-            try fm.moveItem(at: produced, to: target)
-            return target
+            target = uniqueOutput(destination.appendingPathComponent(
+                (item.path as NSString).lastPathComponent))
         }
+
+        // 早跳过：已经存在就别为必被丢弃的文件白解一遍
+        if fm.fileExists(atPath: target.path) { return StashExport(url: target, skipped: true) }
+
+        try fm.createDirectory(at: target.deletingLastPathComponent(),
+                               withIntermediateDirectories: true)
+        let staging = target.deletingLastPathComponent()
+            .appendingPathComponent(".rrzip-export-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: staging) }
+
+        try ArchiveService.extract(item.archive, entries: [item.path], to: staging,
+                                   password: password, jobID: jobID)
+        let produced = staging.appendingPathComponent(item.path)
+        // 引擎返回 0 但文件不在（条目名对不上时会这样），不能算导出成功
+        guard fm.fileExists(atPath: produced.path) else {
+            throw ArchiveError.tool("「\(item.name)」没有解出来")
+        }
+        guard try installExport(produced, to: target) else {
+            return StashExport(url: target, skipped: true)
+        }
+        return StashExport(url: target, skipped: false)
     }
 
     /// 把暂存项打包成一个新的 zip
