@@ -64,14 +64,28 @@ struct ContentView: View {
                 showWelcome = true
             }
             .onAppear { layoutWindowOnAppear() }
+            .sheet(item: $model.pendingCreate) { pending in
+                CreateArchiveSheet(itemCount: pending.items.count) { options in
+                    model.pendingCreate = nil
+                    // 等 sheet 收完再弹保存面板，两个模态同帧会打架
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        model.finishCreate(options, items: pending.items)
+                    }
+                } onCancel: {
+                    model.pendingCreate = nil
+                }
+                .preferredColorScheme(model.appearance.scheme)
+            }
             .sheet(item: $model.batchRequest) { request in
                 BatchSheet(urls: request.urls, mode: request.mode)
+                    .preferredColorScheme(model.appearance.scheme)
             }
             .sheet(isPresented: $showWelcome) {
                 WelcomeView { remember in
                     if remember { welcomeSeenVersion = WelcomeView.minorVersion(WelcomeView.version) }
                     showWelcome = false
                 }
+                .preferredColorScheme(model.appearance.scheme)
             }
             .alert("出错了", isPresented: Binding(
                 get: { model.errorMessage != nil },
