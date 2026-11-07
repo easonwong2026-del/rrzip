@@ -249,6 +249,61 @@ func runCompressTests() {
     testCompressLevelEffect()
     testDuplicateNames()
     testVolumeCommit()
+    testVolumeEndToEnd()
     testProgress()
     testCompressPaths()
+}
+
+/// 分卷覆盖端到端：同名再压一次，产物必须被替换且能解开（新内容）
+func testVolumeEndToEnd() {
+    do {
+        print("分卷覆盖端到端")
+        guard SevenZip.isAvailable else {
+            print("  - 跳过：7zz 不可用")
+            return
+        }
+        let fm = FileManager.default
+        let dir = fixtures.appendingPathComponent("vol-e2e-src", isDirectory: true)
+        try? fm.removeItem(at: dir)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let text = String(repeating: "volume overwrite check 0123456789\n", count: 120_000)
+        try text.write(to: dir.appendingPathComponent("big.txt"), atomically: true, encoding: .utf8)
+
+        let out = fixtures.appendingPathComponent("vol-e2e.zip")
+        for f in ArchiveModel.volumeFiles(of: out) { try? fm.removeItem(at: f) }
+        try? fm.removeItem(at: out)
+
+        // store + 256k：保证真的切成多卷（标准压缩后只有几十 KB，切不开）
+        try ArchiveModel.writeArchive(at: out, from: [dir], format: .zip,
+                                      password: "", volume: "256k", level: 0)
+        let first = ArchiveModel.volumeFiles(of: out)
+        expect(first.count >= 2, "分卷切出多个文件", "\(first.count) 个：\(first.map(\.lastPathComponent))")
+
+        // 换内容再压一次同名
+        try "SECOND".write(to: dir.appendingPathComponent("marker.txt"),
+                           atomically: true, encoding: .utf8)
+        try ArchiveModel.writeArchive(at: out, from: [dir], format: .zip,
+                                      password: "", volume: "256k", level: 0)
+        let second = ArchiveModel.volumeFiles(of: out)
+        expect(!second.isEmpty, "覆盖后仍有分卷", "\(second.map(\.lastPathComponent))")
+        let leftovers = ((try? fm.contentsOfDirectory(atPath: fixtures.path)) ?? [])
+            .filter { $0.contains(".rrzip-old-") }
+        expect(leftovers.isEmpty, "覆盖后无备份残留", leftovers.joined(separator: ","))
+
+        // 最关键：覆盖后的包能不能解开，且是第二次的内容
+        let dest = fixtures.appendingPathComponent("vol-e2e-out", isDirectory: true)
+        try? fm.removeItem(at: dest)
+        // 分卷包没有 abc.zip 这个实体，必须用 .001 打开
+        guard let firstVolume = second.first else {
+            expect(false, "找不到分卷入口")
+            return
+        }
+        try SevenZip.extract(firstVolume, entries: [], to: dest, password: nil)
+        let marker = dest.appendingPathComponent("vol-e2e-src/marker.txt")
+        expect(fm.fileExists(atPath: marker.path), "覆盖后的分卷能解开")
+        let value = (try? String(contentsOf: marker, encoding: .utf8)) ?? ""
+        expect(value == "SECOND", "解开的是新内容", value)
+    } catch {
+        expect(false, "分卷覆盖端到端 抛出异常", "\(error)")
+    }
 }
