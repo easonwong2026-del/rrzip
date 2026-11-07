@@ -11,6 +11,9 @@ final class QuickLookController: NSObject, QLPreviewPanelDataSource, QLPreviewPa
     static let shared = QuickLookController()
 
     private var previewURL: URL?
+    /// 面板被系统关掉（Esc 由面板自己处理、点关闭按钮）时也要释放占用，
+    /// 不能只指望我们自己的 close()
+    private var observingPanel = false
 
     var isVisible: Bool { QLPreviewPanel.shared()?.isVisible ?? false }
 
@@ -20,6 +23,26 @@ final class QuickLookController: NSObject, QLPreviewPanelDataSource, QLPreviewPa
         if let current = previewURL { ScratchUsage.shared.release(current) }
         previewURL = url
         if let url { ScratchUsage.shared.hold(url) }
+    }
+
+    /// 面板是共享单例，观察一次就够。
+    /// 用 ObjC 原始通知名：这个 SDK 里 NSWindow 没有对应的 Swift 静态常量。
+    private func observe(_ panel: QLPreviewPanel) {
+        guard !observingPanel else { return }
+        observingPanel = true
+        let center = NotificationCenter.default
+        let names: [Notification.Name] = [
+            NSWindow.willCloseNotification,
+            Notification.Name("NSWindowDidOrderOffScreenNotification")
+        ]
+        for name in names {
+            center.addObserver(self, selector: #selector(panelDidDismiss),
+                               name: name, object: panel)
+        }
+    }
+
+    @objc private func panelDidDismiss() {
+        setPreviewURL(nil)
     }
 
     func toggle(entry: ArchiveEntry?, model: ArchiveModel) {
@@ -37,6 +60,7 @@ final class QuickLookController: NSObject, QLPreviewPanelDataSource, QLPreviewPa
                 NSWorkspace.shared.open(url)      // 兜底：交给系统默认程序
                 return
             }
+            self.observe(panel)
             panel.dataSource = self
             panel.delegate = self
             panel.makeKeyAndOrderFront(nil)

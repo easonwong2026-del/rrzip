@@ -107,10 +107,13 @@ final class ScratchUsage: @unchecked Sendable {
         return holds.keys.contains { $0.hasPrefix(prefix) }
     }
 
-    /// 路径比较必须先抹平软链接：`contentsOfDirectory` 返回的是真实路径
-    /// （/private/var/…），而调用方手里常是 /var/…，直接比字符串永远不相等。
+    /// 路径比较前先归一：
+    /// - 抹平软链接（`contentsOfDirectory` 给 `/private/var/…`，调用方手里是 `/var/…`）；
+    /// - 统一 Unicode 组合形式（APFS 存 NFD，Swift 字面量常是 NFC，
+    ///   中文/带重音的文件名直接比会不相等，保护就静默失效了）。
     private static func canonical(_ path: String) -> String {
         URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+            .precomposedStringWithCanonicalMapping
     }
 
     var isEmpty: Bool {

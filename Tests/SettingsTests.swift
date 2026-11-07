@@ -411,6 +411,66 @@ func testCacheUnreadableRoot() {
     }
 }
 
+/// 内嵌预览持续显示期间清缓存：文件不能被删
+func testCacheWhilePreviewVisible() {
+    do {
+        print("清理缓存 · 内嵌预览")
+        let fm = FileManager.default
+        ScratchUsage.shared.reset()
+        let zip = fixtures.appendingPathComponent("basic.zip")
+        let root = fixtures.appendingPathComponent("cache-preview", isDirectory: true)
+        try? fm.removeItem(at: root)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+
+        // 复刻真实顺序：预览面板已经把条目解到临时目录，解压 worker 已结束
+        let folderA = root.appendingPathComponent("preview-a", isDirectory: true)
+        try fm.createDirectory(at: folderA, withIntermediateDirectories: true)
+        try ArchiveService.extract(zip, entries: ["说明.txt"], to: folderA, password: nil)
+        let shown = folderA.appendingPathComponent("说明.txt")
+        expect(fm.fileExists(atPath: shown.path), "预览副本已解出")
+
+        // 详情栏挂上这个 URL → 登记占用（PreviewPane.load 就是这么做的）
+        ScratchUsage.shared.hold(shown)
+        expect(!ScratchUsage.shared.isWorking, "解压已结束，只剩界面占用这一条线索")
+
+        let first = CacheMaintenance.purge([root], busy: false)
+        expect(!first.blocked, "不整体拒绝：只跳过被占用的那个")
+        expect(first.inUse == 1, "占用的预览文件被登记", "\(first.inUse)")
+        expect(fm.fileExists(atPath: shown.path), "正在显示的文件没被删")
+        let text = (try? String(contentsOf: shown, encoding: .utf8)) ?? ""
+        expect(text.contains("hello"), "内容完整，音视频不会被抽走底下的文件", text)
+
+        // 预览一直开着，用户又点了一次清理
+        let second = CacheMaintenance.purge([root], busy: false)
+        expect(fm.fileExists(atPath: shown.path), "持续显示期间反复清理都不删")
+        expect(second.inUse == 1, "每次都如实报「正在使用」")
+        expect(second.freedBytes == 0, "没有别的可清时就是 0", "\(second.freedBytes)")
+
+        // 切换条目：旧的释放、新的占用（新条目自己解一份）
+        ScratchUsage.shared.release(shown)
+        let folderB = root.appendingPathComponent("preview-b", isDirectory: true)
+        try fm.createDirectory(at: folderB, withIntermediateDirectories: true)
+        try ArchiveService.extract(zip, entries: ["带 空格.txt"], to: folderB, password: nil)
+        let next = folderB.appendingPathComponent("带 空格.txt")
+        expect(fm.fileExists(atPath: next.path), "新条目的副本已解出")
+        ScratchUsage.shared.hold(next)
+        let third = CacheMaintenance.purge([root], busy: false)
+        expect(!fm.fileExists(atPath: shown.path), "切走之后旧副本可以清掉")
+        expect(fm.fileExists(atPath: next.path), "新条目的副本保留")
+
+        // 收起详情栏 / 关闭预览：释放后能清空
+        ScratchUsage.shared.release(next)
+        let fourth = CacheMaintenance.purge([root], busy: false)
+        expect(fourth.inUse == 0, "释放后不再有占用")
+        expect(((try? fm.contentsOfDirectory(atPath: root.path)) ?? []).isEmpty, "目录清空")
+
+        ScratchUsage.shared.reset()
+        try? fm.removeItem(at: root)
+    } catch {
+        expect(false, "清理缓存·内嵌预览 抛出异常", "\(error)")
+    }
+}
+
 func runSettingsTests() {
     testServiceExtraction()
     testFinderSettingsStore()
@@ -420,5 +480,6 @@ func runSettingsTests() {
     testCacheInFlightPreview()
     testCacheHeldPreviewFile()
     testCacheUnreadableRoot()
+    testCacheWhilePreviewVisible()
     testFinderConfigCompat()
 }
