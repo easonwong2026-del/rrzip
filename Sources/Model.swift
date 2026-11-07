@@ -1312,52 +1312,65 @@ final class ArchiveModel: ObservableObject {
         return names.count > limit ? "\(head) 等 \(names.count) 项" : head
     }
 
-    /// 单个暂存项的落盘：按布局决定目标目录，平铺时用临时目录过渡并去重。
-    /// 目标已有同名文件时不覆盖——直接报 skipped，交给调用方说明。
+    /// 把临时解出来的文件放进目标位置。目标已存在时不覆盖，返回 false。
+    ///
+    /// 用 move 而不是「先查再改名」：move 遇到同名目标自己就失败，
+    /// 查完到落位之间被别人建了文件也不会盖掉——这正是「预检查之后才出现」
+    /// 那条竞态的兜底，也是能稳定测到的那条路径。
+    nonisolated static func installExport(_ produced: URL, to target: URL) throws -> Bool {
+        let fm = FileManager.default
+        do {
+            try fm.moveItem(at: produced, to: target)
+            return true
+        } catch {
+            if fm.fileExists(atPath: target.path) { return false }
+            throw error
+        }
+    }
+
+    /// 单个暂存项的落盘：按布局决定落点。
+    /// 先解到目标同卷的隐藏目录，再 move 过去——同卷是改名，不额外拷一份；
+    /// 取消或失败时目标目录里一个字节都不会出现，只留下待删的临时目录。
     nonisolated static func exportStashItem(_ item: StashItem, to destination: URL,
                                            layout: StashLayout, password: String?,
                                            jobID: UUID? = nil) throws -> StashExport {
         let fm = FileManager.default
+
+        let target: URL
         switch layout {
         case .perArchive:
-            let folder = destination
+            target = destination
                 .appendingPathComponent(item.archive.deletingPathExtension().lastPathComponent,
                                         isDirectory: true)
-            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
-            let target = folder.appendingPathComponent(item.path)
-            if fm.fileExists(atPath: target.path) { return StashExport(url: target, skipped: true) }
-            // onConflict: .skip 是第二道保险：检查完到解出来之间文件被别处建了也不覆盖
-            try ArchiveService.extract(item.archive, entries: [item.path], to: folder,
-                                       password: password, onConflict: .skip, jobID: jobID)
-            // 引擎返回 0 但文件不在（条目名对不上时会这样），不能算导出成功
-            guard fm.fileExists(atPath: target.path) else {
-                throw ArchiveError.tool("「\(item.name)」没有解出来")
-            }
-            return StashExport(url: target, skipped: false)
-
+                .appendingPathComponent(item.path)
         case .original:
-            let target = destination.appendingPathComponent(item.path)
-            if fm.fileExists(atPath: target.path) { return StashExport(url: target, skipped: true) }
-            try ArchiveService.extract(item.archive, entries: [item.path], to: destination,
-                                       password: password, onConflict: .skip, jobID: jobID)
-            guard fm.fileExists(atPath: target.path) else {
-                throw ArchiveError.tool("「\(item.name)」没有解出来")
-            }
-            return StashExport(url: target, skipped: false)
-
+            target = destination.appendingPathComponent(item.path)
         case .flat:
-            // 先解到临时目录，再挑一个不撞名的地方放进去
-            let staging = fm.temporaryDirectory
-                .appendingPathComponent("rrzip-flat-\(UUID().uuidString)", isDirectory: true)
-            try fm.createDirectory(at: staging, withIntermediateDirectories: true)
-            defer { try? fm.removeItem(at: staging) }
-            try ArchiveService.extract(item.archive, entries: [item.path], to: staging,
-                                       password: password, jobID: jobID)
-            let produced = staging.appendingPathComponent(item.path)
-            let target = uniqueOutput(destination.appendingPathComponent(produced.lastPathComponent))
-            try fm.moveItem(at: produced, to: target)
-            return StashExport(url: target, skipped: false)
+            target = uniqueOutput(destination.appendingPathComponent(
+                (item.path as NSString).lastPathComponent))
         }
+
+        // 早跳过：已经存在就别为必被丢弃的文件白解一遍
+        if fm.fileExists(atPath: target.path) { return StashExport(url: target, skipped: true) }
+
+        try fm.createDirectory(at: target.deletingLastPathComponent(),
+                               withIntermediateDirectories: true)
+        let staging = target.deletingLastPathComponent()
+            .appendingPathComponent(".rrzip-export-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: staging) }
+
+        try ArchiveService.extract(item.archive, entries: [item.path], to: staging,
+                                   password: password, jobID: jobID)
+        let produced = staging.appendingPathComponent(item.path)
+        // 引擎返回 0 但文件不在（条目名对不上时会这样），不能算导出成功
+        guard fm.fileExists(atPath: produced.path) else {
+            throw ArchiveError.tool("「\(item.name)」没有解出来")
+        }
+        guard try installExport(produced, to: target) else {
+            return StashExport(url: target, skipped: true)
+        }
+        return StashExport(url: target, skipped: false)
     }
 
     /// 把暂存项打包成一个新的 zip

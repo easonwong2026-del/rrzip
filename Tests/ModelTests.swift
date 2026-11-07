@@ -913,6 +913,23 @@ func testStashExportDoesNotOverwrite() {
                flattened.url.lastPathComponent)
         let keptFlat = (try? Data(contentsOf: flat.appendingPathComponent("说明.txt"))) ?? Data()
         expect(keptFlat == old, "平铺也不碰旧文件")
+
+        // 预检查通过、落位时目标才出现：move 自己会失败，不会覆盖也不算成功
+        let staged = fixtures.appendingPathComponent("export-install-src.txt")
+        let late = fixtures.appendingPathComponent("export-install-dst.txt")
+        try Data("新内容".utf8).write(to: staged)
+        try Data("旧内容".utf8).write(to: late)
+        let installed = try ArchiveModel.installExport(staged, to: late)
+        expect(!installed, "落位时目标已存在 → 拒绝")
+        let keptLate = (try? Data(contentsOf: late)) ?? Data()
+        expect(keptLate == Data("旧内容".utf8), "旧内容没被盖掉")
+        expect(FileManager.default.fileExists(atPath: staged.path), "被拒时临时文件还在（调用方清）")
+
+        // 目标不存在时正常落位
+        let free = fixtures.appendingPathComponent("export-install-free.txt")
+        try? FileManager.default.removeItem(at: free)
+        expect(try ArchiveModel.installExport(staged, to: free), "目标不存在时正常落位")
+        expect((try? Data(contentsOf: free)) == Data("新内容".utf8), "内容对得上")
     } catch {
         expect(false, "暂存导出不覆盖 抛出异常", "\(error)")
     }
@@ -978,6 +995,67 @@ func testStashExportReportsFailures() {
     }
 }
 
+/// 大文件写到一半取消：目标位置不出现残缺文件，暂存项留着，还能再导一次
+func testStashExportCancelMidWrite() {
+    MainActor.assumeIsolated {
+        print("导出中途取消")
+        guard SevenZip.isAvailable else {
+            print("  - 跳过：7zz 不可用")
+            return
+        }
+
+        let root = fixtures.appendingPathComponent("export-mid", isDirectory: true)
+        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let src = root.appendingPathComponent("big", isDirectory: true)
+        try? FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        makeNoiseFile(at: src.appendingPathComponent("big.bin"), megabytes: 40)
+
+        // 存储级别：建包快，解压有几十毫秒的写入窗口，够在进程没退出时按取消
+        let archive = root.appendingPathComponent("bigpack.7z")
+        do {
+            try SevenZip.create(at: archive, from: [src], format: "7z",
+                                password: nil, volume: nil, level: 0)
+        } catch {
+            expect(false, "准备大包", "\(error)")
+            return
+        }
+
+        let dest = root.appendingPathComponent("out", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+
+        let model = ArchiveModel()
+        model.addToStash(archive: archive, path: "big/big.bin", size: 40 * 1024 * 1024)
+        model.exportStash(to: dest)
+
+        // 等引擎真的跑起来再取消——不是任务刚提交就按
+        let caught = waitUntil(15, interval: 0.002) { TaskRegistry.hasProcess }
+        expect(caught, "取消时引擎正在跑（真的写到一半）")
+        model.cancelJob()
+
+        expect(waitUntil(15) { model.job == nil }, "任务结束")
+        expect(model.status.hasPrefix("已取消"), "状态是取消，不是成功", model.status)
+
+        // .perArchive：目标/包名/包内路径
+        let target = dest.appendingPathComponent("bigpack/big/big.bin")
+        expect(!FileManager.default.fileExists(atPath: target.path), "目标位置没有残缺文件")
+        let leftovers = ((try? FileManager.default.contentsOfDirectory(
+            atPath: dest.appendingPathComponent("bigpack").path)) ?? [])
+            .filter { $0.hasPrefix(".rrzip-export-") }
+        expect(leftovers.isEmpty, "临时目录已清理", leftovers.joined(separator: ","))
+        expect(model.stash.count == 1, "取消后暂存项还在")
+
+        // 再来一次：能完整导出来
+        model.exportStash(to: dest)
+        expect(waitUntil(15) { model.job == nil }, "重试结束")
+        expect(FileManager.default.fileExists(atPath: target.path), "重试后文件到位")
+        let attrs = (try? FileManager.default.attributesOfItem(atPath: target.path)) ?? [:]
+        let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+        expect(size == 40 * 1024 * 1024, "重试后文件完整", "\(size)")
+        expect(model.stash.isEmpty, "成功后暂存清空")
+    }
+}
+
 func runModelTests() {
     testBatchDestination()
     testOpenGate()
@@ -996,6 +1074,7 @@ func runModelTests() {
     testStashExportDoesNotOverwrite()
     testStashExportQueuesAndCancels()
     testStashExportReportsFailures()
+    testStashExportCancelMidWrite()
     testWorkspaceMode()
     testHome()
     testArchiveService()
