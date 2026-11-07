@@ -66,6 +66,22 @@ enum SafeSave {
             throw SaveAsError.commitFailed(reason)
         }
     }
+
+    /// 界面用的版本：复制与提交都在后台线程，主线程只等结果。
+    ///
+    /// `copyItem` 在本机同卷时很快（APFS 走 clone），但目标是外置盘、网络盘时
+    /// 就是实打实的几秒——放在主线程上是整窗转菊花，连取消都点不到。
+    ///
+    /// 复制期间登记一个 worker：清缓存看到 worker 会整体跳过，
+    /// 否则源副本被删掉，`copyItem` 直接失败，用户只看到一句「保存失败」。
+    /// 成功、失败、任务取消都走同一个 defer，计数不会漏。
+    nonisolated static func commitInBackground(_ source: URL, to destination: URL) async throws {
+        ScratchUsage.shared.beginWork()
+        defer { ScratchUsage.shared.endWork() }
+        try await Task.detached(priority: .userInitiated) {
+            try commit(source, to: destination)
+        }.value
+    }
 }
 
 /// 三个界面入口共用的流程：保存面板 → 取临时副本 → 安全提交 → 结果反馈。
@@ -98,7 +114,8 @@ enum SaveAsFlow {
                 return
             }
             do {
-                try SafeSave.commit(payload, to: destination)
+                // 复制不在主线程：大文件 + 外置盘时不会把窗口卡住
+                try await SafeSave.commitInBackground(payload, to: destination)
                 model.notice = "已保存「\(destination.lastPathComponent)」"
             } catch {
                 model.errorMessage = "保存「\(entry.name)」失败。\n\(error.localizedDescription)\n目标位置未改动。"

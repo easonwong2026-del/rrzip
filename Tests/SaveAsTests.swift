@@ -107,3 +107,111 @@ func runSaveAsTests() {
     expect(!SaveAsFlow.allowsSingleFileExport(selectionCount: 1, isDirectory: true),
            "文件夹不可另存为")
 }
+
+/// 后台保存：复制不在主线程，期间要挡住缓存清理，结束后登记必须归零。
+/// 这条链路以前是「主线程 copyItem + 没有任何登记」：
+/// 清缓存正好撞上来时会把源副本删掉，界面只报一句「保存失败」。
+func runSaveAsBackgroundTests() {
+    let fm = FileManager.default
+    let root = fixtures.appendingPathComponent("save-as-bg", isDirectory: true)
+    try? fm.removeItem(at: root)
+    do {
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    } catch {
+        expect(false, "准备后台保存测试目录", "\(error)")
+        return
+    }
+    ScratchUsage.shared.reset()
+
+    func leftovers() -> [String] {
+        ((try? fm.contentsOfDirectory(atPath: root.path)) ?? [])
+            .filter { $0.hasPrefix(".rrzip-save-") }
+    }
+    func text(_ url: URL) -> String {
+        (try? String(contentsOf: url, encoding: .utf8)) ?? "<读不出来>"
+    }
+
+    print("另存为：后台复制与缓存清理")
+    let src = root.appendingPathComponent("payload.txt")
+    try? "PAYLOAD\n".write(to: src, atomically: true, encoding: .utf8)
+
+    // 1. 登记期间清缓存必须整体跳过，一个文件都不能动
+    let scratch = root.appendingPathComponent("scratch", isDirectory: true)
+    try? fm.createDirectory(at: scratch, withIntermediateDirectories: true)
+    let cached = scratch.appendingPathComponent("cached.txt")
+    try? "CACHED\n".write(to: cached, atomically: true, encoding: .utf8)
+
+    ScratchUsage.shared.beginWork()
+    let blocked = CacheMaintenance.purge([scratch], busy: false)
+    expect(blocked.blocked, "有保存任务在跑时清缓存被拦住")
+    expect(blocked.freedBytes == 0, "被拦住时不计已清理字节", "\(blocked.freedBytes)")
+    expect(fm.fileExists(atPath: cached.path), "被拦住时临时文件还在")
+
+    ScratchUsage.shared.endWork()
+    let after = CacheMaintenance.purge([scratch], busy: false)
+    expect(!after.blocked, "任务结束后清缓存不再被拦")
+    expect(after.freedBytes > 0, "任务结束后临时文件被清掉", "\(after.freedBytes)")
+    expect(!fm.fileExists(atPath: cached.path), "临时文件确实删掉了")
+
+    // 2. 后台保存成功：内容落盘、登记归零、不留暂存
+    let dst = root.appendingPathComponent("saved.txt")
+    var done = false
+    var failure: String?
+    Task { @MainActor in
+        do { try await SafeSave.commitInBackground(src, to: dst) } catch { failure = error.localizedDescription }
+        done = true
+    }
+    expect(waitUntil(10) { done }, "后台保存完成")
+    expect(failure == nil, "后台保存没有抛错", failure ?? "")
+    expect(text(dst) == "PAYLOAD\n", "后台保存写出的内容正确", text(dst))
+    expect(!ScratchUsage.shared.isWorking, "成功后 worker 归零")
+    expect(leftovers().isEmpty, "成功后没有暂存残留", "\(leftovers())")
+
+    // 3. 后台保存失败：目标不动、登记也要归零（不能把计数漏在那里）
+    let broken = root.appendingPathComponent("broken.txt")
+    try? "BROKEN\n".write(to: broken, atomically: true, encoding: .utf8)
+    chmod(broken.path, 0o000)
+    let keep = root.appendingPathComponent("keep.txt")
+    try? "USER-ORIGINAL\n".write(to: keep, atomically: true, encoding: .utf8)
+    var failed = false
+    var failedDone = false
+    Task { @MainActor in
+        do { try await SafeSave.commitInBackground(broken, to: keep) } catch { failed = true }
+        failedDone = true
+    }
+    expect(waitUntil(10) { failedDone }, "后台保存失败路径结束")
+    chmod(broken.path, 0o644)
+    expect(failed, "源不可读时后台保存抛错")
+    expect(text(keep) == "USER-ORIGINAL\n", "失败后目标内容原样保留", text(keep))
+    expect(!ScratchUsage.shared.isWorking, "失败后 worker 也归零")
+    expect(leftovers().isEmpty, "失败后没有暂存残留", "\(leftovers())")
+
+    // 4. 交错：复制进行中清缓存
+    // 复制本机同卷可能一瞬完成，抓不到窗口就只打一行说明——
+    // 「有 worker 就整体跳过」这条契约由第 1 组用例确定性地覆盖。
+    let tree = root.appendingPathComponent("tree", isDirectory: true)
+    try? fm.createDirectory(at: tree, withIntermediateDirectories: true)
+    for index in 0..<600 {
+        let file = tree.appendingPathComponent("f\(index).txt")
+        try? Data(repeating: UInt8(index % 251), count: 4096).write(to: file)
+    }
+    let treeDst = root.appendingPathComponent("tree-saved", isDirectory: true)
+    var treeDone = false
+    Task { @MainActor in
+        try? await SafeSave.commitInBackground(tree, to: treeDst)
+        treeDone = true
+    }
+    if waitUntil(5, interval: 0.002, { ScratchUsage.shared.isWorking }) {
+        let during = CacheMaintenance.purge([scratch], busy: false)
+        expect(during.blocked, "复制进行中清缓存被拦住")
+    } else {
+        print("  · 复制快到来不及观察，跳过错峰断言（契约已由第 1 组覆盖）")
+    }
+    expect(waitUntil(30) { treeDone }, "目录后台保存完成")
+    expect(fm.fileExists(atPath: treeDst.appendingPathComponent("f599.txt").path),
+           "目录内容完整复制")
+    expect(!ScratchUsage.shared.isWorking, "交错结束后 worker 归零")
+    expect(leftovers().isEmpty, "交错结束后没有暂存残留", "\(leftovers())")
+
+    print("另存为：后台保存完毕")
+}
