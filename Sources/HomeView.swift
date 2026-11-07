@@ -291,11 +291,21 @@ struct HomeView: View {
                 model.open(url: urls[0])
                 return
             }
-            quickResult = "正在压缩 \(urls.count) 项…"
-            model.quickCompress(urls)
-            quickResult = "已生成 ZIP"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                quickResult = nil
+            // 队列里已经有任务在跑时，这一单是排队的。文案得说实话：
+            // 之前是发起压缩后立刻写「已生成 ZIP」，包还没开始压就先报了成功。
+            quickResult = model.job == nil ? "正在压缩 \(urls.count) 项…" : "已排队，等当前任务结束…"
+            model.quickCompress(urls) { result, output in
+                let text: String
+                switch result {
+                case .succeeded: text = "已生成 \(output.lastPathComponent)"
+                case .cancelled: text = "已取消"
+                case .failed: text = "压缩失败"
+                }
+                quickResult = text
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    // 期间又拖进来一批，别把新文案提前清掉
+                    if quickResult == text { quickResult = nil }
+                }
             }
         }
     }

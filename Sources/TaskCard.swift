@@ -17,7 +17,7 @@ import UniformTypeIdentifiers
 /// 长任务的进度卡。有真实百分比就画条，没有就转圈——
 /// tar 不出进度，硬凑一个百分比比转圈更糟。
 struct TaskCard: View {
-    let task: TaskProgress
+    let job: TaskJob
     let onCancel: () -> Void
 
     var body: some View {
@@ -28,9 +28,9 @@ struct TaskCard: View {
                     .foregroundStyle(Palette.brand)
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("\(task.title)…")
+                    Text("\(job.title)…")
                         .font(.system(size: 12, weight: .medium))
-                    Text(task.detail)
+                    Text(job.detail)
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -43,7 +43,13 @@ struct TaskCard: View {
                     .controlSize(.small)
             }
 
-            if let fraction = task.fraction {
+            if job.queued > 0 {
+                Text("还有 \(job.queued) 个排队")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            if let fraction = job.fraction {
                 HStack(spacing: 8) {
                     ProgressView(value: min(max(fraction, 0), 1))
                         .tint(Palette.brand)

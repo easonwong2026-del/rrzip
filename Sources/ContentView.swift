@@ -45,7 +45,7 @@ struct ContentView: View {
             .overlay { dropOverlay }
             .overlay(alignment: .bottom) { noticeBar }
             .overlay(alignment: .bottom) { taskOverlay }
-            .animation(.easeOut(duration: 0.18), value: model.task?.title)
+            .animation(.easeOut(duration: 0.18), value: model.job?.title)
             .animation(.easeOut(duration: 0.18), value: model.notice)
             .onChange(of: model.notice) { _, newValue in scheduleNoticeClear(newValue) }
             .background(widthReader)
@@ -149,8 +149,8 @@ struct ContentView: View {
 
     @ViewBuilder
     var taskOverlay: some View {
-        if model.taskVisible, let task = model.task {
-            TaskCard(task: task) { model.cancelTask() }
+        if model.jobVisible, let job = model.job {
+            TaskCard(job: job) { model.cancelJob() }
                 .padding(.bottom, 44)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
         }

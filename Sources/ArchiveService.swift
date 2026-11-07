@@ -55,6 +55,7 @@ enum ArchiveService {
     static func extract(_ url: URL, entries: [String], to destination: URL,
                         password: String?,
                         onConflict: ArchiveConflictPolicy = .overwrite,
+                        jobID: UUID? = nil,
                         onProgress: (@Sendable (Double) -> Void)? = nil) throws {
         var lastError: Error?
         for engine in engineOrder(for: url) {
@@ -62,13 +63,18 @@ enum ArchiveService {
                 switch engine {
                 case .libarchive:
                     try Tar.extract(url, entries: entries, to: destination,
-                                     passphrase: password, keepExisting: onConflict == .skip)
+                                     passphrase: password, keepExisting: onConflict == .skip,
+                                     jobID: jobID)
                 case .sevenZip:
                     try SevenZip.extract(url, entries: entries, to: destination,
                                          password: password, skipExisting: onConflict == .skip,
-                                         onProgress: onProgress)
+                                         jobID: jobID, onProgress: onProgress)
                 }
                 return
+            } catch ArchiveError.cancelled {
+                // 用户取消不是「这个引擎不行」。被当成引擎失败去换下一个的话，
+                // 取消会变成「再战一次」——任务卡住，用户还得再按一遍。
+                throw ArchiveError.cancelled
             } catch ArchiveError.needsPassword {
                 throw ArchiveError.needsPassword
             } catch {
