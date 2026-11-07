@@ -1470,8 +1470,10 @@ final class ArchiveModel: ObservableObject {
                     }
                     return
                 } catch ArchiveError.cancelled {
-                    // 用户主动取消不是失败，不弹错误框
-                    status = "已取消"
+                    // 用户主动取消不是失败，不弹错误框。
+                    // 解压没法像压缩那样回滚：已写出的文件留在目标目录里，
+                    // 与其假装干净，不如直接说清楚。
+                    status = "已取消，目标目录可能留有部分文件"
                     isLoading = false
                     return
                 } catch let ArchiveError.tool(message) where Tar.looksEncrypted(message) {
@@ -1596,8 +1598,11 @@ final class ArchiveModel: ObservableObject {
                     level: level,
                     onProgress: onProgress
                 )
-            } else if format == .zip, items.count == 1 {
-                // 没有 7zz 时退回 ditto：会 deflate，但选不了级别
+            } else if format == .zip {
+                // 没有 7zz 时：单源还能用 ditto 撑住（deflate，但选不了级别）；
+                // 多源只剩 bsdtar 的 store，四档级别彻底失效。
+                // 与其静默给一个「压了等于没压」的包，不如明说引擎缺失。
+                guard items.count == 1 else { throw ArchiveError.engineUnavailable }
                 try Tar.createZip(at: staged, from: items[0])
             } else {
                 try Tar.create(at: staged, from: items, format: format.ext)
@@ -1613,28 +1618,88 @@ final class ArchiveModel: ObservableObject {
     nonisolated static func commitStaged(_ staged: URL, to output: URL, hasVolumes: Bool) throws {
         let fm = FileManager.default
         let folder = output.deletingLastPathComponent()
-        let stagedName = staged.lastPathComponent
-        let outName = output.lastPathComponent
 
         if hasVolumes {
-            if let siblings = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
-                for sibling in siblings where sibling.lastPathComponent.hasPrefix(outName + ".") {
-                    try? fm.removeItem(at: sibling)
+            // 旧分卷先改名成备份，不能直接删。
+            // 分卷是多文件，没有原子替换可用：以前是「先删旧的、再移新的」，
+            // 移到一半失败（磁盘满、进程被杀、权限变了）就两头空——
+            // 用户原来的包没了，新的也不完整。
+            let oldVolumes = volumeFiles(of: output)
+            let token = String(UUID().uuidString.prefix(8))
+            var backups: [(original: URL, backup: URL)] = []
+
+            for old in oldVolumes {
+                let backup = folder.appendingPathComponent(
+                    old.lastPathComponent + ".rrzip-old-" + token)
+                do {
+                    try fm.moveItem(at: old, to: backup)
+                    backups.append((old, backup))
+                } catch {
+                    // 备份都做不成，把已经改名的还回去，原样退出
+                    for (original, backup) in backups {
+                        try? fm.moveItem(at: backup, to: original)
+                    }
+                    throw error
                 }
             }
-            if let siblings = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
-                for sibling in siblings where sibling.lastPathComponent.hasPrefix(stagedName + ".") {
-                    let suffix = sibling.lastPathComponent.dropFirst(stagedName.count)
-                    try fm.moveItem(at: sibling, to: folder.appendingPathComponent(outName + suffix))
+
+            do {
+                try moveVolumeFiles(from: staged, to: output)
+            } catch {
+                // 回滚：清掉刚移进去的新分卷，再把旧分卷改回来
+                for new in volumeFiles(of: output) { try? fm.removeItem(at: new) }
+                for (original, backup) in backups {
+                    try? fm.moveItem(at: backup, to: original)
                 }
+                throw error
             }
-            if fm.fileExists(atPath: staged.path) {
-                try fm.moveItem(at: staged, to: output)
-            }
+
+            for (_, backup) in backups { try? fm.removeItem(at: backup) }
         } else if fm.fileExists(atPath: output.path) {
             _ = try fm.replaceItemAt(output, withItemAt: staged)
         } else {
             try fm.moveItem(at: staged, to: output)
+        }
+    }
+
+    /// 旧分卷：只认 `foo.zip.001` 这种纯数字后缀。
+    /// 以前用 `hasPrefix(outName + ".")`，`foo.zip.bak`、`foo.zip.old` 都会被当成分卷删掉。
+    nonisolated static func volumeFiles(of output: URL) -> [URL] {
+        let fm = FileManager.default
+        let folder = output.deletingLastPathComponent()
+        let outName = output.lastPathComponent
+        guard let siblings = try? fm.contentsOfDirectory(at: folder,
+                                                        includingPropertiesForKeys: nil) else {
+            return []
+        }
+        return siblings.filter { url in
+            let name = url.lastPathComponent
+            guard name.hasPrefix(outName + ".") else { return false }
+            let rest = name.dropFirst(outName.count + 1)
+            return !rest.isEmpty && rest.allSatisfy(\.isNumber)
+        }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    /// 把 `staged.001 / staged.002…` 依次改名成 `output.001 / output.002…`
+    nonisolated static func moveVolumeFiles(from staged: URL, to output: URL) throws {
+        let fm = FileManager.default
+        let folder = output.deletingLastPathComponent()
+        let stagedName = staged.lastPathComponent
+        let outName = output.lastPathComponent
+
+        let files = ((try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix(stagedName + ".") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        guard !files.isEmpty else {
+            // 一个分卷都没生成，说明 7zz 那边出了问题；别把旧的删了当成功
+            throw ArchiveError.tool("分卷产物缺失：\(stagedName).001")
+        }
+
+        for file in files {
+            let suffix = file.lastPathComponent.dropFirst(stagedName.count)
+            try fm.moveItem(at: file,
+                            to: folder.appendingPathComponent(outName + suffix))
         }
     }
 
@@ -1694,8 +1759,9 @@ final class ArchiveModel: ObservableObject {
             } catch ArchiveError.cancelled {
                 status = "已取消"
                 isLoading = false
-                // 取消时 7zz 会留下半个包，删掉——不然用户看到一个打不开的文件
-                try? FileManager.default.removeItem(at: output)
+                // 临时产物由 writeArchive 自己清（staged 与它的分卷）。
+                // 这里千万不能碰 output：用户可能选了一个已存在的同名包，
+                // 在「取消」这个动作上删掉它，等于把旧文件毁了。
             } catch {
                 errorMessage = error.localizedDescription
                 status = "创建失败"

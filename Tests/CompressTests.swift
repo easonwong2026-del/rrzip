@@ -52,7 +52,17 @@ func testCompressLevelEffect() {
         }
 
         let store = try makeZip(.store, name: "level-store.zip")
+        let fast = try makeZip(.fast, name: "level-fast.zip")
+        let normal = try makeZip(.normal, name: "level-normal.zip")
         let maxed = try makeZip(.max, name: "level-max.zip")
+
+        // 四档都得验。只比 store 和 max 的话，中间两档即使被忽略也看不出来。
+        expect(size(store) >= size(fast), "快速档不大于存储档",
+               "store=\(size(store)) fast=\(size(fast))")
+        expect(size(fast) >= size(normal), "标准档不大于快速档",
+               "fast=\(size(fast)) normal=\(size(normal))")
+        expect(size(normal) >= size(maxed), "极限档不大于标准档",
+               "normal=\(size(normal)) max=\(size(maxed))")
         expect(size(store) > size(maxed) * 3,
                "存储档远大于极限档", "store=\(size(store)) max=\(size(maxed))")
 
@@ -106,6 +116,57 @@ func testDuplicateNames() {
         expect(!FileManager.default.fileExists(atPath: out.path), "失败不留半个包")
     } catch {
         expect(false, "跨目录同名 抛出异常", "\(error)")
+    }
+}
+
+/// 分卷替换：失败要能回滚，且不能误删同前缀的其它文件
+func testVolumeCommit() {
+    do {
+        print("分卷替换")
+        let dir = fixtures.appendingPathComponent("vol-test", isDirectory: true)
+        try? FileManager.default.removeItem(at: dir)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let output = dir.appendingPathComponent("data.zip")
+        let old1 = dir.appendingPathComponent("data.zip.001")
+        let old2 = dir.appendingPathComponent("data.zip.002")
+        /// 同前缀但不是分卷：老实现用 hasPrefix 会把它一起删掉
+        let unrelated = dir.appendingPathComponent("data.zip.bak")
+
+        try "OLD1".write(to: old1, atomically: true, encoding: .utf8)
+        try "OLD2".write(to: old2, atomically: true, encoding: .utf8)
+        try "BACKUP".write(to: unrelated, atomically: true, encoding: .utf8)
+
+        // 1) 新分卷缺失：必须回滚，旧包一个字节都不能少
+        let missing = dir.appendingPathComponent(".data-xxxx.zip")
+        var threw = false
+        do {
+            try ArchiveModel.commitStaged(missing, to: output, hasVolumes: true)
+        } catch {
+            threw = true
+        }
+        expect(threw, "产物缺失时报错，不当成功")
+        expect(FileManager.default.fileExists(atPath: old1.path), "旧分卷 .001 还在")
+        expect(FileManager.default.fileExists(atPath: old2.path), "旧分卷 .002 还在")
+        expect(FileManager.default.fileExists(atPath: unrelated.path), "同前缀的 .bak 没被误删")
+        let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+            .filter { $0.contains(".rrzip-old-") }
+        expect(leftovers.isEmpty, "没有留下备份文件", leftovers.joined(separator: ","))
+
+        // 2) 正常替换：新分卷就位、多余旧卷清掉、无关文件仍在
+        let staged = dir.appendingPathComponent(".data-yyyy.zip")
+        try "NEW1".write(to: dir.appendingPathComponent(".data-yyyy.zip.001"),
+                         atomically: true, encoding: .utf8)
+        try ArchiveModel.commitStaged(staged, to: output, hasVolumes: true)
+        let content = (try? String(contentsOf: old1, encoding: .utf8)) ?? ""
+        expect(content == "NEW1", "新分卷已就位", content)
+        expect(!FileManager.default.fileExists(atPath: old2.path), "旧的多余分卷被清掉")
+        expect(FileManager.default.fileExists(atPath: unrelated.path), "替换后 .bak 仍在")
+        let after = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+            .filter { $0.contains(".rrzip-old-") }
+        expect(after.isEmpty, "替换后没有备份残留", after.joined(separator: ","))
+    } catch {
+        expect(false, "分卷替换 抛出异常", "\(error)")
     }
 }
 
@@ -187,6 +248,7 @@ func runCompressTests() {
     testCompressLevel()
     testCompressLevelEffect()
     testDuplicateNames()
+    testVolumeCommit()
     testProgress()
     testCompressPaths()
 }
