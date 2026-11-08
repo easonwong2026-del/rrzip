@@ -1778,6 +1778,14 @@ final class ArchiveModel: ObservableObject {
     }
 
     /// 拖拽导出 / 预览用的临时文件（带缓存，同一份文件不重复解压）
+    /// 异步版：预览面板和「另存为」都要等这份临时副本，
+    /// 以前各自写一遍 withCheckedContinuation，收成一份
+    func payloadURL(for entry: ArchiveEntry) async -> URL? {
+        await withCheckedContinuation { continuation in
+            payloadURL(for: entry) { continuation.resume(returning: $0) }
+        }
+    }
+
     func payloadURL(for entry: ArchiveEntry, completion: @escaping (URL?) -> Void) {
         guard let frame = current else { return completion(nil) }
 

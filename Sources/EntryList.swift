@@ -299,8 +299,9 @@ extension ContentView {
             Button("解压到文件夹…") { model.extractSelection() }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-            if let entry = model.displayEntries.first(where: { model.selection.contains($0.id) }),
-               !entry.isDirectory {
+            if let entry = model.selectedEntry,
+               SaveAsFlow.allowsSingleFileExport(selectionCount: model.selection.count,
+                                                 isDirectory: entry.isDirectory) {
                 Button("另存为…") { exportSelected() }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -321,15 +322,12 @@ extension ContentView {
     }
 
     func exportSelected() {
-        guard let entry = model.displayEntries.first(where: { model.selection.contains($0.id) }) else { return }
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = entry.name
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
-        model.payloadURL(for: entry) { url in
-            guard let url else { return }
-            try? FileManager.default.removeItem(at: destination)
-            try? FileManager.default.copyItem(at: url, to: destination)
-        }
+        // 多选不静默只存第一个：批量走「解压选中项」或暂存区导出
+        guard let entry = model.selectedEntry,
+              SaveAsFlow.allowsSingleFileExport(selectionCount: model.selection.count,
+                                                isDirectory: entry.isDirectory)
+        else { return }
+        SaveAsFlow.present(entry, model: model)
     }
 
     // MARK: 暂存区
@@ -533,7 +531,7 @@ struct EntryRow: View {
             }
             Button("另存为…") {
                 model.prepareContextSelection(entry)
-                exportSingle(entry)
+                SaveAsFlow.present(entry, model: model)
             }
             .disabled(entry.isDirectory || group > 1)
             Divider()
@@ -552,17 +550,6 @@ struct EntryRow: View {
             .disabled(model.isNested)
         }
         .help(entry.path)
-    }
-
-    func exportSingle(_ entry: ArchiveEntry) {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = entry.name
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
-        model.payloadURL(for: entry) { url in
-            guard let url else { return }
-            try? FileManager.default.removeItem(at: destination)
-            try? FileManager.default.copyItem(at: url, to: destination)
-        }
     }
 }
 

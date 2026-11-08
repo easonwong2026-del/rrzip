@@ -70,7 +70,7 @@ struct PreviewPane: View {
                         if let payload { NSWorkspace.shared.open(payload) }
                     }
                     ToolButton(symbol: "square.and.arrow.down", help: "另存为…") {
-                        export(entry)
+                        SaveAsFlow.present(entry, model: model)
                     }
                 }
             }
@@ -327,9 +327,7 @@ struct PreviewPane: View {
         loading = true
         reset()
 
-        let url: URL? = await withCheckedContinuation { continuation in
-            model.payloadURL(for: entry) { continuation.resume(returning: $0) }
-        }
+        let url = await model.payloadURL(for: entry)
 
         // 选中项已经换了就丢弃这次结果，避免显示上一个文件
         guard !Task.isCancelled, selectedEntry?.id == token else { return }
@@ -360,16 +358,6 @@ struct PreviewPane: View {
             if let data { text = String(decoding: data, as: UTF8.self) }
         default:
             note = "这种格式没有内联预览"
-        }
-    }
-
-    private func export(_ entry: ArchiveEntry) {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = entry.name
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
-        if let payload {
-            try? FileManager.default.removeItem(at: destination)
-            try? FileManager.default.copyItem(at: payload, to: destination)
         }
     }
 
