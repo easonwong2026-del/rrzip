@@ -1647,6 +1647,9 @@ final class ArchiveModel: ObservableObject {
             do {
                 let destination = try await Task.detached { [archive = frame.archive, path = entry.path, scratch = self.scratch] () -> URL in
                     let dir = scratch.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                    // 展开嵌套包同样在往临时目录里写，别让回收在半路上把它删了
+                    ScratchUsage.shared.beginWork(on: dir.path)
+                    defer { ScratchUsage.shared.endWork(on: dir.path) }
                     switch engine {
                     case .libarchive:
                         try Tar.extract(archive, entries: [path], to: dir, passphrase: passphrase)
@@ -1795,6 +1798,7 @@ final class ArchiveModel: ObservableObject {
 
         let key = cacheKey(entry, in: frame)
         if let cached = payloadCache[key], FileManager.default.fileExists(atPath: cached.path) {
+            markUsed(cached)
             return completion(cached)
         }
 
@@ -1811,9 +1815,10 @@ final class ArchiveModel: ObservableObject {
         let engine = frame.engine
         // 预览解压不走任务队列，清缓存看不到它。先在这里登记，
         // 再派任务——顺序反了就没用：调用方紧接着清缓存会漏判。
-        ScratchUsage.shared.beginWork()
+        // 带目录登记：自动回收也要知道这一份还在写，别删人家的半成品。
+        ScratchUsage.shared.beginWork(on: destination.path)
         Task {
-            defer { ScratchUsage.shared.endWork() }
+            defer { ScratchUsage.shared.endWork(on: destination.path) }
             let url = try? await Task.detached { () -> URL in
                 switch engine {
                 case .libarchive:
@@ -1828,9 +1833,10 @@ final class ArchiveModel: ObservableObject {
                 return file
             }.value
             if let url {
-                // 磁盘软预算：按字节回收最久未用的临时副本，这一次的结果不在候选里
-                trimScratch(keeping: url)
                 payloadCache[key] = url
+                // 磁盘软预算：按字节回收最久未用的临时副本。
+                // 这一次的目录还在 beginWork 里登记着，回收跳不过去就超预算，不会删它
+                trimScratch()
             }
             // 失败的路径也要把等待者全部放走：留一个就永久挂着
             for waiter in payloadWaiters.removeValue(forKey: key) ?? [] {
@@ -1839,31 +1845,44 @@ final class ArchiveModel: ObservableObject {
         }
     }
 
-    /// 按字节回收 `scratch`，跳过正在被界面占用的、以及正在浏览的嵌套包。
-    /// 候选全是占用着的话允许暂时超预算，不做「反复解压再删除」这种事。
-    private func trimScratch(keeping url: URL) {
-        var keep: Set<String> = [url.path]
-        keep.formUnion(trail.compactMap { scratchTop(of: $0.archive) })
+    /// 按字节回收 `scratch`：正在被界面占用的、正在写入的、正在浏览的嵌套包都不动。
+    /// 候选全被占用就允许暂时超预算，不做「反复解压再删除」这种事。
+    private func trimScratch() {
+        let keep = Set(trail.compactMap { unit(of: $0.archive) })
         CacheMaintenance.trim(scratch, budget: Self.payloadDiskBudget, keep: keep)
+        // 回收掉的目录在索引里也得摘掉，否则字典只增不减、还会指向已删文件
+        prunePayloadIndex()
     }
 
-    /// 丢掉一份不再需要的临时副本：连同它所在的 scratch 子目录，并从索引里摘掉。
-    /// 只认 workspace 底下的路径，别的地方一律不碰。
+    /// 索引只留还真实存在的副本。每次回收顺带跑一遍，开销是一次 stat。
+    private func prunePayloadIndex() {
+        payloadCache = payloadCache.filter { FileManager.default.fileExists(atPath: $0.value.path) }
+    }
+
+    /// 丢掉一份不再需要的临时副本：从索引里摘掉，并标记为「优先回收」。
+    ///
+    /// 不在这里直接删目录：这份副本可能同一时刻已经交给了快速查看、缩略图或
+    /// 另存为，它们还没来得及 hold。硬删就是抽走别人手里的文件；改成把目录
+    /// 时间戳打到最早，下一次回收优先带走它。
     func discardPayload(_ url: URL) {
         payloadCache = payloadCache.filter { $0.value.path != url.path }
-        guard let dir = scratchTop(of: url) else { return }
-        try? FileManager.default.removeItem(at: URL(fileURLWithPath: dir))
+        guard let dir = unit(of: url) else { return }
+        CacheMaintenance.touch(dir, at: .distantPast)
     }
 
-    /// `scratch/<UUID>/任意层/文件` → `scratch/<UUID>`；不在 scratch 下返回 nil。
-    /// 回收和丢弃都以 UUID 目录为单位：条目带子目录时只删一层会留下空壳。
-    private func scratchTop(of url: URL) -> String? {
-        guard url.path.hasPrefix(scratch.path + "/") else { return nil }
-        var dir = url.deletingLastPathComponent()
-        while dir.path != scratch.path, dir.deletingLastPathComponent().path != scratch.path {
-            dir = dir.deletingLastPathComponent()
-        }
-        return dir.path == scratch.path ? nil : dir.path
+    /// 索引里还认得的副本数（测试与诊断用）
+    var cachedPayloadCount: Int { payloadCache.count }
+
+    /// 缓存命中时刷新「最近使用时间」，回收按这个时间排序才是真的 LRU
+    private func markUsed(_ url: URL) {
+        guard let dir = unit(of: url) else { return }
+        CacheMaintenance.touch(dir)
+    }
+
+    /// 副本所在的顶层目录：`scratch/<UUID>/任意层/文件` → `scratch/<UUID>`。
+    /// 回收、丢弃、刷新时间都以它为单位——条目带子目录时只删一层会留下空壳。
+    private func unit(of url: URL) -> String? {
+        CacheMaintenance.unit(of: url.path, in: scratch)
     }
 
     private func cacheKey(_ entry: ArchiveEntry, in frame: Frame) -> String {

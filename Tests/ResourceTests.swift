@@ -198,8 +198,7 @@ func testScratchTrimBudget() {
 }
 
 /// 内嵌预览的大小判断必须发生在解压之前
-func testInlinePreviewLimit() {
-    print("内嵌预览 · 大小判断")
+func testInlinePreviewLimit() {    print("内嵌预览 · 大小判断")
     let video = ArchiveEntry(path: "big.mp4", size: 900 * 1024 * 1024, modified: "-", mode: "-rw-r--r--")
     expect(InlinePreviewLimits.skipsExtraction(video), "超过 800 MiB 的视频不解压")
 
@@ -221,10 +220,191 @@ func testInlinePreviewLimit() {
     expect(!InlinePreviewLimits.skipsExtraction(image), "图片不受音视频上限约束")
 }
 
+/// keep 传进来的是文件路径，回收候选是顶层目录：必须归一再比，不能精确相等
+func testTrimKeepDeepFilePath() {
+    print("临时副本 · keep 传文件路径")
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory
+        .appendingPathComponent("rrzip-keep-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? fm.removeItem(at: root)
+        ScratchUsage.shared.reset()
+    }
+    ScratchUsage.shared.reset()
+
+    do {
+        // 一次解压的产物：顶层 UUID 目录 + 深层子目录 + 文件
+        let copy = root.appendingPathComponent("COPY-UUID", isDirectory: true)
+        let deep = copy.appendingPathComponent("照片/城市", isDirectory: true)
+        try fm.createDirectory(at: deep, withIntermediateDirectories: true)
+        try Data(count: 2 * 1024 * 1024).write(to: deep.appendingPathComponent("video.mp4"))
+
+        // 另有一份更旧的副本，本来该先被回收
+        let older = root.appendingPathComponent("OLDER-UUID", isDirectory: true)
+        try fm.createDirectory(at: older, withIntermediateDirectories: true)
+        try Data(count: 1024 * 1024).write(to: older.appendingPathComponent("old.bin"))
+        try fm.setAttributes([.modificationDate: Date().addingTimeInterval(-900)],
+                             ofItemAtPath: older.path)
+
+        // 关键：传的是深层文件路径，不是目录
+        let keepFile = deep.appendingPathComponent("video.mp4").path
+        expect(CacheMaintenance.unit(of: keepFile, in: root) == copy.path,
+               "文件路径归一到它所在的顶层目录",
+               "实际 \(CacheMaintenance.unit(of: keepFile, in: root) ?? "nil")")
+        expect(CacheMaintenance.unit(of: "/tmp/别的地方/x.txt", in: root) == nil,
+               "不在 root 下的路径不参与保护")
+
+        // 预算小于这一个副本：单独一个大副本超预算也不能删
+        let report = CacheMaintenance.trim(root, budget: 1024 * 1024, keep: [keepFile])
+        expect(fm.fileExists(atPath: keepFile), "刚解出的深层文件没被回收",
+               "被删了")
+        expect(!fm.fileExists(atPath: older.path), "更旧的副本照常回收")
+        expect(report.overBudget, "单副本超预算时如实标记")
+    } catch {
+        expect(false, "keep 文件路径 抛出异常", "\(error)")
+    }
+}
+
+/// 正在写入的目录不能被自动回收删掉；写完之后回收照常生效
+func testTrimSkipsActiveDirectory() {
+    print("临时副本 · 跳过正在写入")
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory
+        .appendingPathComponent("rrzip-active-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? fm.removeItem(at: root)
+        ScratchUsage.shared.reset()
+    }
+    ScratchUsage.shared.reset()
+
+    do {
+        let writing = root.appendingPathComponent("WRITING-UUID", isDirectory: true)
+        try fm.createDirectory(at: writing, withIntermediateDirectories: true)
+        try Data(count: 2 * 1024 * 1024).write(to: writing.appendingPathComponent("half.bin"))
+        try fm.setAttributes([.modificationDate: Date().addingTimeInterval(-900)],
+                             ofItemAtPath: writing.path)
+
+        // 另一个条目刚解完、正在触发回收
+        let finished = root.appendingPathComponent("FINISHED-UUID", isDirectory: true)
+        try fm.createDirectory(at: finished, withIntermediateDirectories: true)
+        try Data(count: 2 * 1024 * 1024).write(to: finished.appendingPathComponent("done.bin"))
+
+        ScratchUsage.shared.beginWork(on: writing.path)
+        expect(ScratchUsage.shared.isActive(writing.path), "写入目录已登记为进行中")
+
+        let report = CacheMaintenance.trim(root, budget: 1024 * 1024)
+        expect(fm.fileExists(atPath: writing.appendingPathComponent("half.bin").path),
+               "正在写入的目录没被删")
+        expect(report.removed == 1, "只回收了已经写完的那一份", "实际 \(report.removed) 个")
+
+        // 自己的活干完了，下一次回收就不能再拿它当豁免
+        ScratchUsage.shared.endWork(on: writing.path)
+        expect(!ScratchUsage.shared.isActive(writing.path), "结束后不再是写入中")
+        let after = CacheMaintenance.trim(root, budget: 1)
+        expect(!fm.fileExists(atPath: writing.path), "写完的副本之后照常回收")
+        expect(after.removed >= 1, "回收确实发生了", "实际 \(after.removed) 个")
+    } catch {
+        expect(false, "跳过写入中 抛出异常", "\(error)")
+    }
+}
+
+/// 两个条目同时解压：一份完成触发回收，另一份还在写，两份都要完整可用
+func testConcurrentPayloadsStayIntact() {
+    print("预览解压 · 两条并行互不干扰")
+    MainActor.assumeIsolated {
+        ScratchUsage.shared.reset()
+        UserDefaults.standard.removeObject(forKey: "rrzip.workspaceMode")
+
+        let model = ArchiveModel()
+        model.open(url: fixtures.appendingPathComponent("basic.zip"))
+        guard waitUntil(15, { model.current != nil }) else {
+            expect(false, "归档没打开，后续无从验证")
+            return
+        }
+        let entries = ["说明.txt", "带 空格.txt"].compactMap { path in
+            model.current?.entries.first { $0.path == path }
+        }
+        guard entries.count == 2 else {
+            expect(false, "样例包里缺条目，无法构造交错")
+            return
+        }
+
+        var results: [String: URL?] = [:]
+        for entry in entries {
+            model.payloadURL(for: entry) { results[entry.path] = $0 }
+        }
+        expect(waitUntil(30, { results.count == 2 }), "两份请求都回来了")
+
+        for entry in entries {
+            guard let url = results[entry.path] ?? nil else {
+                expect(false, "\(entry.path) 没解出来")
+                continue
+            }
+            expect(FileManager.default.fileExists(atPath: url.path), "\(entry.path) 临时副本还在")
+        }
+        // 两条走的是不同缓存键，必须是两份独立的副本，且都在自己的目录里
+        let paths = entries.compactMap { results[$0.path]??.path }
+        expect(Set(paths).count == 2, "两个条目各拿一份副本", "实际 \(Set(paths).count) 份")
+
+        let text = results["说明.txt"]??.path ?? ""
+        let content = (try? String(contentsOfFile: text, encoding: .utf8)) ?? ""
+        expect(content.contains("hello"), "内容完整可读", content)
+
+        expect(waitUntil(5, { !ScratchUsage.shared.isWorking }), "worker 归零")
+        ScratchUsage.shared.reset()
+    }
+}
+
+/// 丢弃超限副本：只摘索引，不硬删可能还在别人手里的共享文件
+func testDiscardPayloadDefersDeletion() {
+    print("临时副本 · 丢弃走延迟回收")
+    MainActor.assumeIsolated {
+        ScratchUsage.shared.reset()
+        UserDefaults.standard.removeObject(forKey: "rrzip.workspaceMode")
+
+        let model = ArchiveModel()
+        model.open(url: fixtures.appendingPathComponent("basic.zip"))
+        guard waitUntil(15, { model.current != nil }),
+              let entry = model.current?.entries.first(where: { $0.path == "说明.txt" }) else {
+            expect(false, "归档没打开，后续无从验证")
+            return
+        }
+
+        var first: URL?
+        model.payloadURL(for: entry) { first = $0 }
+        guard waitUntil(20, { first != nil }), let url = first else {
+            expect(false, "第一份副本没解出来")
+            return
+        }
+        expect(model.cachedPayloadCount >= 1, "解出的副本进了索引")
+
+        // 模拟另一个消费者（快速查看 / 另存为）刚拿到同一个 URL，还没登记 hold
+        ScratchUsage.shared.hold(url)
+
+        model.discardPayload(url)
+        expect(FileManager.default.fileExists(atPath: url.path), "共享副本不立刻硬删")
+        expect(FileManager.default.fileExists(atPath: url.path), "别人手里的文件还在")
+
+        // 索引已经摘掉：再要一次会重新解，不会把已丢弃的路径再发出去
+        var second: URL?
+        model.payloadURL(for: entry) { second = $0 }
+        expect(waitUntil(20, { second != nil }), "重新请求能拿到新副本")
+        expect(second?.path != url.path, "丢弃后不再返回旧路径",
+               "旧 \(url.lastPathComponent) 新 \(second?.lastPathComponent ?? "nil")")
+
+        ScratchUsage.shared.release(url)
+        ScratchUsage.shared.reset()
+    }
+}
+
 func runResourceTests() {
     testThumbnailCacheCost()
     testPayloadConcurrentDedup()
     testPayloadFailureReleasesWaiters()
     testScratchTrimBudget()
+    testTrimKeepDeepFilePath()
+    testTrimSkipsActiveDirectory()
+    testConcurrentPayloadsStayIntact()
+    testDiscardPayloadDefersDeletion()
     testInlinePreviewLimit()
 }
