@@ -274,3 +274,27 @@ codesign --force --sign - "$BUNDLE" >/dev/null 2>&1  # 不用 --deep，避免覆
 
 echo "==> 完成：$BUNDLE"
 du -sh "$BUNDLE"
+
+# 每次都出 dmg：下载后直接拖进「应用程序」，不用先解压
+echo "==> 打包 DMG"
+VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$BUNDLE/Contents/Info.plist")
+DMG="build/rrzip-${VERSION}.dmg"
+STAGE_ROOT=$(mktemp -d)
+STAGE="$STAGE_ROOT/rrzip"
+# 不管成功失败都收走临时目录：set -e 下直接退出会把几百 MB 的 staging 留在 /var/folders
+trap 'rm -rf "$STAGE_ROOT"' EXIT
+mkdir -p "$STAGE"
+cp -R "$BUNDLE" "$STAGE/"
+ln -s /Applications "$STAGE/Applications"
+rm -f "$DMG"
+# UDZO = 压缩只读镜像；HFS+ 比 APFS 兼容性稳，老系统也能挂
+# 用 `|| status=$?` 而不是裸调用：裸调用会被 set -e 直接打断，退出码和清理都跑了
+status=0
+hdiutil create -quiet -volname "rrzip ${VERSION}" -srcfolder "$STAGE" \
+    -fs HFS+ -format UDZO -ov "$DMG" || status=$?
+if [ $status -ne 0 ]; then
+    rm -f "$DMG"          # 半截镜像比没有更糟
+    echo "DMG 制作失败（hdiutil 退出码 $status）"
+    exit $status
+fi
+ls -lh "$DMG" | awk '{print "    " $NF " (" $5 ")"}'

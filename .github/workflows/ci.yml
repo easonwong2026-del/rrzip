@@ -115,6 +115,11 @@ jobs:
           finder=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/PlugIns/ArchiveFinder.appex/Contents/Info.plist")
           [ "$main" = "$finder" ] || { echo "::error::访达扩展版本 $finder 与主 app $main 不一致"; exit 1; }
           codesign --verify --deep --strict "$APP"
+          # dmg 必须是按 app 版本命名的那一份，别拿任意一个 *.dmg 顶数
+          DMG="build/rrzip-${main}.dmg"
+          [ -f "$DMG" ] || { echo "::error::没有产出 $DMG"; exit 1; }
+          hdiutil imageinfo "$DMG" >/dev/null || { echo "::error::$DMG 不是可用的磁盘镜像"; exit 1; }
+          echo "dmg 就绪：$DMG"
 
       - name: 上传 app
         uses: actions/upload-artifact@v4
@@ -122,3 +127,12 @@ jobs:
           name: rrzip-app
           path: build/rrzip.app
           retention-days: 7
+
+      # PR 页面上直接能下 dmg，省得本地再打一次
+      - name: 上传 dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: rrzip-dmg
+          path: build/rrzip-*.dmg
+          retention-days: 7
+          if-no-files-found: error

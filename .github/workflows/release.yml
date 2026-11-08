@@ -26,11 +26,29 @@ jobs:
       - name: 构建 app
         run: ./build.sh
 
+      # build.sh 已经按 <应用版本> 出了 dmg，这里只改名成带 tag 的名字
       - name: 打包
         id: pack
         run: |
-          NAME="rrzip-${GITHUB_REF_NAME}.zip"
-          ditto -c -k --sequesterRsrc --keepParent build/rrzip.app "build/${NAME}"
+          set -e
+          # 版本以包内 Info.plist 为准，不猜、不从文件名反推
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+              build/rrzip.app/Contents/Info.plist)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # 正式发版（tag 触发）必须版本与 tag 对齐，否则下载下来的是错版本
+          if [ "${GITHUB_REF#refs/tags/}" != "${GITHUB_REF}" ]; then
+            [ "v${VERSION}" = "${GITHUB_REF_NAME}" ] || {
+              echo "::error::tag ${GITHUB_REF_NAME} 与应用版本 v${VERSION} 不一致"
+              exit 1
+            }
+          fi
+
+          DMG="build/rrzip-${VERSION}.dmg"
+          [ -f "$DMG" ] || { echo "::error::缺少 $DMG（build.sh 没产出）"; exit 1; }
+
+          NAME="rrzip-${GITHUB_REF_NAME}.dmg"
+          cp "$DMG" "build/${NAME}"
           shasum -a 256 "build/${NAME}" | tee "build/${NAME}.sha256"
           echo "asset=build/${NAME}" >> "$GITHUB_OUTPUT"
           echo "sha=build/${NAME}.sha256" >> "$GITHUB_OUTPUT"
