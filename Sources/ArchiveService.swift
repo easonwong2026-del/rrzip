@@ -28,13 +28,24 @@ enum ArchiveService {
     }
 
     /// 列目录。密码缺失直接抛 needsPassword，不换引擎——换了也一样要密码。
+    ///
+    /// 两条硬约束：
+    /// - 引擎不可用时直接跳过。以前会去试 7zz，扩展里它恒为 nil，抛出的
+    ///   `engineUnavailable` 会把 libarchive 的真实错误盖掉，用户只看到
+    ///   「请重新构建应用」。
+    /// - 沙盒扩展起不了 `/usr/bin/tar`（`Process.run()` 直接 NSCocoaErrorDomain 4），
+    ///   所以扩展里改走进程内 libarchive，不再 spawn 子进程。
     static func list(_ url: URL, password: String?) throws -> [ArchiveEntry] {
         var lastError: Error?
-        for engine in engineOrder(for: url) {
+        for engine in engineOrder(for: url) where engine.isAvailable {
             do {
                 switch engine {
                 case .libarchive:
+                    #if ARCHIVE_EXTENSION
+                    return try InProcessArchive.list(url, passphrase: password)
+                    #else
                     return try Tar.list(url, passphrase: password)
+                    #endif
                 case .sevenZip:
                     return try SevenZip.list(url, password: password)
                 }
@@ -44,7 +55,11 @@ enum ArchiveService {
                 lastError = error
             }
         }
-        throw lastError ?? ArchiveError.tool("无法读取 \(url.lastPathComponent)")
+        // 引擎全都不可用：说清楚是什么挡住了，而不是假装「格式不支持」
+        guard let lastError else {
+            throw ArchiveError.tool("这个压缩包需要 7-Zip 引擎，当前环境用不了")
+        }
+        throw lastError
     }
 
     /// 解压。`entries` 为空表示全部。起始引擎失败时换另一个再试一次

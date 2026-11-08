@@ -9,6 +9,7 @@
 # 解析、列表、创建的引擎层。三个 target 都要
 ARCHIVE_CORE=(
     Sources/Archive.swift
+    Sources/InProcessArchive.swift
     Sources/FormatCatalog.swift
     Sources/FormatDetector.swift
     Sources/ArchiveService.swift

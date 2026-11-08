@@ -30,7 +30,7 @@ echo "==> 编译测试"
 mkdir -p build
 xcrun swiftc -O -swift-version 5 \
     -target arm64-apple-macos14.0 \
-    -framework UserNotifications \
+    -framework UserNotifications -larchive \
     -o build/rrzip-tests \
     "${ARCHIVE_CORE[@]}" "${SHARED_STATE[@]}" "${APP_ONLY[@]}" "${FINDER_CORE[@]}" \
     Sources/Model.swift Sources/Palette.swift Sources/Batch.swift Sources/Thumbnails.swift Sources/SaveAs.swift \
