@@ -3,14 +3,7 @@
 //
 //  长任务进度卡
 
-import AppKit
-import PDFKit
-import QuickLook
 import SwiftUI
-import UniformTypeIdentifiers
-// UNUserNotificationCenter 没标 Sendable，但它的方法本身就是线程安全的；
-// 用 @preconcurrency 压掉严格并发下的误报，不绕过检查本身
-@preconcurrency import UserNotifications
 
 // MARK: - 任务进度卡
 

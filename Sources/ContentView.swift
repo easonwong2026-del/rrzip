@@ -6,14 +6,9 @@
 //  DetailPane / SidebarPane 里，这里只留状态与布局。
 
 import AppKit
-import PDFKit
 
-import QuickLook
 import SwiftUI
 import UniformTypeIdentifiers
-// UNUserNotificationCenter 没标 Sendable，但它的方法本身就是线程安全的；
-// 用 @preconcurrency 压掉严格并发下的误报，不绕过检查本身
-@preconcurrency import UserNotifications
 
 struct ContentView: View {
     @ObservedObject var model: ArchiveModel
@@ -151,9 +146,17 @@ struct ContentView: View {
     var taskOverlay: some View {
         if model.jobVisible, let job = model.job {
             TaskCard(job: job) { model.cancelJob() }
-                .padding(.bottom, 44)
+                // 选中操作条压在内容区底部，进度卡要整体上移让开它，
+                // 否则「取消任务」按钮正好盖住「删除…」
+                .padding(.bottom, bottomOverlayInset)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
         }
+    }
+
+    /// 底部浮层（一次性提示、任务进度卡）距窗口底部的距离。
+    /// 以前两处各写一个 44，结果都正好压住选中操作条；收成一份就不会再飘。
+    var bottomOverlayInset: CGFloat {
+        Metrics.statusHeight + Space.l + (model.selection.isEmpty ? 0 : Metrics.flowBarHeight)
     }
 
     /// 量一次窗口宽度：简化 / 完整模式的自动切换只看它，不猜窗口尺寸
@@ -419,7 +422,6 @@ struct ContentView: View {
         }
 #endif
     }
-
 
     // MARK: 窗口尺寸
 
