@@ -68,35 +68,7 @@ final class ThumbnailStore: ObservableObject {
 
     /// 触发加载；结果进缓存并自增 version
     func request(for entry: ArchiveEntry, model: ArchiveModel, maxPixel: CGFloat) {
-        guard supports(entry) else { return }
-        let key = cacheKey(for: entry, model: model, maxPixel: maxPixel)
-        guard cache.object(forKey: key) == nil,
-              !inFlight.contains(key as String),
-              !failed.contains(key as String) else { return }
-        inFlight.insert(key as String)
-
-        let ext = entry.ext
-        model.payloadURL(for: entry) { url in
-            guard let url else {
-                Task { @MainActor in self.inFlight.remove(key as String) }
-                return
-            }
-            // 渲染要读这个临时文件；这段期间清缓存不能把它删了
-            ScratchUsage.shared.beginWork()
-            Task.detached(priority: .utility) {
-                let image = Self.render(url: url, ext: ext, maxPixel: maxPixel)
-                await MainActor.run {
-                    ScratchUsage.shared.endWork()
-                    self.inFlight.remove(key as String)
-                    guard let image else {
-                        self.failed.insert(key as String)
-                        return
-                    }
-                    self.cache.setObject(CGImageBox(image), forKey: key)
-                    self.version &+= 1
-                }
-            }
-        }
+        load(entry, model: model, maxPixel: maxPixel, completion: nil)
     }
 
     /// `maxPixel` 越大越清晰，同时用于缓存分档（列表 20pt / 网格 56pt / 悬停 640px）
@@ -106,12 +78,32 @@ final class ThumbnailStore: ObservableObject {
         maxPixel: CGFloat = 160,
         completion: @escaping (CGImage?) -> Void
     ) {
+        load(entry, model: model, maxPixel: maxPixel, completion: completion)
+    }
+
+    /// 位图实际占的字节。NSCache 的 `totalCostLimit` 靠这个才真正生效——
+    /// 以前 `setObject` 不带 cost，64 MiB 的上限等于没设。
+    nonisolated static func cost(of image: CGImage) -> Int {
+        max(1, image.bytesPerRow * image.height)
+    }
+
+    /// request 和 thumbnail 只差「有没有人在等结果」，解压 + 渲染只有这一条路
+    private func load(
+        _ entry: ArchiveEntry,
+        model: ArchiveModel,
+        maxPixel: CGFloat,
+        completion: ((CGImage?) -> Void)?
+    ) {
         let key = cacheKey(for: entry, model: model, maxPixel: maxPixel)
-        if let cached = cache.object(forKey: key) {
-            return completion(cached.image)
+        if let hit = cache.object(forKey: key) {
+            completion?(hit.image)
+            return
         }
-        guard supports(entry), !inFlight.contains(key as String) else {
-            return completion(nil)
+        guard supports(entry),
+              !inFlight.contains(key as String),
+              !failed.contains(key as String) else {
+            completion?(nil)
+            return
         }
         inFlight.insert(key as String)
 
@@ -119,19 +111,26 @@ final class ThumbnailStore: ObservableObject {
         model.payloadURL(for: entry) { url in
             guard let url else {
                 Task { @MainActor in self.inFlight.remove(key as String) }
-                return completion(nil)
+                completion?(nil)
+                return
             }
-            ScratchUsage.shared.beginWork()
+            // 渲染要读这个临时文件：清缓存不能删，自动按预算回收也不能。
+            // 登记带上文件路径，回收按目录前缀就能认出这一份正在被读。
+            ScratchUsage.shared.beginWork(on: url.path)
             Task.detached(priority: .utility) {
                 let image = Self.render(url: url, ext: ext, maxPixel: maxPixel)
                 await MainActor.run {
-                    ScratchUsage.shared.endWork()
+                    ScratchUsage.shared.endWork(on: url.path)
                     self.inFlight.remove(key as String)
-                    if let image {
-                        self.cache.setObject(CGImageBox(image), forKey: key)
-                        self.version &+= 1
+                    guard let image else {
+                        // 坏图 / 解不开的 PDF：记下来，滚动回来不再反复解压
+                        self.failed.insert(key as String)
+                        completion?(nil)
+                        return
                     }
-                    completion(image)
+                    self.cache.setObject(CGImageBox(image), forKey: key, cost: Self.cost(of: image))
+                    self.version &+= 1
+                    completion?(image)
                 }
             }
         }
