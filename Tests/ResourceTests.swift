@@ -710,6 +710,61 @@ func testConsumersRegisterByPath() {
         expect(!text.contains("ScratchUsage.shared.beginWork()"),
                "\(file) 没有不带路径的裸登记（自动回收看不见）")
     }
+
+    // 另存为跨两段 async：拿到副本后、后台复制真正登记前，必须自己 hold 一次
+    let saveAs = (try? String(contentsOf: root.appendingPathComponent("Sources/SaveAs.swift"),
+                              encoding: .utf8)) ?? ""
+    expect(saveAs.contains("ScratchUsage.shared.hold(payload)"), "SaveAsFlow 取到副本后先占住")
+    expect(saveAs.contains("defer { ScratchUsage.shared.release(payload) }"),
+           "SaveAsFlow 成功失败都释放")
+}
+
+/// 另存为的两段 async 之间：持有副本、让出执行机会、触发小预算回收，源文件必须保留
+func testSaveAsHandoffKeepsSourceAlive() {
+    print("另存为 · 两段 async 之间源文件被兜住")
+    MainActor.assumeIsolated {
+        ScratchUsage.shared.reset()
+        UserDefaults.standard.removeObject(forKey: "rrzip.workspaceMode")
+
+        let model = ArchiveModel()
+        model.open(url: fixtures.appendingPathComponent("basic.zip"))
+        guard waitUntil(15, { model.current != nil }),
+              let entry = model.current?.entries.first(where: { $0.path == "说明.txt" }) else {
+            expect(false, "归档没打开或找不到 说明.txt")
+            return
+        }
+
+        // 第一段：取临时副本（payloadURL 的交接占用到此结束）
+        final class Box { var value: URL? }
+        let box = Box()
+        Task { box.value = await model.payloadURL(for: entry) }
+        guard waitUntil(20, { box.value != nil }), let payload = box.value else {
+            expect(false, "临时副本没取到")
+            return
+        }
+
+        // SaveAsFlow 新增的那一句，然后让出执行机会——
+        // 正好是「已持有、但 commitInBackground 还没登记源路径」的那一段
+        ScratchUsage.shared.hold(payload)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        expect(ScratchUsage.shared.isHeld(payload.path), "让出执行机会后仍然占着")
+
+        // 真实 scratch 目录上跑一次小预算自动回收
+        let scratch = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("rrzip/scratch", isDirectory: true)
+        let during = CacheMaintenance.trim(scratch, budget: 1)
+        expect(FileManager.default.fileExists(atPath: payload.path),
+               "回收跑过一遍，源文件仍在")
+        expect(during.overBudget, "占着的副本让总量暂时超预算，如实标记")
+
+        // 保存结束后 defer 放掉，就该允许正常回收
+        ScratchUsage.shared.release(payload)
+        let after = CacheMaintenance.trim(scratch, budget: 1)
+        expect(!FileManager.default.fileExists(atPath: payload.path), "释放后允许回收")
+        expect(after.removed >= 1, "回收确实发生了", "实际 \(after.removed) 个")
+
+        ScratchUsage.shared.reset()
+    }
 }
 
 func runResourceTests() {
@@ -728,5 +783,6 @@ func runResourceTests() {
     testActiveFileProtectsItsDirectory()
     testPayloadHandoffKeepsCopyAlive()
     testConsumersRegisterByPath()
+    testSaveAsHandoffKeepsSourceAlive()
     testInlinePreviewLimit()
 }

@@ -114,6 +114,11 @@ enum SaveAsFlow {
                 model.errorMessage = "读取「\(entry.name)」失败，没有保存任何文件。\n目标位置未改动。"
                 return
             }
+            // payloadURL 的交接占用在它返回时就放开了，而下面的 commitInBackground
+            // 是 nonisolated async：真正登记源路径还要再过一次调度。这两段之间自己兜住，
+            // 保存成功、失败都走这个 defer。
+            ScratchUsage.shared.hold(payload)
+            defer { ScratchUsage.shared.release(payload) }
             do {
                 // 复制不在主线程：大文件 + 外置盘时不会把窗口卡住
                 try await SafeSave.commitInBackground(payload, to: destination)
