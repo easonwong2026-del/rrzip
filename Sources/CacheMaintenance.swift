@@ -120,17 +120,23 @@ final class ScratchUsage: @unchecked Sendable {
     /// 这个路径，或它下面的任何文件是否被占着。
     /// 删的是目录时要比前缀：没人会 hold 一个目录，但会 hold 目录里的文件。
     func isHeld(_ path: String) -> Bool {
-        covers(holds, path)
+        let key = Self.canonical(path)
+        lock.lock(); defer { lock.unlock() }
+        return Self.matches(holds, key)
     }
 
     /// 这个路径（或它下面的东西）是否有任务正在写
     func isActive(_ path: String) -> Bool {
-        covers(active, path)
-    }
-
-    private func covers(_ table: [String: Int], _ path: String) -> Bool {
         let key = Self.canonical(path)
         lock.lock(); defer { lock.unlock() }
+        return Self.matches(active, key)
+    }
+
+    /// 归一放在锁外：`canonical` 要碰文件系统，占着锁算路径会拖慢所有登记。
+    /// 字典本身必须在锁内读——后台解压线程随时可能在改，锁外读就是数据竞争。
+    ///
+    /// 下面这个 helper 要求调用方已经持锁（参数求值发生在锁内）。
+    private static func matches(_ table: [String: Int], _ key: String) -> Bool {
         if table[key] != nil { return true }
         let prefix = key.hasSuffix("/") ? key : key + "/"
         return table.keys.contains { $0.hasPrefix(prefix) }

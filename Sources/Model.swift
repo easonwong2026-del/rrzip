@@ -980,6 +980,11 @@ final class ArchiveModel: ObservableObject {
     }
 
     private func performLoad(url: URL, resetTrail: Bool, restorePrefix: String? = nil) async {
+        // 嵌套包在 enter() 里挂过占用：从解压完成一直兜到它进 trail。
+        // 这里所有出口（成功、读失败、等密码时被取消）都要放掉，否则那份临时
+        // 目录永远占着、回收也动不了它。非嵌套包的路径上没有 hold，release 是空操作。
+        defer { ScratchUsage.shared.release(url) }
+
         var passphrase = passwords[url.path]
         let detection = FormatDetector.detect(url)
         // 磁盘映像类（dmg/vhd/qcow2…）libarchive 读不了，直接交给 7-Zip。
@@ -1637,38 +1642,58 @@ final class ArchiveModel: ObservableObject {
     // MARK: - 嵌套浏览
 
     func enter(_ entry: ArchiveEntry) {
-        guard entry.isArchive, let frame = current else { return }
+        guard entry.isArchive, current != nil else { return }
         isLoading = true
         status = "正在展开 \(entry.name)…"
-        let passphrase = passwords[frame.archive.path]
-        let engine = frame.engine
 
         Task {
-            do {
-                let destination = try await Task.detached { [archive = frame.archive, path = entry.path, scratch = self.scratch] () -> URL in
-                    let dir = scratch.appendingPathComponent(UUID().uuidString, isDirectory: true)
-                    // 展开嵌套包同样在往临时目录里写，别让回收在半路上把它删了
-                    ScratchUsage.shared.beginWork(on: dir.path)
-                    defer { ScratchUsage.shared.endWork(on: dir.path) }
-                    switch engine {
-                    case .libarchive:
-                        try Tar.extract(archive, entries: [path], to: dir, passphrase: passphrase)
-                    case .sevenZip:
-                        try SevenZip.extract(archive, entries: [path], to: dir, password: passphrase)
-                    }
-                    let extracted = dir.appendingPathComponent(path)
-                    guard FileManager.default.fileExists(atPath: extracted.path) else {
-                        throw ArchiveError.tool("未能展开 \(path)")
-                    }
-                    return extracted
-                }.value
+            guard let extracted = await extractNested(entry) else {
                 isLoading = false
-                loadFrame(url: destination, resetTrail: false)
-            } catch {
-                isLoading = false
-                errorMessage = error.localizedDescription
                 status = "展开失败"
+                return
             }
+            isLoading = false
+            loadFrame(url: extracted, resetTrail: false)
+        }
+    }
+
+    /// 把内层包解到临时目录，并且**带着占用**返回它的路径。
+    ///
+    /// 占用必须从「解压写完」一直挂到 `performLoad` 结束——那之前的内层包
+    /// 既不在 `active` 里（写入已结束），也不在 `trail` 里（还没进浏览状态），
+    /// 中间任何一次自动回收都能把它删掉。释放点在 `performLoad` 的 defer，
+    /// 成功、读失败、等密码时取消都会走到。失败路径不留下任何登记。
+    func extractNested(_ entry: ArchiveEntry) async -> URL? {
+        guard entry.isArchive, let frame = current else { return nil }
+        let archive = frame.archive
+        let passphrase = passwords[archive.path]
+        let engine = frame.engine
+        let path = entry.path
+        let scratch = self.scratch
+
+        do {
+            return try await Task.detached { () -> URL in
+                let dir = scratch.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                // 解压在往这个目录里写，回收不许进来
+                ScratchUsage.shared.beginWork(on: dir.path)
+                defer { ScratchUsage.shared.endWork(on: dir.path) }
+                switch engine {
+                case .libarchive:
+                    try Tar.extract(archive, entries: [path], to: dir, passphrase: passphrase)
+                case .sevenZip:
+                    try SevenZip.extract(archive, entries: [path], to: dir, password: passphrase)
+                }
+                let inside = dir.appendingPathComponent(path)
+                guard FileManager.default.fileExists(atPath: inside.path) else {
+                    throw ArchiveError.tool("未能展开 \(path)")
+                }
+                // 交给主线程之后，这个文件还要等异步列表才进 trail：先占住
+                ScratchUsage.shared.hold(inside)
+                return inside
+            }.value
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
         }
     }
 

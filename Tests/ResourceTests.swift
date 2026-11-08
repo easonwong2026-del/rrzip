@@ -397,6 +397,198 @@ func testDiscardPayloadDefersDeletion() {
     }
 }
 
+/// 登记表在后台线程上被同时改写时，计数和查询都要正确、最终归零
+func testScratchUsageConcurrency() {
+    print("临时登记 · 并发压力")
+    let usage = ScratchUsage.shared
+    usage.reset()
+
+    let threads = 6
+    let rounds = 200
+    let group = DispatchGroup()
+    for t in 0..<threads {
+        DispatchQueue.global().async(group: group) {
+            for i in 0..<rounds {
+                let dir = "/tmp/rrzip-stress/\(t)/dir-\(i % 8)"
+                let file = dir + "/file.bin"
+                usage.hold(file)
+                _ = usage.isHeld(dir)          // 目录级查询：靠前缀命中文件
+                usage.beginWork(on: dir)
+                _ = usage.isActive(dir)
+                _ = usage.isWorking
+                usage.endWork(on: dir)
+                usage.release(file)
+            }
+        }
+    }
+    guard group.wait(timeout: .now() + 60) == .success else {
+        expect(false, "并发登记没在 60 秒内跑完")
+        return
+    }
+
+    expect(usage.isEmpty, "并发登记后 holds / active / worker 全部归零")
+    expect(!usage.isWorking, "worker 计数归零")
+    expect(!usage.isHeld("/tmp/rrzip-stress/0/dir-0"), "hold 没有残留")
+    expect(!usage.isActive("/tmp/rrzip-stress/0/dir-0"), "active 没有残留")
+    usage.reset()
+}
+
+/// 嵌套包的保护链：解压中 → 已解出未进浏览 → 已在浏览 → 离开后可回收
+func testNestedArchiveProtectionChain() {
+    print("嵌套包 · 保护链逐段生效")
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory
+        .appendingPathComponent("rrzip-nested-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? fm.removeItem(at: root)
+        ScratchUsage.shared.reset()
+    }
+    ScratchUsage.shared.reset()
+
+    do {
+        let copy = root.appendingPathComponent("NESTED-UUID", isDirectory: true)
+        try fm.createDirectory(at: copy, withIntermediateDirectories: true)
+        let inner = copy.appendingPathComponent("inner.zip")
+        try Data(count: 2 * 1024 * 1024).write(to: inner)
+
+        // 1) 解压阶段：目录登记为写入中，预算再小也不动
+        ScratchUsage.shared.beginWork(on: copy.path)
+        var report = CacheMaintenance.trim(root, budget: 1)
+        expect(fm.fileExists(atPath: inner.path), "解压中不被回收")
+        expect(report.removed == 0, "解压中一个都不删", "实际 \(report.removed) 个")
+
+        // 2) 已解出、还没进 trail：enter() 挂的是文件 hold
+        ScratchUsage.shared.endWork(on: copy.path)
+        ScratchUsage.shared.hold(inner)
+        report = CacheMaintenance.trim(root, budget: 1)
+        expect(fm.fileExists(atPath: inner.path), "目录未加载完成时也不被回收")
+        expect(report.overBudget, "此时如实超预算，不是偷偷删掉")
+        expect(CacheMaintenance.unit(of: inner.path, in: root) == copy.path,
+               "文件 hold 覆盖整个顶层目录")
+
+        // 3) 进了 trail：hold 放掉，改由 keep 兜着
+        ScratchUsage.shared.release(inner)
+        report = CacheMaintenance.trim(root, budget: 1, keep: [inner.path])
+        expect(fm.fileExists(atPath: inner.path), "浏览中由 trail 的 keep 兜住")
+
+        // 4) 离开嵌套包后没有豁免，才允许回收
+        report = CacheMaintenance.trim(root, budget: 1)
+        expect(!fm.fileExists(atPath: inner.path), "离开后可以回收")
+        expect(report.removed == 1, "回收发生了", "实际 \(report.removed) 个")
+    } catch {
+        expect(false, "嵌套包保护链 抛出异常", "\(error)")
+    }
+}
+
+/// 真机路径：打开外层包 → 展开内层包 → 内层文件还在、占用全部释放
+func testNestedArchiveBrowsing() {
+    print("嵌套包 · 真实展开不留占用")
+    MainActor.assumeIsolated {
+        ScratchUsage.shared.reset()
+        UserDefaults.standard.removeObject(forKey: "rrzip.workspaceMode")
+
+        let fm = FileManager.default
+        let work = fm.temporaryDirectory
+            .appendingPathComponent("rrzip-enter-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? fm.removeItem(at: work)
+            ScratchUsage.shared.reset()
+        }
+
+        do {
+            try fm.createDirectory(at: work, withIntermediateDirectories: true)
+            let inner = work.appendingPathComponent("inner.zip")
+            try fm.copyItem(at: fixtures.appendingPathComponent("basic.zip"), to: inner)
+            let outer = work.appendingPathComponent("outer.zip")
+            try ArchiveModel.writeArchive(at: outer, from: [inner], format: .zip, password: "", volume: nil)
+            try? fm.removeItem(at: inner)
+
+            let model = ArchiveModel()
+            model.open(url: outer)
+            guard waitUntil(20, { model.current != nil }) else {
+                expect(false, "外层包没打开")
+                return
+            }
+            guard let entry = model.current?.entries.first(where: { $0.path.hasSuffix("inner.zip") }) else {
+                expect(false, "外层包里找不到内层包")
+                return
+            }
+
+            model.enter(entry)
+            guard waitUntil(30, { model.current?.archive.path.hasSuffix("inner.zip") == true }) else {
+                expect(false, "内层包没能进入浏览状态")
+                return
+            }
+            let archived = model.current!.archive
+            expect(fm.fileExists(atPath: archived.path), "内层包在浏览时仍然存在")
+            expect(model.isNested, "确实处在嵌套浏览状态")
+            expect(model.current?.entries.contains { $0.path == "说明.txt" } == true,
+                   "内层包内容可读")
+
+            // 占用要放干净：不然这份临时副本永远回收不掉
+            expect(waitUntil(5, { ScratchUsage.shared.isEmpty }), "进入浏览后占用全部释放")
+        } catch {
+            expect(false, "嵌套包真实展开 抛出异常", "\(error)")
+        }
+    }
+}
+
+/// 停在「内层包已解出、还没进浏览」这一刻：必须已经被占住
+func testNestedExtractionHoldsUntilBrowsed() {
+    print("嵌套包 · 解出到进浏览之间被占住")
+    MainActor.assumeIsolated {
+        ScratchUsage.shared.reset()
+        UserDefaults.standard.removeObject(forKey: "rrzip.workspaceMode")
+
+        let fm = FileManager.default
+        let work = fm.temporaryDirectory
+            .appendingPathComponent("rrzip-window-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? fm.removeItem(at: work)
+            ScratchUsage.shared.reset()
+        }
+
+        do {
+            try fm.createDirectory(at: work, withIntermediateDirectories: true)
+            let inner = work.appendingPathComponent("inner.zip")
+            try fm.copyItem(at: fixtures.appendingPathComponent("basic.zip"), to: inner)
+            let outer = work.appendingPathComponent("outer.zip")
+            try ArchiveModel.writeArchive(at: outer, from: [inner], format: .zip, password: "", volume: nil)
+            try? fm.removeItem(at: inner)
+
+            let model = ArchiveModel()
+            model.open(url: outer)
+            guard waitUntil(20, { model.current != nil }),
+                  let entry = model.current?.entries.first(where: { $0.path.hasSuffix("inner.zip") }) else {
+                expect(false, "外层包没打开或找不到内层包")
+                return
+            }
+
+            final class Box { var value: URL? }
+            let box = Box()
+            // 只做解压，不调用 loadFrame：正好停在被复审指出的那个空窗里
+            Task { box.value = await model.extractNested(entry) }
+            guard waitUntil(30, { box.value != nil }), let inside = box.value else {
+                expect(false, "内层包没解出来")
+                return
+            }
+
+            expect(fm.fileExists(atPath: inside.path), "内层包已落到临时目录")
+            expect(ScratchUsage.shared.isHeld(inside.path),
+                   "解出的这一刻已经登记占用（自动回收会跳过）")
+            expect(ScratchUsage.shared.isHeld(inside.deletingLastPathComponent().path),
+                   "占用覆盖整个临时目录，不是单个文件例外")
+
+            // 收尾交给 performLoad 的 defer；测试里手动放，避免污染后续用例
+            ScratchUsage.shared.release(inside)
+            expect(!ScratchUsage.shared.isHeld(inside.path), "释放后不再受保护")
+            expect(ScratchUsage.shared.isEmpty, "没有残留登记")
+        } catch {
+            expect(false, "解出空窗 抛出异常", "\(error)")
+        }
+    }
+}
+
 func runResourceTests() {
     testThumbnailCacheCost()
     testPayloadConcurrentDedup()
@@ -406,5 +598,9 @@ func runResourceTests() {
     testTrimSkipsActiveDirectory()
     testConcurrentPayloadsStayIntact()
     testDiscardPayloadDefersDeletion()
+    testScratchUsageConcurrency()
+    testNestedArchiveProtectionChain()
+    testNestedArchiveBrowsing()
+    testNestedExtractionHoldsUntilBrowsed()
     testInlinePreviewLimit()
 }
