@@ -589,6 +589,129 @@ func testNestedExtractionHoldsUntilBrowsed() {
     }
 }
 
+/// 缩略图渲染 / 另存为现在按「文件路径」登记：必须能保护住它所在的目录
+func testActiveFileProtectsItsDirectory() {
+    print("临时副本 · 读取中的文件保护整目录")
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory
+        .appendingPathComponent("rrzip-reader-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? fm.removeItem(at: root)
+        ScratchUsage.shared.reset()
+    }
+    ScratchUsage.shared.reset()
+
+    do {
+        // 正在被读的那一份：最旧，本来第一个被回收
+        let reading = root.appendingPathComponent("READING-UUID", isDirectory: true)
+        let deep = reading.appendingPathComponent("照片/城市", isDirectory: true)
+        try fm.createDirectory(at: deep, withIntermediateDirectories: true)
+        let source = deep.appendingPathComponent("thumb.jpg")
+        try Data(count: 2 * 1024 * 1024).write(to: source)
+        try fm.setAttributes([.modificationDate: Date().addingTimeInterval(-900)],
+                             ofItemAtPath: reading.path)
+
+        let other = root.appendingPathComponent("OTHER-UUID", isDirectory: true)
+        try fm.createDirectory(at: other, withIntermediateDirectories: true)
+        try Data(count: 2 * 1024 * 1024).write(to: other.appendingPathComponent("done.bin"))
+
+        // 和 ThumbnailStore / commitInBackground / HoverPreview 用的是同一句
+        ScratchUsage.shared.beginWork(on: source.path)
+        expect(ScratchUsage.shared.isActive(reading.path),
+               "按文件登记时，目录级查询也认（靠前缀）")
+
+        let report = CacheMaintenance.trim(root, budget: 1024 * 1024)
+        expect(fm.fileExists(atPath: source.path), "读取中的源文件没被回收")
+        expect(report.removed == 1, "只回收了没人在用的那一份", "实际 \(report.removed) 个")
+
+        // 读完了：不再登记，下次回收就该轮到它
+        ScratchUsage.shared.endWork(on: source.path)
+        expect(!ScratchUsage.shared.isActive(reading.path), "结束后不再受保护")
+        let after = CacheMaintenance.trim(root, budget: 1)
+        expect(!fm.fileExists(atPath: reading.path), "读完的副本之后照常回收")
+        expect(after.removed >= 1, "回收确实发生了", "实际 \(after.removed) 个")
+    } catch {
+        expect(false, "读取中保护 抛出异常", "\(error)")
+    }
+}
+
+/// async payloadURL 把结果交给调用方之前，中间那一轮不能被回收钻空子
+func testPayloadHandoffKeepsCopyAlive() {
+    print("预览解压 · 异步交接期已占住")
+    MainActor.assumeIsolated {
+        ScratchUsage.shared.reset()
+        UserDefaults.standard.removeObject(forKey: "rrzip.workspaceMode")
+
+        let fm = FileManager.default
+        let work = fm.temporaryDirectory
+            .appendingPathComponent("rrzip-handoff-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? fm.removeItem(at: work)
+            ScratchUsage.shared.reset()
+        }
+
+        do {
+            // 20 MB 条目：解压要几十毫秒，够我们把探针排在交接之后
+            try fm.createDirectory(at: work, withIntermediateDirectories: true)
+            let big = work.appendingPathComponent("big.bin")
+            try Data(count: 20 * 1024 * 1024).write(to: big)
+            let zip = work.appendingPathComponent("big.zip")
+            try ArchiveModel.writeArchive(at: zip, from: [big], format: .zip, password: "", volume: nil)
+            try? fm.removeItem(at: big)
+
+            let model = ArchiveModel()
+            model.open(url: zip)
+            guard waitUntil(30, { model.current != nil }),
+                  let entry = model.current?.entries.first(where: { $0.path.hasSuffix("big.bin") }) else {
+                expect(false, "归档没打开或找不到 big.bin")
+                return
+            }
+
+            final class Box { var value: URL? }
+            let box = Box()
+            // 先让异步调用抢到第一位（登记为第一个等待者），再挂同步探针
+            Task { box.value = await model.payloadURL(for: entry) }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+
+            var probe: (url: URL?, held: Bool)?
+            model.payloadURL(for: entry) { url in
+                probe = (url, url.map { ScratchUsage.shared.isHeld($0.path) } ?? false)
+            }
+            expect(model.cachedPayloadCount == 0 || probe != nil, "探针请到了一份副本")
+            guard waitUntil(30, { probe != nil }) else {
+                expect(false, "探针没回来")
+                return
+            }
+            expect(probe?.held == true, "交接瞬间副本已经被占住（回收跳得过去）")
+
+            guard waitUntil(30, { box.value != nil }), let url = box.value else {
+                expect(false, "异步调用方没拿到结果")
+                return
+            }
+            expect(fm.fileExists(atPath: url.path), "异步调用方拿到的是可用文件")
+            expect(waitUntil(5, { !ScratchUsage.shared.isHeld(url.path) }),
+                   "交接结束后不留占用")
+        } catch {
+            expect(false, "异步交接 抛出异常", "\(error)")
+        }
+    }
+}
+
+/// 缩略图渲染 / 另存为 / 悬停预览只登记裸 worker 时，自动回收看不见它们。
+/// 这条是源码级护栏（CI 现有的「检查视图接线」也是这个路子）：
+/// 运行时窗口只有几毫秒，采样不稳，靠断言抓不住，所以钉住登记方式本身。
+func testConsumersRegisterByPath() {
+    print("跨模块保护 · 登记必须带路径")
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    for file in ["Sources/Thumbnails.swift", "Sources/SaveAs.swift", "Sources/HoverPreview.swift"] {
+        let text = (try? String(contentsOf: root.appendingPathComponent(file), encoding: .utf8)) ?? ""
+        expect(!text.isEmpty, "\(file) 读得到")
+        expect(text.contains("beginWork(on:"), "\(file) 按路径登记")
+        expect(!text.contains("ScratchUsage.shared.beginWork()"),
+               "\(file) 没有不带路径的裸登记（自动回收看不见）")
+    }
+}
+
 func runResourceTests() {
     testThumbnailCacheCost()
     testPayloadConcurrentDedup()
@@ -602,5 +725,8 @@ func runResourceTests() {
     testNestedArchiveProtectionChain()
     testNestedArchiveBrowsing()
     testNestedExtractionHoldsUntilBrowsed()
+    testActiveFileProtectsItsDirectory()
+    testPayloadHandoffKeepsCopyAlive()
+    testConsumersRegisterByPath()
     testInlinePreviewLimit()
 }

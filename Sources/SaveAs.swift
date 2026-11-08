@@ -74,10 +74,11 @@ enum SafeSave {
     ///
     /// 复制期间登记一个 worker：清缓存看到 worker 会整体跳过，
     /// 否则源副本被删掉，`copyItem` 直接失败，用户只看到一句「保存失败」。
-    /// 成功、失败、任务取消都走同一个 defer，计数不会漏。
+    /// 登记带上源路径，自动按预算回收也能认出这个目录正在被读——
+    /// 只加计数的话，智能回收看不见它。成功、失败、任务取消都走同一个 defer。
     nonisolated static func commitInBackground(_ source: URL, to destination: URL) async throws {
-        ScratchUsage.shared.beginWork()
-        defer { ScratchUsage.shared.endWork() }
+        ScratchUsage.shared.beginWork(on: source.path)
+        defer { ScratchUsage.shared.endWork(on: source.path) }
         try await Task.detached(priority: .userInitiated) {
             try commit(source, to: destination)
         }.value

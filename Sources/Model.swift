@@ -1813,9 +1813,17 @@ final class ArchiveModel: ObservableObject {
     /// 异步版：预览面板和「另存为」都要等这份临时副本，
     /// 以前各自写一遍 withCheckedContinuation，收成一份
     func payloadURL(for entry: ArchiveEntry) async -> URL? {
-        await withCheckedContinuation { continuation in
-            payloadURL(for: entry) { continuation.resume(returning: $0) }
+        let url: URL? = await withCheckedContinuation { continuation in
+            payloadURL(for: entry) { result in
+                // 交接期先兜住：回调返回后解压目录的登记就撤了，而等待者要等到
+                // 下一轮 MainActor 才继续跑。这中间的副本既不在 active 也不在人手里。
+                if let result { ScratchUsage.shared.hold(result) }
+                continuation.resume(returning: result)
+            }
         }
+        // 调用方在同一轮次里接着用（自己 hold，或者立刻读），到这里交接可以放
+        if let url { ScratchUsage.shared.release(url) }
+        return url
     }
 
     func payloadURL(for entry: ArchiveEntry, completion: @escaping (URL?) -> Void) {

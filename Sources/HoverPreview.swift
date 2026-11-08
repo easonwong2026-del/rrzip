@@ -165,6 +165,9 @@ struct HoverCard: View {
         }
 
         let url = await model.payloadURL(for: entry)
+        // 读这几 KB 期间别让回收把文件抽走；登记带路径，自动回收也认
+        if let url { ScratchUsage.shared.beginWork(on: url.path) }
+        defer { if let url { ScratchUsage.shared.endWork(on: url.path) } }
         guard let url,
               let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
             await MainActor.run { failed = true }

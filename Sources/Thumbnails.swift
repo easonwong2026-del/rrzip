@@ -114,12 +114,13 @@ final class ThumbnailStore: ObservableObject {
                 completion?(nil)
                 return
             }
-            // 渲染要读这个临时文件；这段期间清缓存不能把它删了
-            ScratchUsage.shared.beginWork()
+            // 渲染要读这个临时文件：清缓存不能删，自动按预算回收也不能。
+            // 登记带上文件路径，回收按目录前缀就能认出这一份正在被读。
+            ScratchUsage.shared.beginWork(on: url.path)
             Task.detached(priority: .utility) {
                 let image = Self.render(url: url, ext: ext, maxPixel: maxPixel)
                 await MainActor.run {
-                    ScratchUsage.shared.endWork()
+                    ScratchUsage.shared.endWork(on: url.path)
                     self.inFlight.remove(key as String)
                     guard let image else {
                         // 坏图 / 解不开的 PDF：记下来，滚动回来不再反复解压
