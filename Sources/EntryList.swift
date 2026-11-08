@@ -10,6 +10,12 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 extension ContentView {
+    /// 图标网格量出来的实际宽度，用来算一行几列（下键按行跳）
+    var gridColumns: Int {
+        guard !model.isCompactMode, model.viewMode == .icons else { return 1 }
+        return IconGridLayout.columns(forWidth: gridWidth)
+    }
+
     var compactWorkspace: some View {
         GeometryReader { proxy in
             entryList
@@ -70,11 +76,11 @@ extension ContentView {
         .focusEffectDisabled()
         .focused($listFocused)
         .onKeyPress(.upArrow) {
-            model.moveSelection(by: -1)
+            model.moveSelection(by: -1, columns: gridColumns)
             return .handled
         }
         .onKeyPress(.downArrow) {
-            model.moveSelection(by: 1)
+            model.moveSelection(by: 1, columns: gridColumns)
             return .handled
         }
         .onKeyPress(.return) {
@@ -105,7 +111,17 @@ extension ContentView {
             }
             return .ignored
         }
-        .onAppear { listFocused = true }
+        // 三种视图共用同一个「滚到可见」信号：键盘导航与切换布局时才发，
+        // 鼠标选中一律不发，单击就不会带着列表跳
+        .onChange(of: model.keyboardScrollTick) { _, _ in entryRevealTick &+= 1 }
+        .onChange(of: model.workspaceMode) { _, _ in entryRevealTick &+= 1 }
+        // 内容整批换掉时回到顶部：改关键词、进/出目录、换包
+        .onChange(of: model.searchText) { _, _ in entryScrollTopTick &+= 1 }
+        .onChange(of: model.current?.id) { _, _ in entryScrollTopTick &+= 1 }
+        .onAppear {
+            // 搜索框正在输入时不要抢焦点
+            if !searchFocused { listFocused = true }
+        }
     }
 
     var listHeader: some View {
@@ -164,38 +180,44 @@ extension ContentView {
     }
 
     var listView: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(model.displayEntries) { entry in
-                        EntryRow(
-                            entry: entry,
-                            model: model,
-                            hover: hover,
-                            selected: model.selection.contains(entry.id),
-                            showPath: model.isSearching
-                        )
-                        .id(entry.id)
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-            }
-            .onChange(of: model.selection) { _, selection in
-                // 键盘上下移动时要跟着滚动，否则选中项跑出屏幕就看不见了
-                guard let id = selection.first else { return }
-                withAnimation(.easeOut(duration: 0.12)) {
-                    proxy.scrollTo(id, anchor: .center)
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(model.displayEntries) { entry in
+                    EntryRow(
+                        entry: entry,
+                        model: model,
+                        hover: hover,
+                        selected: model.selection.contains(entry.id),
+                        showPath: model.isSearching
+                    )
+                    .id(entry.id)
                 }
             }
-            .onChange(of: model.workspaceMode) { _, _ in
-                // 切换模式会重建列表，把选中项重新滚回可见位置（不改变选中状态）
-                guard let id = model.selectedEntry?.id else { return }
-                DispatchQueue.main.async {
-                    proxy.scrollTo(id, anchor: .center)
-                }
-            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(EntryScrollTopMarker(tick: entryScrollTopTick))
+            .overlay { listRevealMarker }
         }
+    }
+
+    /// 列表行高固定（搜索时多一行路径），滚动落点直接按索引算
+    var listRowHeight: CGFloat {
+        model.isSearching ? Metrics.rowHeightWide : Metrics.rowHeight
+    }
+
+    var listRevealMarker: some View {
+        let entries = model.displayEntries
+        return EntryRevealMarker(
+            tick: entryRevealTick,
+            count: entries.count,
+            index: entries.firstIndex { model.selection.contains($0.id) },
+            metrics: { index, contentHeight in
+                // 从底部反推：不用假设顶部内边距，行高是唯一常量
+                let height = listRowHeight
+                let y = contentHeight - 6 - CGFloat(entries.count - index) * height
+                return (y: y, height: height)
+            }
+        )
     }
 
     /// 分栏视图：每列一层目录，点目录在右侧开新列（类似访达的列视图）
@@ -253,22 +275,69 @@ extension ContentView {
                 }
             }
             .padding(.bottom, 6)
+            .overlay {
+                // 只有最后一列会承接键盘导航，其余列不用跟
+                if isLast {
+                    EntryRevealMarker(
+                        tick: entryRevealTick,
+                        count: items.count,
+                        index: items.firstIndex { model.selection.contains($0.id) },
+                        metrics: { index, contentHeight in
+                            let height = Metrics.columnRowHeight
+                            return (y: contentHeight - 6 - CGFloat(items.count - index) * height,
+                                    height: height)
+                        }
+                    )
+                }
+            }
         }
     }
 
     var iconGrid: some View {
-        ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 116), spacing: 6)], spacing: 6) {
-                ForEach(model.displayEntries) { entry in
+        let entries = model.displayEntries
+        let columns = IconGridLayout.columns(forWidth: gridWidth)
+        return ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: IconGridLayout.tileMin),
+                                         spacing: IconGridLayout.spacing)],
+                      spacing: IconGridLayout.spacing) {
+                ForEach(entries) { entry in
                     IconTile(
                         entry: entry,
                         model: model,
                         hover: hover,
                         selected: model.selection.contains(entry.id)
                     )
+                    .id(entry.id)
                 }
             }
-            .padding(14)
+            .padding(IconGridLayout.padding)
+            .background(EntryScrollTopMarker(tick: entryScrollTopTick))
+            .background(
+                // 只是量宽度：列数决定下键跳几格、滚动落点落在哪一格
+                GeometryReader { proxy in
+                    Color.clear
+                        .onAppear { gridWidth = proxy.size.width }
+                        .onChange(of: proxy.size.width) { _, width in gridWidth = width }
+                }
+            )
+            .overlay {
+                EntryRevealMarker(
+                    tick: entryRevealTick,
+                    count: entries.count,
+                    index: entries.firstIndex { model.selection.contains($0.id) },
+                    metrics: { index, contentHeight in
+                        // 网格的格子高度随字号/行数固定，但不想在这里再写死一份：
+                        // 由内容总高反推行距，行距减去间距就是格子高度
+                        let rows = max(1, Int(ceil(Double(entries.count) / Double(columns))))
+                        let padding = IconGridLayout.padding
+                        let spacing = IconGridLayout.spacing
+                        let pitch = (contentHeight - padding * 2 + spacing) / CGFloat(rows)
+                        let row = index / columns
+                        return (y: padding + CGFloat(row) * pitch,
+                                height: max(1, pitch - spacing))
+                    }
+                )
+            }
         }
         .background(Color(nsColor: .textBackgroundColor))
     }
@@ -451,6 +520,136 @@ extension ContentView {
 
 }
 
+// MARK: - 滚到可见
+
+/// 把选中项按**最小位移**滚进视口；已经完整可见就一步都不动。
+///
+/// 不用 `ScrollViewReader.scrollTo(anchor: .center)`：那个 API 只要选中项变了
+/// 就滚，而且一定把目标摆到视口正中——鼠标单击一行整页就跳，⌘A 更是按
+/// `Set.first`（无序）随手挑一条居中。这里换成 AppKit 的滚动语义：
+/// 只补「超出视口的那点差值」。
+///
+/// 落点由调用方按索引算好（行高固定，不需要该行真的被渲染出来）：
+/// LazyVStack 里视口外的那一行根本不存在，靠「行视图 onAppear」是滚不到它的。
+struct EntryScrollFollower: NSViewRepresentable {
+    let tick: Int
+
+    func makeNSView(context: Context) -> FollowerView { FollowerView() }
+
+    func updateNSView(_ view: FollowerView, context: Context) {
+        view.sync(tick: tick)
+    }
+
+    final class FollowerView: NSView {
+        /// 首次同步只记基线：视图重建（切目录、切布局）时把当前 tick
+        /// 当成「刚发生的变化」会平白滚一下
+        private var lastTick: Int?
+
+        /// 纯定位标记，不吃鼠标事件（拖拽、右键、单击都要落到行上）
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override var isFlipped: Bool { true }
+
+        func sync(tick: Int) {
+            defer { lastTick = tick }
+            guard let lastTick, lastTick != tick else { return }
+            // 等这一帧布局落地：新位置这时才拿到真实 frame
+            DispatchQueue.main.async { [weak self] in self?.reveal() }
+        }
+
+        private func reveal() {
+            guard window != nil, let clip = enclosingClipView() else { return }
+            let row = convert(bounds, to: clip)
+            guard let delta = EntryScroll.minimalDelta(row: row,
+                                                       visible: clip.bounds,
+                                                       contentHeight: clip.documentRect.height)
+            else { return }
+            #if DEBUG
+            // 只有真的滚了才记：排查「单击也跳」这类时序问题靠这行
+            DebugLog.reveal("scroll delta=\(delta) row=\(row) visible=\(clip.bounds)")
+            #endif
+            var target = clip.bounds.origin
+            target.y += delta
+            clip.scroll(to: target)
+            clip.enclosingScrollView?.reflectScrolledClipView(clip)
+        }
+    }
+}
+
+/// 列表内容整批换掉（改关键词、进目录、换包）时回到顶部。
+/// 不回到顶部的话，17 条搜索结果会停在上一份内容留下的滚动位置上，
+/// 头几条根本看不见，看着像「没搜到」。
+struct EntryScrollTopMarker: NSViewRepresentable {
+    let tick: Int
+
+    func makeNSView(context: Context) -> TopView { TopView() }
+
+    func updateNSView(_ view: TopView, context: Context) {
+        view.sync(tick: tick)
+    }
+
+    final class TopView: NSView {
+        private var lastTick: Int?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override var isFlipped: Bool { true }
+
+        func sync(tick: Int) {
+            defer { lastTick = tick }
+            guard let lastTick, lastTick != tick else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.window != nil, let clip = self.enclosingClipView() else { return }
+                clip.scroll(to: NSPoint(x: 0, y: 0))
+                clip.enclosingScrollView?.reflectScrolledClipView(clip)
+            }
+        }
+    }
+}
+
+/// 按索引把「选中项应该在的位置」摆成一个隐藏标记，交给 `EntryScrollFollower`。
+/// 三种视图共用：各自只需要说清楚「第 index 项在内容里的 y 和高度」，
+/// 滚动策略（已可见不动、只走最小位移）只有一份。
+struct EntryRevealMarker: View {
+    let tick: Int
+    let count: Int
+    let index: Int?
+    /// (第几项, 内容总高) → 该项在内容坐标系里的 y 与高度
+    let metrics: (Int, CGFloat) -> (y: CGFloat, height: CGFloat)
+
+    var body: some View {
+        GeometryReader { proxy in
+            if let index, count > 0 {
+                let box = metrics(index, proxy.size.height)
+                EntryScrollFollower(tick: tick)
+                    .frame(height: max(1, box.height))
+                    .offset(y: box.y)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+extension NSView {
+    /// SwiftUI 的 ScrollView 底下就是 NSScrollView；往上找到最近的 clip view
+    func enclosingClipView() -> NSClipView? {
+        var view = superview
+        while let current = view {
+            if let clip = current as? NSClipView { return clip }
+            view = current.superview
+        }
+        return nil
+    }
+}
+
+/// 鼠标点中一行之后，把键盘交还列表。
+/// 焦点还停在搜索框里时，方向键在挪光标、Return 在提交输入、空格在打字，
+/// 看起来像「点了行但键盘不听话」。只在这一步切，边输入边跳结果时不动焦点。
+@MainActor
+func takeKeyboardFocus() {
+    NotificationCenter.default.post(name: .rrzipFocusList, object: nil)
+}
+
 // MARK: - 列表行
 
 struct EntryRow: View {
@@ -520,7 +719,10 @@ struct EntryRow: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { model.activate(entry) }
-        .onTapGesture { model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? []) }
+        .onTapGesture {
+            model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? [])
+            takeKeyboardFocus()
+        }
         .onDrag { EntryDrag.provider(for: entry, model: model) }
         .onHover { inside in
             hovering = inside
@@ -578,11 +780,17 @@ struct ColumnRow: View {
         // 面包屑出现「照片 › 照片」，看起来就像套了一层。
         if entry.isDirectory {
             row
-                .onTapGesture { model.jump(to: entry.path) }
+                .onTapGesture {
+                    model.jump(to: entry.path)
+                    takeKeyboardFocus()
+                }
         } else {
             row
                 .onTapGesture(count: 2) { model.activate(entry) }
-                .onTapGesture { model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? []) }
+                .onTapGesture {
+                    model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? [])
+                    takeKeyboardFocus()
+                }
         }
     }
 
@@ -662,7 +870,10 @@ struct IconTile: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { model.activate(entry) }
-        .onTapGesture { model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? []) }
+        .onTapGesture {
+            model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? [])
+            takeKeyboardFocus()
+        }
         .onDrag { EntryDrag.provider(for: entry, model: model) }
         .onHover { inside in
             hovering = inside

@@ -262,7 +262,17 @@ final class ArchiveModel: ObservableObject {
 
     @Published private(set) var trail: [Frame] = []
     @Published var selection: Set<ArchiveEntry.ID> = []
-    @Published var searchText: String = ""
+    @Published var searchText: String = "" {
+        didSet {
+            guard searchText != oldValue else { return }
+            // 关键词一变，列表内容整批换掉：留着已经看不见的选中项，
+            // 预览是空的、底部却写「已选 N 项」，删除还会作用到不可见的条目
+            pruneSelectionToDisplayed()
+        }
+    }
+    /// 键盘导航计数。视图只在它变化时才把选中行滚进视口；
+    /// 单击 / ⌘ 多选 / ⇧ 连选 / ⌘A 一律不动滚动位置。
+    @Published private(set) var keyboardScrollTick: Int = 0
     @Published var viewMode: ArchiveViewMode = .list {
         didSet { UserDefaults.standard.set(viewMode.rawValue, forKey: "rrzip.viewMode") }
     }
@@ -534,25 +544,50 @@ final class ArchiveModel: ObservableObject {
         }
     }
 
-    /// 当前选中的第一个条目（键盘导航与快速查看用）
+    /// 命中顺序：单击 / ⌘ / ⇧ / 方向键都按**屏幕上看到的顺序**算。
+    /// 以前用的是 `visibleEntries`（索引里的原始顺序），而列表渲染的是排过序的
+    /// `displayEntries`——按大小或倒序排的时候，⇧ 连选会圈到别的行，方向键也会乱跳。
+    var selectionOrder: [ArchiveEntry] { displayEntries }
+
+    /// 当前选中的条目：优先最近一次点中 / 键盘走到的那条，
+    /// 它才是预览、快速查看、右键菜单真正对得上的对象。
+    /// 只取 `selection` 里的任意一条时，⌘ 多选后预览会跳到另一行上去。
     var selectedEntry: ArchiveEntry? {
-        let list = isSearching ? displayEntries : visibleEntries
+        let list = selectionOrder
+        if let focusedID, selection.contains(focusedID),
+           let entry = list.first(where: { $0.id == focusedID }) {
+            return entry
+        }
         return list.first { selection.contains($0.id) }
     }
 
-    /// 上下键移动选中
-    func moveSelection(by delta: Int) {
-        let list = isSearching ? displayEntries : visibleEntries
+    /// 上下键移动选中。`columns > 1` 时按「一行 columns 个」跳，图标网格用；
+    /// 列表与分栏传默认值 1，三种视图共用同一套命中与锚点逻辑。
+    func moveSelection(by delta: Int, columns: Int = 1) {
+        let list = selectionOrder
         guard !list.isEmpty else { return }
-        let currentIndex = list.firstIndex { selection.contains($0.id) }
+        let step = max(1, columns)
+        // 从锚点接着走：多选状态下不能每次从「第一条选中的」重新起算，
+        // 否则 ⌘ 多选后按方向键会跳回列表顶部附近
+        let basis = selectionAnchor.flatMap { anchor in list.firstIndex { $0.id == anchor } }
+            ?? list.firstIndex { selection.contains($0.id) }
         let nextIndex: Int
-        if let currentIndex {
-            nextIndex = min(max(currentIndex + delta, 0), list.count - 1)
+        if let basis {
+            let raw = basis + delta * step
+            if raw < 0, step > 1, basis >= step {
+                // 网格里往上越界：回到第一行的同一列，而不是被夹到第 0 格
+                nextIndex = basis % step
+            } else {
+                nextIndex = min(max(raw, 0), list.count - 1)
+            }
         } else {
             nextIndex = delta > 0 ? 0 : list.count - 1
         }
         let entry = list[nextIndex]
         selection = [entry.id]
+        selectionAnchor = entry.id
+        focusedID = entry.id
+        keyboardScrollTick &+= 1
     }
 
     /// 回车：目录进入下一层，嵌套包展开，文件走默认预览
@@ -563,6 +598,23 @@ final class ArchiveModel: ObservableObject {
 
     /// 最近一次单击的锚点，⇧ 连选以它为起点
     private var selectionAnchor: String?
+    /// 最近一次真正点中 / 键盘走到的那条，决定预览显示谁
+    private var focusedID: String?
+
+    /// 列表内容变了（换关键词）之后，把已经不存在的选中项摘掉
+    private func pruneSelectionToDisplayed() {
+        guard !selection.isEmpty else { return }
+        let displayed = Set(displayEntries.map(\.id))
+        let kept = selection.intersection(displayed)
+        guard kept != selection else { return }
+        selection = kept
+        if let focusedID, !kept.contains(focusedID) {
+            self.focusedID = kept.first
+        }
+        if let selectionAnchor, !kept.contains(selectionAnchor) {
+            self.selectionAnchor = kept.first
+        }
+    }
 
     /// 单击：选中并刷新预览
     func select(_ entry: ArchiveEntry) {
@@ -571,11 +623,12 @@ final class ArchiveModel: ObservableObject {
 
     /// 带修饰键的选中：⌘ 反选、⇧ 连选，跟访达的习惯一致
     func select(_ entry: ArchiveEntry, modifiers: NSEvent.ModifierFlags) {
-        let list = isSearching ? displayEntries : visibleEntries
+        let list = selectionOrder
 
         if modifiers.contains(.command) {
             if selection.contains(entry.id) { selection.remove(entry.id) } else { selection.insert(entry.id) }
             selectionAnchor = entry.id
+            focusedID = entry.id
             previewToken &+= 1
             return
         }
@@ -586,6 +639,9 @@ final class ArchiveModel: ObservableObject {
            let to = list.firstIndex(where: { $0.id == entry.id }) {
             let range = from <= to ? from...to : to...from
             selection = Set(list[range].map(\.id))
+            // 连选的锚点保持不动（再按住 ⇧ 点别处还能继续延伸），
+            // 但「当前这一条」是刚点的那行——预览要跟着它
+            focusedID = entry.id
             previewToken &+= 1
             return
         }
@@ -596,6 +652,7 @@ final class ArchiveModel: ObservableObject {
             selection = [entry.id]
         }
         selectionAnchor = entry.id
+        focusedID = entry.id
     }
 
     /// 双击：目录进入下一层，嵌套包展开，普通文件交给默认程序打开
@@ -621,9 +678,10 @@ final class ArchiveModel: ObservableObject {
 
     /// ⌘A：把当前这一层全选（搜索状态下选搜索结果）
     func selectAll() {
-        let list = isSearching ? displayEntries : visibleEntries
+        let list = selectionOrder
         selection = Set(list.map(\.id))
         selectionAnchor = list.first?.id
+        focusedID = list.first?.id
         previewToken &+= 1
     }
 
@@ -679,9 +737,9 @@ final class ArchiveModel: ObservableObject {
         if UserDefaults.standard.object(forKey: "rrzip.sortAscending") != nil {
             sortAscending = UserDefaults.standard.bool(forKey: "rrzip.sortAscending")
         }
-        if let keyword = UserDefaults.standard.string(forKey: "rrzip.search") {
-            searchText = keyword
-        }
+        // 旧版本在这里恢复上次的关键词，可它从来没被写过；真写进去反而更糟：
+        // 启动时先带着一个关键词，第一个包打开就被筛成空列表。顺手清掉遗留键。
+        UserDefaults.standard.removeObject(forKey: "rrzip.search")
         loadRecentArchives()
     }
     /// 预览/导出缓存：key = 归档路径 + 修改时间 + 条目路径
@@ -1062,6 +1120,10 @@ final class ArchiveModel: ObservableObject {
             archiveSize: attrs?[.size] as? Int64,
             archiveModified: attrs?[.modificationDate] as? Date
         )
+        // 换包就是换浏览上下文：旧关键词留在输入框里，新包会被旧条件筛成
+        // 「没有匹配的文件」，看起来像空包。打开另一个包、进嵌套包都按这个语义走。
+        let switchedArchive = resetTrail || trail.last?.archive.path != url.path
+        if switchedArchive { searchText = "" }
         if resetTrail {
             trail = [frame]
             recordRecent(url)
@@ -1168,7 +1230,7 @@ final class ArchiveModel: ObservableObject {
             errorMessage = "嵌套包里的内容来自外层包的临时副本，改动不会保存。\n请先把内层包导出，再单独打开编辑。"
             return
         }
-        let targets = (isSearching ? displayEntries : visibleEntries).filter { selection.contains($0.id) }
+        let targets = selectionOrder.filter { selection.contains($0.id) }
         guard !targets.isEmpty else { return }
 
         let alert = NSAlert()
@@ -1206,7 +1268,7 @@ final class ArchiveModel: ObservableObject {
     /// 把当前选中项放进暂存区
     func addSelectionToStash() {
         guard let frame = current else { return }
-        let items = (isSearching ? displayEntries : visibleEntries).filter { selection.contains($0.id) }
+        let items = selectionOrder.filter { selection.contains($0.id) }
         guard !items.isEmpty else { return }
         for entry in items where !entry.isDirectory {
             let item = StashItem(archive: frame.archive, path: entry.path, size: entry.size)

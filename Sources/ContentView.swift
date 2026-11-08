@@ -33,6 +33,12 @@ struct ContentView: View {
     @State var showWelcome = false
     /// 密码弹窗的输入框
     @State var passwordInput = ""
+    /// 「把选中行滚进视口」的信号计数：只由键盘导航 / 切换布局驱动，鼠标选中不动
+    @State var entryRevealTick = 0
+    /// 「列表回到顶部」的信号计数：改关键词、进目录、换包时自增
+    @State var entryScrollTopTick = 0
+    /// 图标网格量出来的宽度，决定一行几列
+    @State var gridWidth: Double = 0
 
     var body: some View {
         shell
@@ -50,6 +56,11 @@ struct ContentView: View {
             .task { await runStartupTasks() }
             .onReceive(NotificationCenter.default.publisher(for: .rrzipFocusSearch)) { _ in
                 searchFocused = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .rrzipFocusList)) { _ in
+                // 点中列表行 / 搜索框里按 Esc、Return 之后，键盘交还列表
+                searchFocused = false
+                listFocused = true
             }
             .onReceive(NotificationCenter.default.publisher(for: .rrzipToggleWorkspaceMode)) { _ in
                 model.toggleWorkspaceMode()

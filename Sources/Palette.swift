@@ -108,6 +108,8 @@ enum Metrics {
     static let statusHeight: CGFloat = 26
     static let rowHeight: CGFloat = 32
     static let rowHeightWide: CGFloat = 38
+    /// 分栏视图的行高。列视图的行更矮，滚动落点也要按它算
+    static let columnRowHeight: CGFloat = 24
     static let gutter: CGFloat = Space.xxl
     static let radiusPill: CGFloat = 4
     static let radiusRow: CGFloat = 6
