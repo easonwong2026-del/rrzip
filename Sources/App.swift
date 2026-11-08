@@ -457,6 +457,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension Notification.Name {
     /// ⌘F：把焦点丢进搜索框（菜单项发、主界面收）
     static let rrzipFocusSearch = Notification.Name("rrzipFocusSearch")
+    /// 反向：把键盘交还列表（点中列表行、搜索框里按 Esc / Return 时发）
+    static let rrzipFocusList = Notification.Name("rrzipFocusList")
     /// ⌃⌘M：简化 / 完整模式互切（菜单项发、主界面收，窗口尺寸由主界面负责）
     static let rrzipToggleWorkspaceMode = Notification.Name("rrzipToggleWorkspaceMode")
     /// 帮助菜单：随时重看首次启动那一屏

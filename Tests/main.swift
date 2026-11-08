@@ -8,6 +8,7 @@ import Foundation
 
 runArchiveTests()
 runModelTests()
+runNavigationTests()
 runFinderTests()
 runSettingsTests()
 runCompressTests()

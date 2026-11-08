@@ -179,7 +179,19 @@ extension ContentView {
                 .focused($searchFocused)
                 .frame(width: 128)
                 .disabled(model.current == nil)
-                .onExitCommand { model.searchText = "" }
+                // Esc：清掉关键词并把键盘交还列表（跟访达一致）。
+                // 以前只清文字、焦点留在输入框，接着按方向键还在挪光标。
+                .onExitCommand {
+                    model.searchText = ""
+                    takeKeyboardFocus()
+                }
+                // Return：搜完直接回列表继续操作，不留在输入框里
+                .onSubmit {
+                    if model.selection.isEmpty, let first = model.displayEntries.first {
+                        model.select(first)
+                    }
+                    takeKeyboardFocus()
+                }
             if !model.searchText.isEmpty {
                 Button {
                     model.searchText = ""

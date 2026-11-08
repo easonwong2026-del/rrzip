@@ -30,6 +30,8 @@ SHARED_STATE=(
 APP_ONLY=(
     Sources/ExtractDestination.swift
     Sources/CacheMaintenance.swift
+    # 键盘导航的滚动决策是纯几何，测试直接验「已可见就不动 / 只补差值」
+    Sources/EntryScroll.swift
 )
 
 # 访达扩展的菜单判定与任务执行
