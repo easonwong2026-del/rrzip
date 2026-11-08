@@ -34,7 +34,24 @@ enum EntryScroll {
     }
 }
 
-/// 图标网格的列宽规则。视图与键盘导航共用一份，/// 否则「下键跳一格还是跳一行」会和屏幕上看到的行对不上。
+/// 什么时候该把选中项滚进视口。
+///
+/// 只有两种情况：键盘导航（tick 由模型发），以及布局切换（视图重建之后补一次定位）。
+/// 关键点是**首次同步只记基线**：视图新建时拿到的 tick 是「当前值」，
+/// 不是「刚发生的变化」，照它滚一次会在切目录、切布局时平白跳一下。
+struct EntryRevealGate {
+    private var lastTick: Int?
+
+    /// - Returns: 这次 tick 是否代表「需要滚一下」
+    mutating func shouldReveal(tick: Int, active: Bool) -> Bool {
+        defer { lastTick = tick }
+        guard active, let lastTick else { return false }
+        return lastTick != tick
+    }
+}
+
+/// 图标网格的列宽规则。视图与键盘导航共用一份，
+/// 否则「下键跳一格还是跳一行」会和屏幕上看到的行对不上。
 enum IconGridLayout {
     static let tileMin: CGFloat = 116
     static let spacing: CGFloat = 6

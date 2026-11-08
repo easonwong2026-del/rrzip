@@ -16,6 +16,14 @@ extension ContentView {
         return IconGridLayout.columns(forWidth: gridWidth)
     }
 
+    /// 布局刚换过：新滚动容器这一帧还没建好，它的首次同步只会记基线。
+    /// 连发两次（下一拍 + 80ms 后），第二次一定落在新容器建好之后；
+    /// 已经可见时 `EntryScroll.minimalDelta` 返回 nil，多发一次不会多滚。
+    func requestLayoutReveal() {
+        DispatchQueue.main.async { entryRevealTick &+= 1 }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { entryRevealTick &+= 1 }
+    }
+
     var compactWorkspace: some View {
         GeometryReader { proxy in
             entryList
@@ -114,7 +122,9 @@ extension ContentView {
         // 三种视图共用同一个「滚到可见」信号：键盘导航与切换布局时才发，
         // 鼠标选中一律不发，单击就不会带着列表跳
         .onChange(of: model.keyboardScrollTick) { _, _ in entryRevealTick &+= 1 }
-        .onChange(of: model.workspaceMode) { _, _ in entryRevealTick &+= 1 }
+        // 换视图 / 换工作模式会重建整个滚动容器：新的 follower 首次同步只记基线，
+        // 所以要等这一轮布局落地之后再补发信号，否则「选中项被带过去」这一步落空
+        .onChange(of: model.layoutTick) { _, _ in requestLayoutReveal() }
         // 内容整批换掉时回到顶部：改关键词、进/出目录、换包
         .onChange(of: model.searchText) { _, _ in entryScrollTopTick &+= 1 }
         .onChange(of: model.current?.id) { _, _ in entryScrollTopTick &+= 1 }
@@ -533,37 +543,50 @@ extension ContentView {
 /// LazyVStack 里视口外的那一行根本不存在，靠「行视图 onAppear」是滚不到它的。
 struct EntryScrollFollower: NSViewRepresentable {
     let tick: Int
+    /// 只有「当前这一项」才该被滚出来；没选中的标记不动滚动位置
+    let active: Bool
 
     func makeNSView(context: Context) -> FollowerView { FollowerView() }
 
     func updateNSView(_ view: FollowerView, context: Context) {
-        view.sync(tick: tick)
+        view.sync(tick: tick, active: active)
     }
 
     final class FollowerView: NSView {
-        /// 首次同步只记基线：视图重建（切目录、切布局）时把当前 tick
-        /// 当成「刚发生的变化」会平白滚一下
-        private var lastTick: Int?
+        private var gate = EntryRevealGate()
 
         /// 纯定位标记，不吃鼠标事件（拖拽、右键、单击都要落到行上）
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
         override var isFlipped: Bool { true }
 
-        func sync(tick: Int) {
-            defer { lastTick = tick }
-            guard let lastTick, lastTick != tick else { return }
-            // 等这一帧布局落地：新位置这时才拿到真实 frame
-            DispatchQueue.main.async { [weak self] in self?.reveal() }
+        func sync(tick: Int, active: Bool) {
+            guard gate.shouldReveal(tick: tick, active: active) else { return }
+            attemptReveal(0)
         }
 
-        private func reveal() {
-            guard window != nil, let clip = enclosingClipView() else { return }
+        /// 视图刚换过来的前几帧，标记还没有窗口/尺寸（ScrollView 还在建），
+        /// 这时算出来的矩形不可信。等一帧再试，最多重试 8 次（≈0.2s）就放弃。
+        private func attemptReveal(_ attempt: Int) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if self.reveal() { return }              // 布局就绪（滚不滚另说）
+                guard attempt < 8 else { return }        // 还没就绪：下一拍再试
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { [weak self] in
+                    self?.attemptReveal(attempt + 1)
+                }
+            }
+        }
+
+        /// - Returns: true 表示布局已就绪（滚不滚另说）；false 表示还没就绪，值得重试
+        @discardableResult
+        private func reveal() -> Bool {
+            guard window != nil, bounds.height > 0.5, let clip = enclosingClipView() else { return false }
             let row = convert(bounds, to: clip)
             guard let delta = EntryScroll.minimalDelta(row: row,
                                                        visible: clip.bounds,
                                                        contentHeight: clip.documentRect.height)
-            else { return }
+            else { return true }
             #if DEBUG
             // 只有真的滚了才记：排查「单击也跳」这类时序问题靠这行
             DebugLog.reveal("scroll delta=\(delta) row=\(row) visible=\(clip.bounds)")
@@ -572,6 +595,7 @@ struct EntryScrollFollower: NSViewRepresentable {
             target.y += delta
             clip.scroll(to: target)
             clip.enclosingScrollView?.reflectScrolledClipView(clip)
+            return true
         }
     }
 }
@@ -621,7 +645,7 @@ struct EntryRevealMarker: View {
         GeometryReader { proxy in
             if let index, count > 0 {
                 let box = metrics(index, proxy.size.height)
-                EntryScrollFollower(tick: tick)
+                EntryScrollFollower(tick: tick, active: true)
                     .frame(height: max(1, box.height))
                     .offset(y: box.y)
             }

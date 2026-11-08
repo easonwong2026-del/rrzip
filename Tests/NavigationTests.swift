@@ -16,12 +16,32 @@ import AppKit
 func runNavigationTests() {
     testMinimalScrollDelta()
     testGridColumns()
+    testRevealGate()
     testMouseSelectionNeverScrolls()
     testKeyboardNavigationFollowsAnchor()
     testMultiSelectKeepsGroup()
     testRangeFollowsSortedOrder()
+    testColumnsOrderFollowsColumnView()
+    testLayoutSwitchKeepsSelectionAndAsksForReveal()
     testSearchResetsWhenSwitchingArchive()
     testSelectionPrunedWhenListChanges()
+}
+
+/// 视图新建时的时序：首次同步只记基线，不能当成「刚发生的变化」
+func testRevealGate() {
+    print("滚动闸门 · 首次同步不滚，tick 变化才滚")
+    var gate = EntryRevealGate()
+
+    expect(!gate.shouldReveal(tick: 7, active: true), "首次同步只记基线")
+    expect(!gate.shouldReveal(tick: 7, active: true), "同一 tick 重复同步不再滚")
+    expect(gate.shouldReveal(tick: 8, active: true), "tick 前进才滚")
+    expect(!gate.shouldReveal(tick: 9, active: false), "没选中就不滚")
+    expect(gate.shouldReveal(tick: 10, active: true), "恢复选中后仍按 tick 判定")
+
+    // 换视图：新视图的第一次同步是基线，第二次（布局落地后补发的信号）才滚
+    var fresh = EntryRevealGate()
+    expect(!fresh.shouldReveal(tick: 3, active: true), "新视图首次同步仍是基线")
+    expect(fresh.shouldReveal(tick: 4, active: true), "补发的信号能触发定位")
 }
 
 // MARK: - 纯几何
@@ -196,6 +216,110 @@ func testRangeFollowsSortedOrder() {
                "\(model.selection)")
 
         model.sortAscending = true
+    }
+}
+
+/// 分栏视图显示的是 `entries(at:)`（目录在前、名称正序），不跟随排序设置。
+/// 按大小/倒序排过再切分栏，方向键和 ⇧ 连选必须跟着**列里看到的顺序**走。
+func testColumnsOrderFollowsColumnView() {
+    MainActor.assumeIsolated {
+        print("分栏视图 · 导航顺序等于列里可见顺序")
+        let (model, _) = openBasic()
+        guard let prefix = model.current?.prefix else {
+            expect(false, "basic.zip 已打开")
+            return
+        }
+
+        model.workspaceMode = .full          // 简化模式不显示分栏，会退回列表
+        model.viewMode = .columns
+
+        // 列表按名称倒序：这份顺序和列视图（名称正序）正好相反
+        model.sortKey = .name
+        model.sortAscending = false
+
+        let columnOrder = model.entries(at: prefix)
+        let listOrder = model.displayEntries
+        expect(model.isShowingColumns, "当前真的在显示分栏")
+        expect(columnOrder.map(\.id) != listOrder.map(\.id),
+               "前提：列视图顺序与列表排序结果不同",
+               "\(columnOrder.map(\.name))")
+        expect(model.selectionOrder.map(\.id) == columnOrder.map(\.id),
+               "命中顺序取列视图那一份", "\(model.selectionOrder.map(\.name))")
+
+        guard columnOrder.count >= 3 else {
+            expect(false, "basic.zip 至少 3 个条目")
+            return
+        }
+
+        // 方向键：按列里的下一行走
+        model.select(columnOrder[0])
+        model.moveSelection(by: 1)
+        expect(model.selection == [columnOrder[1].id], "下键落在列里第 2 行",
+               "\(model.selection)")
+        model.moveSelection(by: -1)
+        expect(model.selection == [columnOrder[0].id], "上键回到列里第 1 行",
+               "\(model.selection)")
+
+        // ⇧ 连选：按列顺序圈连续三行
+        model.select(columnOrder[0])
+        model.select(columnOrder[2], modifiers: .shift)
+        expect(model.selection == [columnOrder[0].id, columnOrder[1].id, columnOrder[2].id],
+               "⇧ 连选圈住列视图连续三行", "\(model.selection)")
+
+        // 退回列表：排序结果说了算，不能被列视图那份顺序带歪
+        model.viewMode = .list
+        let shown = model.displayEntries
+        model.select(shown[0])
+        model.moveSelection(by: 1)
+        expect(model.selection == [shown[1].id], "列表里下键仍按排序结果走",
+               "\(model.selection)")
+
+        model.sortAscending = true
+        model.workspaceMode = .compact
+    }
+}
+
+/// 换视图：选中项保留，并且要发出一次「布局落地后定位」的信号。
+/// 定位本身要真实窗口才看得见，这里钉住可测的契约：选中不变、信号来自 layoutTick、
+/// 且鼠标操作那条规则（keyboardScrollTick 不动）不被破坏。
+func testLayoutSwitchKeepsSelectionAndAsksForReveal() {
+    MainActor.assumeIsolated {
+        print("换视图 · 保留选中项并请求定位")
+        let (model, list) = openBasic()
+        guard list.count >= 3 else {
+            expect(false, "basic.zip 至少 3 个条目")
+            return
+        }
+        model.workspaceMode = .full
+
+        let target = list[list.count - 1]
+        model.select(target)
+        expect(model.selection == [target.id], "先选中最后一条")
+        let layoutBefore = model.layoutTick
+        let keyboardBefore = model.keyboardScrollTick
+
+        model.viewMode = .icons
+        expect(model.layoutTick == layoutBefore + 1, "换视图发出布局信号",
+               "\(model.layoutTick)")
+        expect(model.keyboardScrollTick == keyboardBefore, "布局信号不算键盘导航")
+        expect(model.selection == [target.id], "选中项保留（图标视图）")
+        expect(model.selectedEntry?.id == target.id, "预览仍是同一条")
+
+        model.viewMode = .columns
+        expect(model.layoutTick == layoutBefore + 2, "再换一次再发一次")
+        expect(model.selection == [target.id], "选中项保留（分栏视图）")
+        expect(model.selectedEntry?.id == target.id, "分栏里仍预览同一条")
+
+        model.viewMode = .list
+        expect(model.selection == [target.id], "回到列表仍保留")
+
+        // 鼠标操作不该被这些信号带出滚动
+        let afterSwitch = model.keyboardScrollTick
+        model.select(list[0])
+        model.selectAll()
+        expect(model.keyboardScrollTick == afterSwitch, "换视图之后鼠标选中仍不滚动")
+
+        model.workspaceMode = .compact
     }
 }
 

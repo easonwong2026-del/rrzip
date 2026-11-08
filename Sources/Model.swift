@@ -273,8 +273,14 @@ final class ArchiveModel: ObservableObject {
     /// 键盘导航计数。视图只在它变化时才把选中行滚进视口；
     /// 单击 / ⌘ 多选 / ⇧ 连选 / ⌘A 一律不动滚动位置。
     @Published private(set) var keyboardScrollTick: Int = 0
+    /// 布局切换计数（视图形态 / 简化模式）。视图换了主体就重建了，
+    /// 新滚动容器的「首次同步」不能当作滚动信号，得等布局落地后再补一次定位。
+    @Published private(set) var layoutTick: Int = 0
     @Published var viewMode: ArchiveViewMode = .list {
-        didSet { UserDefaults.standard.set(viewMode.rawValue, forKey: "rrzip.viewMode") }
+        didSet {
+            UserDefaults.standard.set(viewMode.rawValue, forKey: "rrzip.viewMode")
+            if viewMode != oldValue { layoutTick &+= 1 }
+        }
     }
     /// 列表排序：点表头切换列，再点一次换方向
     @Published var sortKey: SortKey = .name {
@@ -294,7 +300,10 @@ final class ArchiveModel: ObservableObject {
     }
     /// 简化 / 完整模式。放在 model 里而不是视图里，切换模式不会重建状态机
     @Published var workspaceMode: WorkspaceMode = .compact {
-        didSet { UserDefaults.standard.set(workspaceMode.rawValue, forKey: "rrzip.workspaceMode") }
+        didSet {
+            UserDefaults.standard.set(workspaceMode.rawValue, forKey: "rrzip.workspaceMode")
+            if workspaceMode != oldValue { layoutTick &+= 1 }
+        }
     }
     /// 最近一次「手动」切模式的时刻。自适应布局在这之后 5 分钟内不抢控制权
     private(set) var modePinnedAt: Date = .distantPast
@@ -544,10 +553,23 @@ final class ArchiveModel: ObservableObject {
         }
     }
 
+    /// 分栏视图当前是否真的在显示（它会退回列表：简化模式、搜索中都走列表）
+    var isShowingColumns: Bool {
+        !isCompactMode && viewMode == .columns && !isSearching
+    }
+
     /// 命中顺序：单击 / ⌘ / ⇧ / 方向键都按**屏幕上看到的顺序**算。
-    /// 以前用的是 `visibleEntries`（索引里的原始顺序），而列表渲染的是排过序的
-    /// `displayEntries`——按大小或倒序排的时候，⇧ 连选会圈到别的行，方向键也会乱跳。
-    var selectionOrder: [ArchiveEntry] { displayEntries }
+    ///
+    /// 列表与图标网格都渲染 `displayEntries`（受排序设置影响）；
+    /// 分栏视图渲染的是 `entries(at:)`——那条路径恒为「目录在前、名称正序」，
+    /// 不跟随排序设置。所以分栏里必须换用它自己那一份，否则按大小或倒序排过
+    /// 再切分栏，方向键和 ⇧ 连选会跳到屏幕上不相邻的行。
+    var selectionOrder: [ArchiveEntry] {
+        if isShowingColumns, let frame = current {
+            return entries(at: frame.prefix)
+        }
+        return displayEntries
+    }
 
     /// 当前选中的条目：优先最近一次点中 / 键盘走到的那条，
     /// 它才是预览、快速查看、右键菜单真正对得上的对象。
