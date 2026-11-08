@@ -274,3 +274,23 @@ codesign --force --sign - "$BUNDLE" >/dev/null 2>&1  # 不用 --deep，避免覆
 
 echo "==> 完成：$BUNDLE"
 du -sh "$BUNDLE"
+
+# 每次都出 dmg：下载后直接拖进「应用程序」，不用先解压
+echo "==> 打包 DMG"
+VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$BUNDLE/Contents/Info.plist")
+DMG="build/rrzip-${VERSION}.dmg"
+STAGE=$(mktemp -d)/rrzip
+mkdir -p "$STAGE"
+cp -R "$BUNDLE" "$STAGE/"
+ln -s /Applications "$STAGE/Applications"
+rm -f "$DMG"
+# UDZO = 压缩只读镜像；HFS+ 比 APFS 兼容性稳，老系统也能挂
+hdiutil create -quiet -volname "rrzip ${VERSION}" -srcfolder "$STAGE" \
+    -fs HFS+ -format UDZO -ov "$DMG"
+rc=$?
+rm -rf "$(dirname "$STAGE")"
+if [ $rc -ne 0 ]; then
+    echo "DMG 制作失败（hdiutil 退出码 $rc）"
+    exit $rc
+fi
+ls -lh "$DMG" | awk '{print "    " $9 " (" $5 ")"}'

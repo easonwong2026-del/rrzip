@@ -308,8 +308,8 @@ SwiftUI + 系统 libarchive + 内置 7-Zip 26.05。全部本地运行，不联�
 
 ### 安装
 
-1. 下载下方的 `rrzip-v*.zip`，解压得到 `rrzip.app`
-2. 拖进「应用程序」文件夹
+1. 下载下方的 `rrzip-v*.dmg`，双击打开
+2. 把 `rrzip.app` 拖进「应用程序」文件夹（也可以直接拖到窗口里的 Applications 快捷方式）
 3. 首次打开若被系统拦截：**右键 → 打开**，或执行
 
    ```bash

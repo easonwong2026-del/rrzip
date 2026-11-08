@@ -115,6 +115,8 @@ jobs:
           finder=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/PlugIns/ArchiveFinder.appex/Contents/Info.plist")
           [ "$main" = "$finder" ] || { echo "::error::访达扩展版本 $finder 与主 app $main 不一致"; exit 1; }
           codesign --verify --deep --strict "$APP"
+          # 构建顺带出的安装包也要在，否则下载页就没东西可下
+          ls build/rrzip-*.dmg >/dev/null || { echo "::error::没有产出 dmg"; exit 1; }
 
       - name: 上传 app
         uses: actions/upload-artifact@v4
