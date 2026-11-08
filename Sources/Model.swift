@@ -328,7 +328,6 @@ final class ArchiveModel: ObservableObject {
         /// 父目录前缀 → 该层的直接子项（已排序，目录在前）
         let childIndex: [String: [ArchiveEntry]]
         let tree: [FolderNode]
-        let builtAt: Date
     }
 
     private var frameCache: FrameCache?
@@ -343,8 +342,7 @@ final class ArchiveModel: ObservableObject {
         let cache = FrameCache(
             frameID: frame.id,
             childIndex: index,
-            tree: Self.buildTree(from: index),
-            builtAt: Date()
+            tree: Self.buildTree(from: index)
         )
         frameCache = cache
         return cache
@@ -688,6 +686,12 @@ final class ArchiveModel: ObservableObject {
     }
     /// 预览/导出缓存：key = 归档路径 + 修改时间 + 条目路径
     private var payloadCache: [String: URL] = [:]
+    /// 同一 key 正在解压：后来的调用者登记在这里，共享同一次结果
+    private var payloadWaiters: [String: [(URL?) -> Void]] = [:]
+
+    /// 临时副本的磁盘软预算。单个文件本身超预算时也照样解压，
+    /// 只是它得等自己不再被占用、且比别的都老才会被回收。
+    static let payloadDiskBudget: Int64 = 1024 * 1024 * 1024
 
     // MARK: - 工作模式
     /// 用户主动展开 / 收起：记下时刻，冷却期内不再自动切换
@@ -1794,6 +1798,14 @@ final class ArchiveModel: ObservableObject {
             return completion(cached)
         }
 
+        // 详情栏、缩略图、悬停预览常常同时要同一份文件。第一份还在解的时候
+        // 后来的人只排队等结果，不再各自起一次 7zz / tar。
+        if payloadWaiters[key] != nil {
+            payloadWaiters[key]?.append(completion)
+            return
+        }
+        payloadWaiters[key] = [completion]
+
         let destination = freshScratch()
         let passphrase = passwords[frame.archive.path]
         let engine = frame.engine
@@ -1816,19 +1828,42 @@ final class ArchiveModel: ObservableObject {
                 return file
             }.value
             if let url {
-                if payloadCache.count > 300 {
-                    // 只清字典会把解压出来的文件留在磁盘上，一并删掉。
-                    // 正被预览占着的那个留着：删了当前这一屏就白了
-                    for (_, cached) in payloadCache
-                    where !ScratchUsage.shared.isHeld(cached.path) {
-                        try? FileManager.default.removeItem(at: cached.deletingLastPathComponent())
-                    }
-                    payloadCache.removeAll()
-                }
+                // 磁盘软预算：按字节回收最久未用的临时副本，这一次的结果不在候选里
+                trimScratch(keeping: url)
                 payloadCache[key] = url
             }
-            completion(url)
+            // 失败的路径也要把等待者全部放走：留一个就永久挂着
+            for waiter in payloadWaiters.removeValue(forKey: key) ?? [] {
+                waiter(url)
+            }
         }
+    }
+
+    /// 按字节回收 `scratch`，跳过正在被界面占用的、以及正在浏览的嵌套包。
+    /// 候选全是占用着的话允许暂时超预算，不做「反复解压再删除」这种事。
+    private func trimScratch(keeping url: URL) {
+        var keep: Set<String> = [url.path]
+        keep.formUnion(trail.compactMap { scratchTop(of: $0.archive) })
+        CacheMaintenance.trim(scratch, budget: Self.payloadDiskBudget, keep: keep)
+    }
+
+    /// 丢掉一份不再需要的临时副本：连同它所在的 scratch 子目录，并从索引里摘掉。
+    /// 只认 workspace 底下的路径，别的地方一律不碰。
+    func discardPayload(_ url: URL) {
+        payloadCache = payloadCache.filter { $0.value.path != url.path }
+        guard let dir = scratchTop(of: url) else { return }
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: dir))
+    }
+
+    /// `scratch/<UUID>/任意层/文件` → `scratch/<UUID>`；不在 scratch 下返回 nil。
+    /// 回收和丢弃都以 UUID 目录为单位：条目带子目录时只删一层会留下空壳。
+    private func scratchTop(of url: URL) -> String? {
+        guard url.path.hasPrefix(scratch.path + "/") else { return nil }
+        var dir = url.deletingLastPathComponent()
+        while dir.path != scratch.path, dir.deletingLastPathComponent().path != scratch.path {
+            dir = dir.deletingLastPathComponent()
+        }
+        return dir.path == scratch.path ? nil : dir.path
     }
 
     private func cacheKey(_ entry: ArchiveEntry, in frame: Frame) -> String {
@@ -2087,5 +2122,28 @@ final class ArchiveModel: ObservableObject {
         unlocked.remove(frame.archive.path)
         // 只清密码、保留已加载的条目列表，避免立刻又弹出密码框
         status = "已锁定 · \(frame.entries.count) 个项目"
+    }
+}
+
+/// 内嵌预览（详情栏 / 悬停）的大小上限。
+///
+/// 音频、视频要整份解压到临时目录才能播，超过上限的条目一旦解压就是几百 MB
+/// 的磁盘写入和 I/O，最后还是播不了。所以先按条目大小判断，再决定动不动解压。
+enum InlinePreviewLimits {
+    static let media: Int64 = 800 * 1024 * 1024
+    static let videoExts: Set<String> = ["mp4", "mov", "m4v", "mpg", "mpeg"]
+    static let audioExts: Set<String> = ["mp3", "m4a", "aac", "wav", "aiff", "flac", "ogg"]
+
+    static func isMedia(_ ext: String) -> Bool {
+        videoExts.contains(ext) || audioExts.contains(ext)
+    }
+
+    /// 已知大小超过上限：不解压，也不生成临时副本。
+    ///
+    /// 大小未知（`size < 0`，个别归档不写这一列）时判不了，仍然解压，
+    /// 由调用方拿到临时文件后按实际大小复核——宁可白解一次，也不能凭猜测
+    /// 把本来能预览的文件挡在门外。
+    static func skipsExtraction(_ entry: ArchiveEntry) -> Bool {
+        isMedia(entry.ext) && entry.size >= 0 && entry.size > media
     }
 }

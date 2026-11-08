@@ -111,7 +111,7 @@ final class ScratchUsage: @unchecked Sendable {
     /// - 抹平软链接（`contentsOfDirectory` 给 `/private/var/…`，调用方手里是 `/var/…`）；
     /// - 统一 Unicode 组合形式（APFS 存 NFD，Swift 字面量常是 NFC，
     ///   中文/带重音的文件名直接比会不相等，保护就静默失效了）。
-    private static func canonical(_ path: String) -> String {
+    static func canonical(_ path: String) -> String {
         URL(fileURLWithPath: path).resolvingSymlinksInPath().path
             .precomposedStringWithCanonicalMapping
     }
@@ -128,6 +128,70 @@ final class ScratchUsage: @unchecked Sendable {
 }
 
 enum CacheMaintenance {
+
+    /// 按字节回收临时副本的结果
+    struct TrimReport: Equatable, Sendable {
+        /// 本次删掉的目录数（每个目录是一次解压的产物）
+        var removed = 0
+        var failures = 0
+        /// 回收后的剩余占用
+        var bytes: Int64 = 0
+        /// 候选全被占用，仍然超预算——如实留着，不强删
+        var overBudget = false
+    }
+
+    /// 临时副本的字节软预算：按「最久未用」回收，直到占用回到预算以内。
+    ///
+    /// 以前只按条目数（300）判断，300 个小文本和 300 个视频差了几个数量级。
+    ///
+    /// - 正在被界面占用（`ScratchUsage`）的一律跳过，`keep` 里的也不动：
+    ///   刚解出来、还没交到界面手里的那一份删了就白干。
+    /// - 候选全在用就允许暂时超预算，返回结果里如实给出 `overBudget`。
+    /// - 单个文件自己就超预算时同样不会「刚解出来就删」：有 `keep` 挡着，
+    ///   之后也要等它不再被占用、且比别的都老才会被回收。
+    /// - 以 `root` 下的直接子目录为回收单位：一次解压的产物连同子目录一起走，
+    ///   不会留下空壳。
+    @discardableResult
+    static func trim(_ root: URL, budget: Int64, keep: Set<String> = []) -> TrimReport {
+        var report = TrimReport()
+        let fm = FileManager.default
+        let children = (try? fm.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.contentModificationDateKey]
+        )) ?? []
+
+        // 两边都先归一：`contentsOfDirectory` 给的是 `/private/var/…`，
+        // 调用方手里的 `keep` 往往是 `/var/…`，直接比会静默失效
+        let protected = Set(keep.map(ScratchUsage.canonical))
+        var total: Int64 = 0
+        var candidates: [(url: URL, bytes: Int64, used: Date)] = []
+        for child in children {
+            let bytes = size(of: child)
+            total += bytes
+            if protected.contains(ScratchUsage.canonical(child.path)) { continue }
+            if ScratchUsage.shared.isHeld(child.path) { continue }
+            let used = (try? child.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            candidates.append((child, bytes, used))
+        }
+
+        report.bytes = total
+        guard total > budget else { return report }
+
+        for item in candidates.sorted(by: { $0.used < $1.used }) {
+            guard total > budget else { break }
+            do {
+                try fm.removeItem(at: item.url)
+                total -= item.bytes
+                report.removed += 1
+            } catch {
+                report.failures += 1
+            }
+        }
+
+        report.bytes = max(0, total)
+        report.overBudget = total > budget
+        return report
+    }
 
     /// 目录占用。读不到就当 0——设置页显示「—」比显示报错有用。
     static func size(of url: URL) -> Int64 {

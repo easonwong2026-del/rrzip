@@ -20,11 +20,6 @@ struct PreviewPane: View {
     /// 不能内联时的具体原因（过大 / 引擎不支持）
     @State private var note: String?
 
-    /// 视频解压后要整份落到临时目录，太大就交给快速查看
-    private static let videoLimit: Int64 = 800 * 1024 * 1024
-    private static let videoExts: Set<String> = ["mp4", "mov", "m4v", "mpg", "mpeg"]
-    private static let audioExts: Set<String> = ["mp3", "m4a", "aac", "wav", "aiff", "flac", "ogg"]
-
     /// 选中项 + 刷新令牌，重复点同一行也会重新加载
     private var previewKey: String {
         "\(selectedEntry?.id ?? "none")|\(model.previewToken)"
@@ -324,13 +319,34 @@ struct PreviewPane: View {
             return
         }
         let token = entry.id
-        loading = true
         reset()
 
+        // 大小判断放在解压之前：音视频要整份落到临时目录才能播，
+        // 超过上限的条目解了也是白写几百 MB 再删掉。
+        if InlinePreviewLimits.skipsExtraction(entry) {
+            loading = false
+            note = "文件较大（\(entry.displaySize)），不在面板内加载"
+            return
+        }
+
+        loading = true
         let url = await model.payloadURL(for: entry)
 
         // 选中项已经换了就丢弃这次结果，避免显示上一个文件
         guard !Task.isCancelled, selectedEntry?.id == token else { return }
+
+        // 元数据里没写大小的条目判不了，只能解压后按实际大小复核：
+        // 真超了就丢掉这份临时副本，不留着占磁盘
+        if let url, InlinePreviewLimits.isMedia(entry.ext) {
+            let onDisk = diskSize(url)
+            if onDisk > InlinePreviewLimits.media {
+                model.discardPayload(url)
+                loading = false
+                note = "文件较大（\(ByteFormatter.string(onDisk))），不在面板内加载"
+                return
+            }
+        }
+
         loading = false
         guard let url else { return }
         // 登记占用再挂到界面上：此时解压 worker 已结束，
@@ -339,11 +355,7 @@ struct PreviewPane: View {
         payload = url
 
         let ext = entry.ext
-        if Self.videoExts.contains(ext) || Self.audioExts.contains(ext) {
-            guard entry.size <= Self.videoLimit else {
-                note = "文件较大（\(entry.displaySize)），不在面板内加载"
-                return
-            }
+        if InlinePreviewLimits.isMedia(ext) {
             player = AVPlayer(playerItem: AVPlayerItem(url: url))
             return
         }
@@ -359,6 +371,10 @@ struct PreviewPane: View {
         default:
             note = "这种格式没有内联预览"
         }
+    }
+
+    private func diskSize(_ url: URL) -> Int64 {
+        Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
     }
 
     private func fallbackIcon(_ entry: ArchiveEntry) -> String {
