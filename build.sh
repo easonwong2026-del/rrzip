@@ -8,6 +8,9 @@ source scripts/sources.sh
 APP_NAME="rrzip"
 BUNDLE="build/${APP_NAME}.app"
 MIN_MACOS="14.0"
+# 主程序与两个扩展都只按这一个架构构建。7z 引擎也跟着只带这一份：
+# Assets/7zz 是 x86_64 + arm64 的胖二进制，另一份架构在成品里永远用不到
+TARGET_ARCH="arm64"
 
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
@@ -99,11 +102,22 @@ xcrun swiftc \
     -o "$BUNDLE/Contents/MacOS/${APP_NAME}" \
     Sources/*.swift
 
+# 发布产物不留符号表：Swift 的非全局符号运行时用不到（需要时用 DEBUG=1 构建）。
+# 必须放在签名之前，改完二进制再签，否则签名当场失效。
+strip -x "$BUNDLE/Contents/MacOS/${APP_NAME}"
+
 echo "==> 复制 7-Zip 引擎"
 if [ ! -x Assets/7zz ]; then
     ./scripts/fetch-7zz.sh
 fi
 cp Assets/7zz "$BUNDLE/Contents/Resources/7zz"
+# 只带目标架构。已经是单架构时 lipo 会失败，保留原样即可（fetch 下来的可能是瘦包）
+if lipo -thin "$TARGET_ARCH" "$BUNDLE/Contents/Resources/7zz" \
+        -output "$BUNDLE/Contents/Resources/7zz.thin" 2>/dev/null; then
+    mv "$BUNDLE/Contents/Resources/7zz.thin" "$BUNDLE/Contents/Resources/7zz"
+else
+    rm -f "$BUNDLE/Contents/Resources/7zz.thin"
+fi
 chmod +x "$BUNDLE/Contents/Resources/7zz"
 xattr -cr "$BUNDLE/Contents/Resources/7zz" 2>/dev/null || true
 # 注意：这里**不要**给 7zz 签 app-sandbox —— 签了之后非沙盒的主程序 spawn 它会直接
@@ -184,6 +198,7 @@ xcrun swiftc \
     -o "$APEXPATH/Contents/MacOS/ArchivePreview" \
     "${ARCHIVE_CORE[@]}" QuickLook/PreviewProvider.swift
 
+strip -x "$APEXPATH/Contents/MacOS/ArchivePreview"
 codesign --force --sign - --entitlements /tmp/rrzip-appex.entitlements "$APEXPATH" >/dev/null 2>&1
 
 echo "==> 构建访达扩展"
@@ -249,6 +264,7 @@ cat > /tmp/rrzip-finder.entitlements <<'PLIST'
 </dict>
 </plist>
 PLIST
+strip -x "$FSXPATH/Contents/MacOS/ArchiveFinder"
 codesign --force --sign - --entitlements /tmp/rrzip-finder.entitlements "$FSXPATH" >/dev/null 2>&1
 
 echo "==> 签名（ad-hoc）"
