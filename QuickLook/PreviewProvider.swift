@@ -70,30 +70,50 @@ final class PreviewProvider: NSViewController, QLPreviewingController {
         tableView = table
     }
 
+
+    /// Quick Look 在显示窗口前调用。Apple 明确要求这里别阻塞主线程：
+    /// 大归档列目录可能几十万条，同步跑会把整个预览卡住，所以派到后台队列，
+    /// 结果回主线程再刷表格。
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
         _ = view
-
         titleLabel?.stringValue = url.lastPathComponent
+        subtitleLabel?.stringValue = "正在读取…"
 
-        do {
-            // 走统一入口：7z / dmg 这类 libarchive 读不了的也能列
-            let entries = try ArchiveService.list(url, password: nil)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let outcome: Result<[ArchiveEntry], Error>
+            do {
+                // 走统一入口：扩展里用进程内 libarchive，起不了子进程也能读
+                outcome = .success(try ArchiveService.list(url, password: nil))
+            } catch {
+                outcome = .failure(error)
+            }
+            DispatchQueue.main.async {
+                self?.render(outcome)
+                handler(nil)
+            }
+        }
+    }
+
+    private func render(_ outcome: Result<[ArchiveEntry], Error>) {
+        switch outcome {
+        case .success(let entries):
             rows = entries.prefix(300).map { ($0.name, $0.isDirectory ? "—" : $0.displaySize) }
             let suffix = entries.count > 300 ? "（仅显示前 300 项）" : ""
-            subtitleLabel?.stringValue = "\(entries.count) 个项目 \(suffix)"
-            tableView?.reloadData()
-            handler(nil)
-        } catch ArchiveError.needsPassword {
+            subtitleLabel?.stringValue = entries.isEmpty
+                ? "这个压缩包里没有项目"
+                : "\(entries.count) 个项目 \(suffix)"
+        case .failure(ArchiveError.needsPassword):
             rows = []
             subtitleLabel?.stringValue = "已加密：这里看不到内容，请在 rrzip 里输入密码"
-            tableView?.reloadData()
-            handler(nil)
-        } catch {
+        case .failure(ArchiveError.engineUnavailable):
+            // 引擎缺失是环境问题，不是文件的问题，别让用户以为包坏了
+            rows = []
+            subtitleLabel?.stringValue = "预览面板缺少读取这个格式的引擎，请在 rrzip 里打开"
+        case .failure(let error):
             rows = []
             subtitleLabel?.stringValue = "无法预览：\(error.localizedDescription)"
-            tableView?.reloadData()
-            handler(nil)
         }
+        tableView?.reloadData()
     }
 }
 

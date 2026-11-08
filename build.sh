@@ -77,6 +77,7 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
             <array>
                 <string>public.zip-archive</string>
                 <string>public.tar-archive</string>
+                <string>org.gnu.gnu-zip-tar-archive</string>
                 <string>org.gnu.gnu-zip-archive</string>
                 <string>public.bzip2-archive</string>
                 <string>org.tukaani.xz-archive</string>
@@ -98,7 +99,7 @@ fi
 xcrun swiftc \
     -O $DEBUG_FLAGS -swift-version 5 -parse-as-library \
     -target arm64-apple-macos${MIN_MACOS} \
-    -framework AppKit -framework SwiftUI -framework PDFKit -framework AVFoundation -framework AVKit -framework QuickLookUI -framework UniformTypeIdentifiers \
+    -framework AppKit -framework SwiftUI -framework PDFKit -framework AVFoundation -framework AVKit -framework QuickLookUI -framework UniformTypeIdentifiers -larchive \
     -o "$BUNDLE/Contents/MacOS/${APP_NAME}" \
     Sources/*.swift
 
@@ -164,6 +165,7 @@ cat > "$APEXPATH/Contents/Info.plist" <<PLIST
             <array>
                 <string>public.zip-archive</string>
                 <string>public.tar-archive</string>
+                <string>org.gnu.gnu-zip-tar-archive</string>
                 <string>org.gnu.gnu-zip-archive</string>
                 <string>public.bzip2-archive</string>
                 <string>org.tukaani.xz-archive</string>
@@ -193,7 +195,7 @@ xcrun swiftc \
     -target arm64-apple-macos${MIN_MACOS} \
     -module-name ArchivePreview \
     -DARCHIVE_EXTENSION \
-    -framework AppKit -framework QuickLookUI \
+    -framework AppKit -framework QuickLookUI -larchive \
     -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$APEXPATH/Contents/MacOS/ArchivePreview" \
     "${ARCHIVE_CORE[@]}" QuickLook/PreviewProvider.swift
@@ -232,7 +234,7 @@ xcrun swiftc \
     -target arm64-apple-macos${MIN_MACOS} \
     -module-name ArchiveFinder \
     -DARCHIVE_EXTENSION \
-    -framework Cocoa -framework FinderSync -framework UserNotifications \
+    -framework Cocoa -framework FinderSync -framework UserNotifications -larchive \
     -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$FSXPATH/Contents/MacOS/ArchiveFinder" \
     "${ARCHIVE_CORE[@]}" "${SHARED_STATE[@]}" "${FINDER_CORE[@]}" \

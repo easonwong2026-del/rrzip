@@ -66,6 +66,15 @@ enum ArchiveError: LocalizedError {
 enum ArchiveEngine {
     case libarchive
     case sevenZip
+
+    /// 这个引擎在当前环境里能不能用。扩展进程拿不到 7zz，
+    /// 试它只会把真正的错误盖成 engineUnavailable
+    var isAvailable: Bool {
+        switch self {
+        case .libarchive: return true
+        case .sevenZip: return SevenZip.isAvailable
+        }
+    }
 }
 
 /// 系统 bsdtar（libarchive 3.7）
