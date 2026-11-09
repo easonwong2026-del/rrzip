@@ -152,12 +152,14 @@ final class TerminationCoordinator {
     }
 
     var workload: Workload {
-        guard let host else { return Workload() }
-        let formal = host.formalWrites
-        return Workload(jobs: host.pendingJobCount,
+        // host 还没接上时（冷启动直接被访达服务唤起，窗口还没上屏），
+        // 账本是进程级状态，仍然要能看见——否则服务刚开始写用户目录，
+        // 一下 ⌘Q 就会被当成「没有任务」直接切断。
+        let formal = host?.formalWrites ?? FormalWriteLedger.shared.summary()
+        return Workload(jobs: host?.pendingJobCount ?? 0,
                         inPlaceEdits: formal.inPlaceEdits,
                         finderServices: formal.finderServices,
-                        previewWrites: host.isWritingScratch)
+                        previewWrites: host?.isWritingScratch ?? false)
     }
 
     /// 队列之外是否还有活。用于「要不要拦下这次退出」的判断。

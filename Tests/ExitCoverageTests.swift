@@ -289,6 +289,30 @@ func testTerminationMessageMatchesBehavior() {
     }
 }
 
+/// 冷启动直接被访达服务唤起时，窗口还没 attach；账本是进程级的，仍要能看见
+func testWorkloadSeesFormalWritesWithoutHost() {
+    print("退出 · 没有宿主时的正式写入")
+    MainActor.assumeIsolated {
+        FormalWriteLedger.shared.reset()
+        let token = FormalWriteLedger.shared.begin(.finderService, label: "冷启动访达服务")
+        defer {
+            FormalWriteLedger.shared.end(token)
+            FormalWriteLedger.shared.reset()
+        }
+
+        let coordinator = TerminationCoordinator()      // host 故意留空
+        coordinator.defersPrompt = false
+        coordinator.ask = { .keepUsing }
+        expect(coordinator.hasUnfinishedWork, "没有 host 也能看见访达服务")
+        expect(coordinator.workload.finderServices == 1, "归类到访达服务")
+        expect(coordinator.requestTermination() == .terminateLater, "冷启动也会先挂住")
+
+        // 选「继续使用」后回到可提交状态，账本不受影响
+        expect(coordinator.state == .idle, "取消退出后回到 idle")
+        expect(FormalWriteLedger.shared.count == 1, "账本里的写入还在")
+    }
+}
+
 func runExitCoverageTests() {
     testFormalWritesHaveNoGracePeriod()
     testInPlaceAddSurvivesQuit()
@@ -296,4 +320,5 @@ func runExitCoverageTests() {
     testFinderCompressEachDuringCancelQuit()
     testFinderExtractDuringQuit()
     testTerminationMessageMatchesBehavior()
+    testWorkloadSeesFormalWritesWithoutHost()
 }
