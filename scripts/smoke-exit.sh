@@ -21,6 +21,12 @@ FAIL=0
 # 只清理本脚本拉起来的进程。以前用 killall rrzip，会把用户自己开着的
 # rrzip（可能在跑压缩）一起杀掉——冒烟脚本不该有这种副作用。
 LAUNCHED=()
+# 欢迎页是 SwiftUI sheet：它开着的时候 AppKit 会把 terminate: 挂起，
+# 脚本里的「N 秒后退出」看起来就像没反应。这里先标记本版本已看过欢迎页，
+# 跑完再把用户原来的值写回去——不在用户机器上留下副作用。
+WELCOME_PREV=$(defaults read "$DOMAIN" rrzip.welcomeSeenVersion 2>/dev/null || true)
+WELCOME_HAD=0
+if [ -n "$WELCOME_PREV" ]; then WELCOME_HAD=1; fi
 
 # 先礼后兵：先 TERM，等两秒还不走再 KILL
 stop_pid() {
@@ -55,6 +61,11 @@ cleanup() {
     defaults delete "$DOMAIN" rrzip.smokeQuitAfter >/dev/null 2>&1 || true
     defaults delete "$DOMAIN" rrzip.smokeCompress >/dev/null 2>&1 || true
     defaults delete "$DOMAIN" rrzip.smokeTerminationChoice >/dev/null 2>&1 || true
+    if [ "$WELCOME_HAD" = "1" ]; then
+        defaults write "$DOMAIN" rrzip.welcomeSeenVersion -string "$WELCOME_PREV" >/dev/null 2>&1 || true
+    else
+        defaults delete "$DOMAIN" rrzip.welcomeSeenVersion >/dev/null 2>&1 || true
+    fi
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -88,6 +99,9 @@ wait_exit() {
 
 echo "==> 调试构建（冒烟开关只在 DEBUG 里）"
 DEBUG=1 ./build.sh > "$WORK/build.log" 2>&1 || { echo "构建失败，见 $WORK/build.log"; exit 1; }
+
+APP_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+defaults write "$DOMAIN" rrzip.welcomeSeenVersion -string "$APP_VERSION"
 
 # ---------------------------------------------------------------- 1. 没有任务
 echo "==> 场景 1：没有任务，直接退出"
