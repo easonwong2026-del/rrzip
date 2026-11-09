@@ -1245,10 +1245,15 @@ final class ArchiveModel: ObservableObject {
     @discardableResult
     func performAdd(_ items: [URL], to archive: URL, prefix: String,
                     password: String? = nil) -> Task<Void, Never> {
-        let token = FormalWriteLedger.shared.begin(
+        guard let token = FormalWriteLedger.shared.begin(
             .inPlaceEdit,
             label: "向 \(archive.lastPathComponent) 添加 \(items.count) 项"
-        )
+        ) else {
+            // 退出流程已接管：新的正式写入一律不接，连 7zz 都不启动
+            status = "正在退出，未执行新的写入"
+            notice = "正在退出，不再接受新的写入操作"
+            return Task {}
+        }
         isLoading = true
         status = "正在加入 \(items.count) 项…"
 
@@ -1299,10 +1304,14 @@ final class ArchiveModel: ObservableObject {
     @discardableResult
     func performDelete(_ paths: [String], from archive: URL, prefix: String,
                        password: String? = nil) -> Task<Void, Never> {
-        let token = FormalWriteLedger.shared.begin(
+        guard let token = FormalWriteLedger.shared.begin(
             .inPlaceEdit,
             label: "从 \(archive.lastPathComponent) 删除 \(paths.count) 项"
-        )
+        ) else {
+            status = "正在退出，未执行新的写入"
+            notice = "正在退出，不再接受新的写入操作"
+            return Task {}
+        }
         isLoading = true
         status = "正在删除 \(paths.count) 项…"
 

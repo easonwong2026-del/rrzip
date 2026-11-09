@@ -21,12 +21,23 @@ import Foundation
 struct FinderCompressOutcome: Sendable {
     var made: [URL] = []
     var failed: [String] = []
+    /// 退出流程已接管，这次请求没有执行（不弹窗，不算失败）
+    var rejected = false
+}
+
+/// 访达「解压」的结果：失败的包名
+struct FinderExtractOutcome: Sendable {
+    var failed: [String] = []
+    /// 退出流程已接管，这次请求没有执行
+    var rejected = false
 }
 
 /// 访达「合并压缩」的结果：成功给产物，失败给可展示的原因
 struct FinderCompressResult: Sendable {
     var output: URL?
     var failure: String?
+    /// 退出流程已接管，这次请求没有执行
+    var rejected = false
 }
 
 enum FinderService {
@@ -34,9 +45,11 @@ enum FinderService {
     /// 返回的 Task 已经在账本上登记，调用方不必再管退出协调。
     @discardableResult
     static func compressEach(_ urls: [URL]) -> Task<FinderCompressOutcome, Never> {
-        let token = FormalWriteLedger.shared.begin(
+        guard let token = FormalWriteLedger.shared.begin(
             .finderService, label: "访达服务 · 分别压缩 \(urls.count) 项"
-        )
+        ) else {
+            return Task { FinderCompressOutcome(rejected: true) }
+        }
         return Task {
             defer { FormalWriteLedger.shared.end(token) }
             var outcome = FinderCompressOutcome()
@@ -63,9 +76,11 @@ enum FinderService {
     /// 合并压缩：多个源压成一个 ZIP。失败时带可展示的原因。
     @discardableResult
     static func compressMerged(_ urls: [URL]) -> Task<FinderCompressResult, Never> {
-        let token = FormalWriteLedger.shared.begin(
+        guard let token = FormalWriteLedger.shared.begin(
             .finderService, label: "访达服务 · 压缩 \(urls.count) 项"
-        )
+        ) else {
+            return Task { FinderCompressResult(rejected: true) }
+        }
         let base = urls.count == 1
             ? urls[0].deletingPathExtension().lastPathComponent
             : "归档"
@@ -87,23 +102,25 @@ enum FinderService {
 
     /// 解压到各自所在的目录（同名文件跳过）。返回失败的包名。
     @discardableResult
-    static func extract(_ urls: [URL]) -> Task<[String], Never> {
-        let token = FormalWriteLedger.shared.begin(
+    static func extract(_ urls: [URL]) -> Task<FinderExtractOutcome, Never> {
+        guard let token = FormalWriteLedger.shared.begin(
             .finderService, label: "访达服务 · 解压 \(urls.count) 项"
-        )
+        ) else {
+            return Task { FinderExtractOutcome(rejected: true) }
+        }
         return Task {
             defer { FormalWriteLedger.shared.end(token) }
-            var failed: [String] = []
+            var outcome = FinderExtractOutcome()
             for url in urls {
                 do {
                     try await Task.detached(priority: .userInitiated) {
                         try ServiceExtraction.extract(url)
                     }.value
                 } catch {
-                    failed.append(url.lastPathComponent)
+                    outcome.failed.append(url.lastPathComponent)
                 }
             }
-            return failed
+            return outcome
         }
     }
 }

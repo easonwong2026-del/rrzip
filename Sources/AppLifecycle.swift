@@ -184,6 +184,8 @@ final class TerminationCoordinator {
         promptCount += 1
         // 弹窗还开着的时候就先禁掉新任务：用户已经按了 ⌘Q，
         // 这期间再往队列里塞东西，等待完成后退出就不再是「已有任务的收尾」。
+        // 闸门在账本上统一关：原地编辑和访达服务不需要各自记得判断。
+        FormalWriteLedger.shared.setGate(.waiting)
         host?.beginTerminationWait()
         if defersPrompt {
             Task { @MainActor in
@@ -206,14 +208,18 @@ final class TerminationCoordinator {
             state = .idle
             abortCount += 1
             host?.onWorkDrained = nil
+            // 用户改主意了：先把写入闸门打开，再恢复任务提交
+            FormalWriteLedger.shared.setGate(.idle)
             host?.resumeAfterAbortedTermination()
             onAbort()
         case .waitForCompletion:
             // 模型已在 requestTermination 里进入等待态，这里只等队列自己跑完
+            FormalWriteLedger.shared.setGate(.waiting)
             armDrainCallback()
             checkDrained()
         case .cancelAndQuit:
             state = .cancelling
+            FormalWriteLedger.shared.setGate(.cancelling)
             // 清队列 + 取消当前任务；返回后立刻判一次，可能本来就没有活
             host?.cancelWorkForTermination()
             armDrainCallback()
@@ -280,6 +286,8 @@ final class TerminationCoordinator {
     private func finishTermination() {
         guard state == .waiting || state == .cancelling else { return }
         state = .terminating
+        // 真正退出前永久关闸：即便还有回调挤进来，也不再接受新的正式写入
+        FormalWriteLedger.shared.setGate(.terminating)
         host?.onWorkDrained = nil
         terminateCount += 1
         onTerminate()
@@ -295,5 +303,6 @@ final class TerminationCoordinator {
         scratchWaitStartedAt = nil
         pollScheduled = false
         host?.onWorkDrained = nil
+        FormalWriteLedger.shared.setGate(.idle)
     }
 }

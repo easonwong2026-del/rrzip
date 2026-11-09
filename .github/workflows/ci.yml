@@ -41,8 +41,8 @@ jobs:
           # 防「测试被悄悄删掉」：只增不减，数量掉了就红
           count=$(grep -o '全部通过（[0-9]* 项）' /tmp/test.log | grep -o '[0-9]*' | head -1)
           echo "测试通过 $count 项"
-          if [ "${count:-0}" -lt 730 ]; then
-            echo "::error::测试数 $count 低于基线 730（v2.15.0 应为 739）"
+          if [ "${count:-0}" -lt 750 ]; then
+            echo "::error::测试数 $count 低于基线 750（v2.15.0 应为 760）"
             exit 1
           fi
 

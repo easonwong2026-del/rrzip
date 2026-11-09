@@ -25,6 +25,22 @@ private final class LedgerHost: TerminationHost {
     func resumeAfterAbortedTermination() {}
 }
 
+/// 包着真 model 的宿主：队列计数固定为 1（只为把协调器推进 waiting），
+/// 其余状态与动作都落到真 model 上，`isTerminating` 这类行为才验得到。
+@MainActor
+private final class ModelHost: TerminationHost {
+    let model: ArchiveModel
+    var pendingJobCount = 1
+    var isWritingScratch = false
+    var onWorkDrained: (() -> Void)?
+    var formalWrites: FormalWriteSummary { FormalWriteLedger.shared.summary() }
+
+    init(_ model: ArchiveModel) { self.model = model }
+    func beginTerminationWait() { model.beginTerminationWait() }
+    func cancelWorkForTermination() { model.cancelWorkForTermination() }
+    func resumeAfterAbortedTermination() { model.resumeAfterAbortedTermination() }
+}
+
 /// 计数可手调的宿主：用来验「宽限期管不到正式写入」
 @MainActor
 private final class CounterHost: TerminationHost {
@@ -294,7 +310,10 @@ func testWorkloadSeesFormalWritesWithoutHost() {
     print("退出 · 没有宿主时的正式写入")
     MainActor.assumeIsolated {
         FormalWriteLedger.shared.reset()
-        let token = FormalWriteLedger.shared.begin(.finderService, label: "冷启动访达服务")
+        guard let token = FormalWriteLedger.shared.begin(.finderService, label: "冷启动访达服务") else {
+            expect(false, "空闲状态却拒绝了写入登记")
+            return
+        }
         defer {
             FormalWriteLedger.shared.end(token)
             FormalWriteLedger.shared.reset()
@@ -313,6 +332,116 @@ func testWorkloadSeesFormalWritesWithoutHost() {
     }
 }
 
+/// 退出等待 / 取消期间，正式写入入口必须整体拒绝；选「继续使用」后恢复
+func testExitWaitingRejectsNewFormalWrites() {
+    print("退出 · 拒绝新的正式写入")
+    MainActor.assumeIsolated {
+        FormalWriteLedger.shared.reset()
+        ScratchUsage.shared.reset()
+        let fm = FileManager.default
+        let folder = fm.temporaryDirectory
+            .appendingPathComponent("rrzip-gate-\(UUID().uuidString)", isDirectory: true)
+
+        do {
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            let seed = folder.appendingPathComponent("seed.txt")
+            try "seed\n".write(to: seed, atomically: true, encoding: .utf8)
+            let archive = folder.appendingPathComponent("edit.zip")
+            try SevenZip.create(at: archive, from: [seed], format: "zip",
+                                password: nil, volume: nil)
+            let added = folder.appendingPathComponent("added.bin")
+            try Data(count: 1024 * 1024).write(to: added)
+            let serviceSource = folder.appendingPathComponent("svc.bin")
+            try Data(count: 1024 * 1024).write(to: serviceSource)
+
+            let model = ArchiveModel()
+            model.open(url: archive)
+            expect(waitUntil(15, { model.current != nil }), "压缩包已打开")
+
+            // 借一个「队列里还有任务」的宿主，把协调器推进 waiting
+            let host = ModelHost(model)
+            let coordinator = TerminationCoordinator()
+            coordinator.host = host
+            coordinator.defersPrompt = false
+            coordinator.ask = { .waitForCompletion }
+            coordinator.jobPollInterval = 5
+            expect(coordinator.requestTermination() == .terminateLater, "有任务时挂住")
+            expect(coordinator.state == .waiting, "进入 waiting")
+            expect(FormalWriteLedger.shared.currentGate == .waiting, "写入闸门已关")
+
+            // 1. 原地添加 / 删除：拒绝，连 7zz 都不启动
+            model.performAdd([added], to: archive, prefix: "")
+            expect(FormalWriteLedger.shared.count == 0, "等待退出时拒绝原地添加")
+            model.performDelete(["seed.txt"], from: archive, prefix: "")
+            expect(FormalWriteLedger.shared.count == 0, "等待退出时拒绝原地删除")
+
+            // 2. 访达服务：三个入口都拒绝，且不产出文件
+            let each = FinderService.compressEach([serviceSource])
+            let merged = FinderService.compressMerged([serviceSource])
+            let extract = FinderService.extract([archive])
+            var eachResult: FinderCompressOutcome?
+            var mergedResult: FinderCompressResult?
+            var extractResult: FinderExtractOutcome?
+            Task { eachResult = await each.value }
+            Task { mergedResult = await merged.value }
+            Task { extractResult = await extract.value }
+            expect(waitUntil(5, {
+                eachResult?.rejected == true && mergedResult?.rejected == true
+                    && extractResult?.rejected == true
+            }), "访达服务的三个入口都被拒绝")
+            expect(!fm.fileExists(atPath: folder.appendingPathComponent("svc.bin.zip").path),
+                   "没有被拒绝还硬压出来的 ZIP")
+            expect(FormalWriteLedger.shared.count == 0, "账本里没有残留登记")
+
+            // 3. 取消并退出同样拒绝
+            let cancelling = TerminationCoordinator()
+            cancelling.host = host
+            cancelling.defersPrompt = false
+            cancelling.ask = { .cancelAndQuit }
+            cancelling.jobPollInterval = 5
+            _ = cancelling.requestTermination()
+            expect(cancelling.state == .cancelling, "进入 cancelling")
+            expect(FormalWriteLedger.shared.currentGate == .cancelling, "取消期间闸门也是关的")
+            model.performAdd([added], to: archive, prefix: "")
+            expect(FormalWriteLedger.shared.count == 0, "取消并退出时拒绝新的原地编辑")
+
+            // 4. 用户改主意：下一次退出里选「继续使用」，闸门重新打开，入口恢复
+            let keep = TerminationCoordinator()
+            keep.host = host
+            keep.defersPrompt = false
+            keep.ask = { .keepUsing }
+            _ = keep.requestTermination()
+            expect(keep.state == .idle, "回到 idle")
+            expect(FormalWriteLedger.shared.currentGate == .idle, "继续使用后闸门打开")
+            expect(!model.isTerminating, "队列恢复接收任务")
+            model.performAdd([added], to: archive, prefix: "")
+            expect(FormalWriteLedger.shared.count == 1, "继续使用后可以正常登记")
+            expect(waitUntil(120, { FormalWriteLedger.shared.isEmpty }), "这次编辑正常完成")
+        } catch {
+            expect(false, "写入准入 抛出异常", "\(error)")
+        }
+
+        try? fm.removeItem(at: folder)
+        FormalWriteLedger.shared.reset()
+    }
+}
+
+/// 真正退出前的闸门是单向的：sealed 之后不会再打开
+func testTerminatingGateStaysClosed() {
+    print("退出 · 闸门单向关闭")
+    MainActor.assumeIsolated {
+        FormalWriteLedger.shared.reset()
+        FormalWriteLedger.shared.setGate(.terminating)
+        expect(FormalWriteLedger.shared.currentGate == .terminating, "进入 terminating")
+        expect(FormalWriteLedger.shared.begin(.inPlaceEdit, label: "晚到的编辑") == nil,
+               "终止后拒绝登记")
+        FormalWriteLedger.shared.setGate(.idle)
+        expect(FormalWriteLedger.shared.currentGate == .terminating, "sealed 不会被改回 idle")
+        FormalWriteLedger.shared.reset()
+        expect(FormalWriteLedger.shared.currentGate == .idle, "reset 只为测试复位")
+    }
+}
+
 func runExitCoverageTests() {
     testFormalWritesHaveNoGracePeriod()
     testInPlaceAddSurvivesQuit()
@@ -321,4 +450,6 @@ func runExitCoverageTests() {
     testFinderExtractDuringQuit()
     testTerminationMessageMatchesBehavior()
     testWorkloadSeesFormalWritesWithoutHost()
+    testExitWaitingRejectsNewFormalWrites()
+    testTerminatingGateStaysClosed()
 }

@@ -416,6 +416,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let task = FinderService.compressMerged(urls)
         Task { @MainActor in
             let result = await task.value
+            // 退出流程已接管：这次请求根本没执行，不弹窗、不报错
+            guard !result.rejected else { return }
             if let output = result.output {
                 NSWorkspace.shared.activateFileViewerSelecting([output])
             } else {
@@ -436,7 +438,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !urls.isEmpty else { return }
         let task = FinderService.extract(urls)
         Task { @MainActor in
-            let failed = await task.value
+            let outcome = await task.value
+            // 退出流程已接管：这次请求根本没执行，不弹窗、不报错
+            guard !outcome.rejected else { return }
+            let failed = outcome.failed
             if failed.isEmpty {
                 NSWorkspace.shared.activateFileViewerSelecting(
                     urls.map { $0.deletingLastPathComponent() }
@@ -459,6 +464,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let task = FinderService.compressEach(urls)
         Task { @MainActor in
             let outcome = await task.value
+            guard !outcome.rejected else { return }
             if !outcome.made.isEmpty {
                 NSWorkspace.shared.activateFileViewerSelecting(outcome.made)
             }

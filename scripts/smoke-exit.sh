@@ -22,10 +22,35 @@ FAIL=0
 # rrzip（可能在跑压缩）一起杀掉——冒烟脚本不该有这种副作用。
 LAUNCHED=()
 
+# 先礼后兵：先 TERM，等两秒还不走再 KILL
+stop_pid() {
+    local pid=$1 waited=0
+    if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+    kill -TERM "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge 2 ]; then
+            kill -9 "$pid" 2>/dev/null || true
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 0
+}
+
+# 进程正常退出后从清单里摘掉，避免 PID 被系统复用后误杀别人
+forget_pid() {
+    local target=$1 next=() pid
+    for pid in ${LAUNCHED[@]+"${LAUNCHED[@]}"}; do
+        if [ "$pid" != "$target" ]; then next+=("$pid"); fi
+    done
+    LAUNCHED=(${next[@]+"${next[@]}"})
+}
+
 cleanup() {
     local pid
     for pid in ${LAUNCHED[@]+"${LAUNCHED[@]}"}; do
-        kill -9 "$pid" >/dev/null 2>&1 || true
+        stop_pid "$pid"
     done
     defaults delete "$DOMAIN" rrzip.smokeQuitAfter >/dev/null 2>&1 || true
     defaults delete "$DOMAIN" rrzip.smokeCompress >/dev/null 2>&1 || true
@@ -49,12 +74,15 @@ wait_exit() {
     local limit=$1 pid=$2 waited=0
     while kill -0 "$pid" 2>/dev/null; do
         if [ "$waited" -ge "$limit" ]; then
-            kill -9 "$pid" 2>/dev/null || true
+            stop_pid "$pid"
+            forget_pid "$pid"
             return 1
         fi
         sleep 1
         waited=$((waited + 1))
     done
+    # 正常退出：从清理清单里摘掉，最后不必再碰这个 PID
+    forget_pid "$pid"
     return 0
 }
 
