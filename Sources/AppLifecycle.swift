@@ -23,7 +23,10 @@ import Foundation
 protocol TerminationHost: AnyObject {
     /// 正在执行 + 排队等待的任务数
     var pendingJobCount: Int { get }
-    /// 是否有预览解压、缩略图渲染这类不归队列管的临时写入
+    /// 不经过队列、但会写用户文件的活（原地编辑、访达服务），按种类分开报。
+    /// 这些**没有**宽限期：必须等它跑完，不能像预览缓存那样超时就走。
+    var formalWrites: FormalWriteSummary { get }
+    /// 可丢弃的预览缓存写入（预览解压、缩略图渲染）
     var isWritingScratch: Bool { get }
     /// 进入退出等待：从此不再接受新的后台任务
     func beginTerminationWait()
@@ -106,11 +109,59 @@ final class TerminationCoordinator {
 
     init() {}
 
-    /// 队列之外是否还有活。用于「要不要拦下这次退出」的判断。
-    var hasUnfinishedWork: Bool {
-        guard let host else { return false }
-        return host.pendingJobCount > 0 || host.isWritingScratch
+    /// 退出时的活怎么分布。弹窗文案与「等不等」都按它来。
+    struct Workload: Equatable {
+        /// 队列任务：正在执行 + 排队（压缩 / 解压 / 暂存导出）
+        var jobs = 0
+        /// 原地修改压缩包
+        var inPlaceEdits = 0
+        /// 访达服务：压缩 / 解压到用户目录
+        var finderServices = 0
+        /// 可丢弃的预览缓存写入
+        var previewWrites = false
+
+        /// 正式写入总数：这两类都没有宽限期
+        var formalWrites: Int { inPlaceEdits + finderServices }
+
+        var isEmpty: Bool { jobs == 0 && formalWrites == 0 && !previewWrites }
+        /// 只有预览缓存在写：可以不等，宽限期一到就走
+        var isPreviewOnly: Bool { jobs == 0 && formalWrites == 0 && previewWrites }
+
+        /// 退出确认框里的说明。必须和实际行为一致：
+        /// 正式写入说「等它完成」，预览缓存才提 5 秒上限。
+        var message: String {
+            var lines = ["当前有任务正在执行或排队，立即退出可能导致操作中断。"]
+            if inPlaceEdits > 0 {
+                lines.append("其中 \(inPlaceEdits) 项正在原地修改压缩包，会等它写完再退出——"
+                             + "中途终止只会毁掉这个包。")
+            }
+            if finderServices > 0 {
+                lines.append("其中 \(finderServices) 项是访达服务的压缩 / 解压，"
+                             + "产物直接写到用户目录，会等它们完成后再退出，不会留下不完整的压缩包。")
+            }
+            if jobs > 0 {
+                lines.append("「取消任务并退出」只会取消队列里的压缩 / 解压，"
+                             + "正在写入用户文件的操作仍会等待完成。")
+            }
+            if isPreviewOnly {
+                lines.append("当前只有预览缓存在写入：最多再等 5 秒，超时直接退出，"
+                             + "不影响任何压缩包和导出文件。")
+            }
+            return lines.joined(separator: "\n\n")
+        }
     }
+
+    var workload: Workload {
+        guard let host else { return Workload() }
+        let formal = host.formalWrites
+        return Workload(jobs: host.pendingJobCount,
+                        inPlaceEdits: formal.inPlaceEdits,
+                        finderServices: formal.finderServices,
+                        previewWrites: host.isWritingScratch)
+    }
+
+    /// 队列之外是否还有活。用于「要不要拦下这次退出」的判断。
+    var hasUnfinishedWork: Bool { !workload.isEmpty }
 
     // MARK: - 入口
 
@@ -178,13 +229,22 @@ final class TerminationCoordinator {
     private func checkDrained() {
         guard state == .waiting || state == .cancelling else { return }
 
-        if let host, host.pendingJobCount > 0 {
+        let workload = self.workload
+
+        if workload.jobs > 0 {
             // 队列任务的收尾有明确回调；轮询只是兜住「回调丢了」这一种情况
             schedulePoll(after: jobPollInterval)
             return
         }
 
-        if let host, host.isWritingScratch {
+        if workload.formalWrites > 0 {
+            // 原地编辑 / 访达服务：没有宽限期。宁可多等，也不能把正在写的
+            // 用户文件丢下——这里不参考 scratchGrace。
+            schedulePoll(after: jobPollInterval)
+            return
+        }
+
+        if workload.previewWrites {
             // 预览解压 / 缩略图不归队列管，也没有完成回调：短间隔重查，
             // 但不能无限等——超过宽限期就照常退出。
             let started = scratchWaitStartedAt ?? Date()

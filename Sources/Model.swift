@@ -1235,21 +1235,37 @@ final class ArchiveModel: ObservableObject {
             alert.addButton(withTitle: "取消")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
-        let password = passwords[archive.path]
+        performAdd(items, to: archive, prefix: prefix, password: passwords[archive.path])
+    }
 
+    /// 原地添加的执行体：面板与同名确认留在 `addFiles` 里，测试直接调这个。
+    ///
+    /// 登记（`FormalWriteLedger`）**同步**发生在派发任务之前：这一下之后按 ⌘Q，
+    /// 退出协调就能看见「有东西正在改用户的原包」，从而只等不杀。
+    @discardableResult
+    func performAdd(_ items: [URL], to archive: URL, prefix: String,
+                    password: String? = nil) -> Task<Void, Never> {
+        let token = FormalWriteLedger.shared.begin(
+            .inPlaceEdit,
+            label: "向 \(archive.lastPathComponent) 添加 \(items.count) 项"
+        )
         isLoading = true
         status = "正在加入 \(items.count) 项…"
-        Task {
+
+        return Task { @MainActor in
+            defer {
+                FormalWriteLedger.shared.end(token)
+                self.notifyWorkDrainedIfNeeded()
+            }
             do {
-                let snapshotItems = items
                 try await Task.detached(priority: .userInitiated) {
-                    try SevenZip.add(archive, items: snapshotItems, prefix: prefix, password: password)
+                    try SevenZip.add(archive, items: items, prefix: prefix, password: password)
                 }.value
-                loadFrame(url: archive, resetTrail: true, restorePrefix: prefix)
+                self.loadFrame(url: archive, resetTrail: true, restorePrefix: prefix)
             } catch {
-                isLoading = false
-                status = "加入失败"
-                errorMessage = error.localizedDescription
+                self.isLoading = false
+                self.status = "加入失败"
+                self.errorMessage = error.localizedDescription
             }
         }
     }
@@ -1275,21 +1291,35 @@ final class ArchiveModel: ObservableObject {
         let paths = targets.map(\.path)
         let archive = frame.archive
         let prefix = frame.prefix
-        let password = passwords[archive.path]
+        performDelete(paths, from: archive, prefix: prefix, password: passwords[archive.path])
+    }
 
+    /// 原地删除的执行体：二次确认留在 `deleteSelection` 里，测试直接调这个。
+    /// 与添加同源：登记成正式写入，退出时等它跑完，绝不 terminate 正在改包的 7zz。
+    @discardableResult
+    func performDelete(_ paths: [String], from archive: URL, prefix: String,
+                       password: String? = nil) -> Task<Void, Never> {
+        let token = FormalWriteLedger.shared.begin(
+            .inPlaceEdit,
+            label: "从 \(archive.lastPathComponent) 删除 \(paths.count) 项"
+        )
         isLoading = true
         status = "正在删除 \(paths.count) 项…"
-        Task {
+
+        return Task { @MainActor in
+            defer {
+                FormalWriteLedger.shared.end(token)
+                self.notifyWorkDrainedIfNeeded()
+            }
             do {
-                let snapshotPaths = paths
                 try await Task.detached(priority: .userInitiated) {
-                    try SevenZip.remove(archive, entries: snapshotPaths, password: password)
+                    try SevenZip.remove(archive, entries: paths, password: password)
                 }.value
-                loadFrame(url: archive, resetTrail: true, restorePrefix: prefix)
+                self.loadFrame(url: archive, resetTrail: true, restorePrefix: prefix)
             } catch {
-                isLoading = false
-                status = "删除失败"
-                errorMessage = error.localizedDescription
+                self.isLoading = false
+                self.status = "删除失败"
+                self.errorMessage = error.localizedDescription
             }
         }
     }
@@ -1734,8 +1764,14 @@ final class ArchiveModel: ObservableObject {
         // 让每个任务自己复位会在排队时提前把 spinner 关掉。
         isLoading = job != nil
 
-        // 只有退出流程才关心「排空」这个时刻：通知恰好一次，避免重复 reply
+        notifyWorkDrainedIfNeeded()
+    }
+
+    /// 退出流程的「排空」判定：队列空了、且没有正在写的正式文件，才通知一次。
+    /// 原地编辑与访达服务不走队列，所以不能只看 job。
+    private func notifyWorkDrainedIfNeeded() {
         guard isTerminating, job == nil, jobQueue.isEmpty else { return }
+        guard FormalWriteLedger.shared.isEmpty else { return }
         let drained = onWorkDrained
         onWorkDrained = nil
         drained?()
@@ -1743,7 +1779,9 @@ final class ArchiveModel: ObservableObject {
 
     private var passwordContinuation: CheckedContinuation<String?, Never>?
 
-    private func askPassword(for archive: URL, wrong: Bool) async -> String? {
+    /// 悬起一个密码询问。解压与打开加密包共用；测试直接调它验证
+    /// 「取消退出时必须恢复 continuation」这条路径。
+    func askPassword(for archive: URL, wrong: Bool) async -> String? {
         return await withCheckedContinuation { continuation in
             passwordContinuation = continuation
             passwordRequest = PasswordRequest(archive: archive, isRetry: wrong)
@@ -2305,6 +2343,7 @@ final class ArchiveModel: ObservableObject {
 ///   （压缩要跑 `writeArchive` 的临时文件清理，暂存打包要跑 staging 的 defer）
 extension ArchiveModel: TerminationHost {
     var isWritingScratch: Bool { ScratchUsage.shared.isWorking }
+    var formalWrites: FormalWriteSummary { FormalWriteLedger.shared.summary() }
 
     func beginTerminationWait() {
         isTerminating = true

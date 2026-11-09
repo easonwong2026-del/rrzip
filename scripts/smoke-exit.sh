@@ -18,14 +18,28 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/rrzip-smoke.XXXXXX")
 PASS=0
 FAIL=0
 
+# 只清理本脚本拉起来的进程。以前用 killall rrzip，会把用户自己开着的
+# rrzip（可能在跑压缩）一起杀掉——冒烟脚本不该有这种副作用。
+LAUNCHED=()
+
 cleanup() {
-    killall rrzip >/dev/null 2>&1 || true
+    local pid
+    for pid in ${LAUNCHED[@]+"${LAUNCHED[@]}"}; do
+        kill -9 "$pid" >/dev/null 2>&1 || true
+    done
     defaults delete "$DOMAIN" rrzip.smokeQuitAfter >/dev/null 2>&1 || true
     defaults delete "$DOMAIN" rrzip.smokeCompress >/dev/null 2>&1 || true
     defaults delete "$DOMAIN" rrzip.smokeTerminationChoice >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
+
+# 启动一次并把 PID 记进清理清单，避免误伤其他实例
+launch() {
+    "$BIN" > "$1" 2>&1 &
+    PID=$!
+    LAUNCHED+=("$PID")
+}
 
 ok() { PASS=$((PASS + 1)); echo "  ✓ $1"; }
 bad() { FAIL=$((FAIL + 1)); echo "  ✗ $1"; }
@@ -51,8 +65,7 @@ DEBUG=1 ./build.sh > "$WORK/build.log" 2>&1 || { echo "构建失败，见 $WORK/
 echo "==> 场景 1：没有任务，直接退出"
 defaults write "$DOMAIN" rrzip.smokeQuitAfter -float 2
 defaults delete "$DOMAIN" rrzip.smokeCompress >/dev/null 2>&1 || true
-"$BIN" > "$WORK/case1.log" 2>&1 &
-PID=$!
+launch "$WORK/case1.log"
 if wait_exit 20 "$PID"; then ok "队列为空时直接退出（不再弹确认框）"
 else bad "没有任务却没能退出"; fi
 
@@ -64,8 +77,7 @@ dd if=/dev/urandom of="$SRC/big.bin" bs=1m count=200 2>/dev/null
 defaults write "$DOMAIN" rrzip.smokeCompress "$SRC"
 defaults write "$DOMAIN" rrzip.smokeQuitAfter -float 2
 defaults write "$DOMAIN" rrzip.smokeTerminationChoice wait
-"$BIN" > "$WORK/case2.log" 2>&1 &
-PID=$!
+launch "$WORK/case2.log"
 if wait_exit 180 "$PID"; then ok "等到压缩结束才退出"
 else bad "等待完成后退出超时"; fi
 if [ -f "$SRC.zip" ] && unzip -t "$SRC.zip" >/dev/null 2>&1; then
@@ -83,8 +95,7 @@ mkdir -p "$SRC2"
 dd if=/dev/urandom of="$SRC2/big.bin" bs=1m count=400 2>/dev/null
 defaults write "$DOMAIN" rrzip.smokeCompress "$SRC2"
 defaults write "$DOMAIN" rrzip.smokeTerminationChoice cancel
-"$BIN" > "$WORK/case3.log" 2>&1 &
-PID=$!
+launch "$WORK/case3.log"
 if wait_exit 45 "$PID"; then ok "取消后能及时退出（没有卡在收尾）"
 else bad "取消任务后退出超时"; fi
 if [ -f "$SRC2.zip" ]; then bad "取消后不该留下产物"

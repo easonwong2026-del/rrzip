@@ -14,6 +14,7 @@ import Foundation
 @MainActor
 private final class StubTerminationHost: TerminationHost {
     var pendingJobCount = 0
+    var formalWrites = FormalWriteSummary()
     var isWritingScratch = false
     var onWorkDrained: (() -> Void)?
     private(set) var waitCount = 0
@@ -334,6 +335,39 @@ func testTerminationCompletesAfterFailure() {
     }
 }
 
+/// 真正的密码等待：任务挂在 continuation 上，取消退出必须恢复它并让任务结束
+func testPasswordContinuationResumesOnCancel() {
+    print("退出 · 密码 continuation")
+    MainActor.assumeIsolated {
+        ScratchUsage.shared.reset()
+        let model = ArchiveModel()
+        let archive = fixtures.appendingPathComponent("secret.7z")
+        var resumed = false
+        var typedValue: String?
+
+        model.submitJob(title: "正在解压", detail: "secret.7z") { _ in
+            // 与 extract / performLoad 走的是同一条 askPassword
+            let typed = await model.askPassword(for: archive, wrong: false)
+            typedValue = typed
+            resumed = true
+            return typed == nil ? .failed("密码错误或已取消") : .succeeded
+        }
+
+        expect(waitUntil(5, { model.passwordRequest != nil }), "任务停在密码输入上")
+        expect(model.pendingJobCount == 1, "队列里还有这个任务")
+
+        model.cancelWorkForTermination()
+        expect(model.passwordRequest == nil, "取消时关掉密码框")
+        expect(waitUntil(5, { resumed }), "continuation 被恢复，任务真正往下走")
+        expect(typedValue == nil, "恢复值是 nil（取消），不是空串")
+        expect(waitUntil(5, { model.pendingJobCount == 0 }), "任务结束、队列排空")
+
+        // 已经恢复过的 continuation 不能再动一次：这里不该崩，也不该复活密码框
+        model.cancelWorkForTermination()
+        expect(model.passwordRequest == nil, "重复取消不会留下密码框")
+    }
+}
+
 func runLifecycleTests() {
     testTerminationWithoutWork()
     testTerminationWaitsForQueue()
@@ -345,4 +379,5 @@ func runLifecycleTests() {
     testTerminationCancelClearsQueue()
     testTerminationClearsPasswordWait()
     testTerminationCompletesAfterFailure()
+    testPasswordContinuationResumesOnCancel()
 }

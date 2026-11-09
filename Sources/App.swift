@@ -324,6 +324,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         coordinator.onAbort = {
             NSApp.reply(toApplicationShouldTerminate: false)
         }
+        // 原地编辑 / 访达服务结束时立刻叫醒退出协调，不必等下一个轮询周期。
+        // 回调用 Task 切回主线程：账本注销可能发生在任意线程。
+        FormalWriteLedger.shared.onEmpty {
+            Task { @MainActor in
+                TerminationCoordinator.shared.noteWorkDrained()
+            }
+        }
     }
 
     /// 有任务时的退出确认。默认按钮是「等待完成后退出」，
@@ -340,7 +347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 #endif
         let alert = NSAlert()
         alert.messageText = "仍有任务正在运行"
-        alert.informativeText = "当前有任务正在执行或排队，立即退出可能导致操作中断。"
+        alert.informativeText = TerminationCoordinator.shared.workload.message
         alert.alertStyle = .warning
         alert.addButton(withTitle: "等待完成后退出")
         alert.addButton(withTitle: "取消任务并退出")
@@ -398,31 +405,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// 用 rrzip 压缩：在源文件旁边生成同名 zip
+    /// 用 rrzip 压缩：在源文件旁边生成同名 zip。
+    ///
+    /// 交给 `FinderService` 而不是在这里同步跑：服务回调占着主线程，压大目录时
+    /// 界面整个卡住，⌘Q 也点不动——而且它写的是用户目录，必须计入正式写入。
     @objc func compressWithRrzip(_ pboard: NSPasteboard, userData: String,
                                  error: AutoreleasingUnsafeMutablePointer<NSString>) {
         let urls = readURLs(from: pboard)
         guard !urls.isEmpty else { return }
-
-        let base = urls.count == 1
-            ? urls[0].deletingPathExtension().lastPathComponent
-            : "归档"
-        let folder = urls[0].deletingLastPathComponent()
-        var output = folder.appendingPathComponent("\(base).zip")
-        var index = 2
-        while FileManager.default.fileExists(atPath: output.path) {
-            output = folder.appendingPathComponent("\(base) \(index).zip")
-            index += 1
-        }
-
-        do {
-            try Tar.create(at: output, from: urls, format: "zip")
-            NSWorkspace.shared.activateFileViewerSelecting([output])
-        } catch {
-            let alert = NSAlert()
-            alert.messageText = "压缩失败"
-            alert.informativeText = error.localizedDescription
-            alert.runModal()
+        let task = FinderService.compressMerged(urls)
+        Task { @MainActor in
+            let result = await task.value
+            if let output = result.output {
+                NSWorkspace.shared.activateFileViewerSelecting([output])
+            } else {
+                let alert = NSAlert()
+                alert.messageText = "压缩失败"
+                alert.informativeText = result.failure ?? "未知原因"
+                alert.runModal()
+            }
         }
     }
 
@@ -433,17 +434,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                     error: AutoreleasingUnsafeMutablePointer<NSString>) {
         let urls = readURLs(from: pboard).filter { ArchiveService.canOpen($0) }
         guard !urls.isEmpty else { return }
+        let task = FinderService.extract(urls)
         Task { @MainActor in
-            var failed: [String] = []
-            for url in urls {
-                do {
-                    try await Task.detached(priority: .userInitiated) {
-                        try ServiceExtraction.extract(url)
-                    }.value
-                } catch {
-                    failed.append(url.lastPathComponent)
-                }
-            }
+            let failed = await task.value
             if failed.isEmpty {
                 NSWorkspace.shared.activateFileViewerSelecting(
                     urls.map { $0.deletingLastPathComponent() }
@@ -463,25 +456,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                      error: AutoreleasingUnsafeMutablePointer<NSString>) {
         let urls = readURLs(from: pboard)
         guard !urls.isEmpty else { return }
+        let task = FinderService.compressEach(urls)
         Task { @MainActor in
-            var made: [URL] = []
-            for url in urls {
-                let folder = url.deletingLastPathComponent()
-                let name = url.deletingPathExtension().lastPathComponent
-                let output = ArchiveModel.uniqueOutput(
-                    folder.appendingPathComponent(name).appendingPathExtension("zip")
-                )
-                do {
-                    try await Task.detached(priority: .userInitiated) {
-                        try Tar.create(at: output, from: [url], format: "zip")
-                    }.value
-                    made.append(output)
-                } catch {
-                    // 单个失败不影响其他文件
-                }
+            let outcome = await task.value
+            if !outcome.made.isEmpty {
+                NSWorkspace.shared.activateFileViewerSelecting(outcome.made)
             }
-            if !made.isEmpty {
-                NSWorkspace.shared.activateFileViewerSelecting(made)
+            // 以前单个失败被 try? 吞掉，界面只显示成功的那几个。
+            // 服务入口没有进度，至少要如实说清哪些没成。
+            if !outcome.failed.isEmpty {
+                let alert = NSAlert()
+                alert.messageText = "有 \(outcome.failed.count) 项没能压缩"
+                alert.informativeText = outcome.failed.joined(separator: "\n")
+                alert.runModal()
             }
         }
     }
