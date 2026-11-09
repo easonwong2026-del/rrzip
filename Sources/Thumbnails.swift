@@ -12,10 +12,15 @@ import SwiftUI
 final class ThumbnailStore: ObservableObject {
     static let shared = ThumbnailStore()
 
-    private init() {
+    /// 条数与字节上限。设置页要照着这两个数说话，别再各写一遍
+    static let countLimit = 400
+    static let bytesLimit: Int64 = 64 * 1024 * 1024
+
+    /// 生产用 shared；测试建独立实例，互不干扰
+    init() {
         // 缩略图只是装饰：限制条数与总字节，超了让 NSCache 自己淘汰
-        cache.countLimit = 400
-        cache.totalCostLimit = 64 * 1024 * 1024
+        cache.countLimit = Self.countLimit
+        cache.totalCostLimit = Int(Self.bytesLimit)
     }
 
     private let cache = NSCache<NSString, CGImageBox>()
@@ -23,6 +28,13 @@ final class ThumbnailStore: ObservableObject {
     /// 设置里的「清理缓存」：缩略图不必留着
     func clear() {
         cache.removeAllObjects()
+        // 失败记录也得清。只清 cache 的话，之前渲染失败的图片和 PDF
+        // 会一直留在 failed 里，以后每次滚动回来都直接被挡掉、永远不重试。
+        failed.removeAll()
+        // 有渲染在跑时不动 inFlight：它结束时自己会摘除登记。
+        // 清掉的话同一张图会被并发解两遍，还会多占一份临时文件。
+        // version 自增用来通知界面重绘（缓存现在是空的）
+        version &+= 1
     }
     private var inFlight = Set<String>()
     /// 渲染失败的键：避免滚动回来时反复解压同一个坏文件
@@ -57,9 +69,33 @@ final class ThumbnailStore: ObservableObject {
     }
 
     private func cacheKey(for entry: ArchiveEntry, model: ArchiveModel, maxPixel: CGFloat) -> NSString {
-        let archivePath = model.current?.archive.path ?? ""
-        return "\(archivePath)|\(entry.id)|\(Int(maxPixel.rounded()))" as NSString
+        let frame = model.current
+        let key = Self.cacheKey(
+            archivePath: frame?.archive.path ?? "",
+            size: frame?.archiveSize,
+            modified: frame?.archiveModified,
+            entry: entry.path,
+            maxPixel: maxPixel
+        )
+        return key as NSString
     }
+
+    /// 缓存键 = 包路径 + 包修改时间 + 包大小 + 条目路径 + 像素档位。
+    ///
+    /// 只带路径是不够的：同一个位置换个同名压缩包，条目路径和尺寸都一样，
+    /// 旧缩略图会被当成命中直接显示出来。带上修改时间和大小之后，
+    /// 换包必然换键，旧键的失败记录也不再拦着新包重试。
+    nonisolated static func cacheKey(archivePath: String, size: Int64?, modified: Date?,
+                                     entry: String, maxPixel: CGFloat) -> String {
+        // 毫秒精度：APFS 的修改时间就在这个量级，秒级会漏掉「同一秒内被替换」
+        let stamp = Int64(((modified?.timeIntervalSince1970 ?? 0) * 1000).rounded())
+        return "\(archivePath)|\(stamp)|\(size ?? 0)|\(entry)|\(Int(maxPixel.rounded()))"
+    }
+
+    /// 测试与诊断：模拟一次渲染失败（生产路径由 load 写入）
+    func noteFailure(_ key: String) { failed.insert(key) }
+    /// 已经记下的失败条数
+    var failedCount: Int { failed.count }
 
     /// 只查缓存，不触发加载
     func cached(for entry: ArchiveEntry, model: ArchiveModel, maxPixel: CGFloat) -> CGImage? {

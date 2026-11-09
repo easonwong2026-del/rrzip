@@ -30,6 +30,12 @@ SHARED_STATE=(
 APP_ONLY=(
     Sources/ExtractDestination.swift
     Sources/CacheMaintenance.swift
+    # 退出状态机：不碰 AppKit，测试直接跑真的状态迁移
+    Sources/AppLifecycle.swift
+    # 正式写入账本：原地编辑与访达服务靠它被退出协调看见
+    Sources/FormalWriteLedger.swift
+    # 访达服务执行体：测试直接调，验证它进账本、走原子写
+    Sources/FinderService.swift
     # 键盘导航的滚动决策是纯几何，测试直接验「已可见就不动 / 只补差值」
     Sources/EntryScroll.swift
 )

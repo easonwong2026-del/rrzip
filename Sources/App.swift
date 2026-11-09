@@ -268,6 +268,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     static func attach(_ model: ArchiveModel) {
         Self.model = model
+        // 退出协调要能问队列里还有多少活、能取消、能在排空时收到回调
+        TerminationCoordinator.shared.host = model
         // 访达那边转交过来的结果（跳过 N 个、解压失败），启动时补一句
         if let notice = PendingNotice.take() {
             model.notice = "\(notice.title) · \(notice.message)"
@@ -305,6 +307,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
         requestNotificationPermissionIfNeeded()
+        wireTermination()
+    }
+
+    /// 退出协调的界面部分：状态机在 TerminationCoordinator，这里只提供
+    /// 「弹哪个窗」「怎么回答系统」两件事。
+    private func wireTermination() {
+        let coordinator = TerminationCoordinator.shared
+        coordinator.ask = { [weak self] in
+            self?.askTerminationChoice() ?? .keepUsing
+        }
+        coordinator.onTerminate = {
+            // 走 reply 而不是 exit(0)：让 AppKit 正常走完终止流程
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        coordinator.onAbort = {
+            NSApp.reply(toApplicationShouldTerminate: false)
+        }
+        // 原地编辑 / 访达服务结束时立刻叫醒退出协调，不必等下一个轮询周期。
+        // 回调用 Task 切回主线程：账本注销可能发生在任意线程。
+        FormalWriteLedger.shared.onEmpty {
+            Task { @MainActor in
+                TerminationCoordinator.shared.noteWorkDrained()
+            }
+        }
+    }
+
+    /// 有任务时的退出确认。默认按钮是「等待完成后退出」，
+    /// Esc 落在「继续使用」——误触不该把正在跑的任务取消掉。
+    private func askTerminationChoice() -> TerminationCoordinator.Choice {
+#if DEBUG
+        // 本机冒烟：无人值守时用配置项代替点按钮，验证「等待 / 取消 / 继续」三条路
+        switch UserDefaults.standard.string(forKey: "rrzip.smokeTerminationChoice") {
+        case "wait": return .waitForCompletion
+        case "cancel": return .cancelAndQuit
+        case "keep": return .keepUsing
+        default: break
+        }
+#endif
+        let alert = NSAlert()
+        alert.messageText = "仍有任务正在运行"
+        alert.informativeText = TerminationCoordinator.shared.workload.message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "等待完成后退出")
+        alert.addButton(withTitle: "取消任务并退出")
+        alert.addButton(withTitle: "继续使用")
+        // NSAlert 的第一个按钮本来就是默认键；显式写出来免得以后调顺序踩坑
+        alert.buttons.first?.keyEquivalent = "\r"
+        alert.buttons.last?.keyEquivalent = "\u{1b}"
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .waitForCompletion
+        case .alertSecondButtonReturn: return .cancelAndQuit
+        default: return .keepUsing
+        }
+    }
+
+    /// ⌘Q / 菜单退出的唯一入口。
+    /// - 没任务：放行，系统立刻退出。
+    /// - 有任务：先挂住（terminateLater），弹窗问完、队列收尾后再 reply。
+    ///   连续按 ⌘Q 只会走到状态机里已有的那一次，不会重复弹窗。
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        TerminationCoordinator.shared.requestTermination() == .terminateNow
+            ? .terminateNow : .terminateLater
     }
 
     /// 访达那边做完任务后只是「唤起 app」，不带文件参数，
@@ -340,31 +405,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// 用 rrzip 压缩：在源文件旁边生成同名 zip
+    /// 用 rrzip 压缩：在源文件旁边生成同名 zip。
+    ///
+    /// 交给 `FinderService` 而不是在这里同步跑：服务回调占着主线程，压大目录时
+    /// 界面整个卡住，⌘Q 也点不动——而且它写的是用户目录，必须计入正式写入。
     @objc func compressWithRrzip(_ pboard: NSPasteboard, userData: String,
                                  error: AutoreleasingUnsafeMutablePointer<NSString>) {
         let urls = readURLs(from: pboard)
         guard !urls.isEmpty else { return }
-
-        let base = urls.count == 1
-            ? urls[0].deletingPathExtension().lastPathComponent
-            : "归档"
-        let folder = urls[0].deletingLastPathComponent()
-        var output = folder.appendingPathComponent("\(base).zip")
-        var index = 2
-        while FileManager.default.fileExists(atPath: output.path) {
-            output = folder.appendingPathComponent("\(base) \(index).zip")
-            index += 1
-        }
-
-        do {
-            try Tar.create(at: output, from: urls, format: "zip")
-            NSWorkspace.shared.activateFileViewerSelecting([output])
-        } catch {
-            let alert = NSAlert()
-            alert.messageText = "压缩失败"
-            alert.informativeText = error.localizedDescription
-            alert.runModal()
+        let task = FinderService.compressMerged(urls)
+        Task { @MainActor in
+            let result = await task.value
+            // 退出流程已接管：这次请求根本没执行，不弹窗、不报错
+            guard !result.rejected else { return }
+            if let output = result.output {
+                NSWorkspace.shared.activateFileViewerSelecting([output])
+            } else {
+                let alert = NSAlert()
+                alert.messageText = "压缩失败"
+                alert.informativeText = result.failure ?? "未知原因"
+                alert.runModal()
+            }
         }
     }
 
@@ -375,17 +436,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                     error: AutoreleasingUnsafeMutablePointer<NSString>) {
         let urls = readURLs(from: pboard).filter { ArchiveService.canOpen($0) }
         guard !urls.isEmpty else { return }
+        let task = FinderService.extract(urls)
         Task { @MainActor in
-            var failed: [String] = []
-            for url in urls {
-                do {
-                    try await Task.detached(priority: .userInitiated) {
-                        try ServiceExtraction.extract(url)
-                    }.value
-                } catch {
-                    failed.append(url.lastPathComponent)
-                }
-            }
+            let outcome = await task.value
+            // 退出流程已接管：这次请求根本没执行，不弹窗、不报错
+            guard !outcome.rejected else { return }
+            let failed = outcome.failed
             if failed.isEmpty {
                 NSWorkspace.shared.activateFileViewerSelecting(
                     urls.map { $0.deletingLastPathComponent() }
@@ -405,25 +461,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                      error: AutoreleasingUnsafeMutablePointer<NSString>) {
         let urls = readURLs(from: pboard)
         guard !urls.isEmpty else { return }
+        let task = FinderService.compressEach(urls)
         Task { @MainActor in
-            var made: [URL] = []
-            for url in urls {
-                let folder = url.deletingLastPathComponent()
-                let name = url.deletingPathExtension().lastPathComponent
-                let output = ArchiveModel.uniqueOutput(
-                    folder.appendingPathComponent(name).appendingPathExtension("zip")
-                )
-                do {
-                    try await Task.detached(priority: .userInitiated) {
-                        try Tar.create(at: output, from: [url], format: "zip")
-                    }.value
-                    made.append(output)
-                } catch {
-                    // 单个失败不影响其他文件
-                }
+            let outcome = await task.value
+            guard !outcome.rejected else { return }
+            if !outcome.made.isEmpty {
+                NSWorkspace.shared.activateFileViewerSelecting(outcome.made)
             }
-            if !made.isEmpty {
-                NSWorkspace.shared.activateFileViewerSelecting(made)
+            // 以前单个失败被 try? 吞掉，界面只显示成功的那几个。
+            // 服务入口没有进度，至少要如实说清哪些没成。
+            if !outcome.failed.isEmpty {
+                let alert = NSAlert()
+                alert.messageText = "有 \(outcome.failed.count) 项没能压缩"
+                alert.informativeText = outcome.failed.joined(separator: "\n")
+                alert.runModal()
             }
         }
     }
