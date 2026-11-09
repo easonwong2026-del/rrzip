@@ -494,11 +494,27 @@ private struct AboutSettingsView: View {
             }
 
             Section {
+                // 「占用」以前只有一行磁盘数字，用户很容易理解成「整个 rrzip 占了这么多」，
+                // 甚至以为包含正式压缩包。拆成三项：实际占用、磁盘软预算、内存缓存预算。
                 HStack(spacing: Space.m) {
-                    Text("占用")
+                    Text("磁盘缓存占用")
                     Spacer(minLength: Space.m)
                     Text(ByteFormatter.string(cacheBytes))
                         .font(TypeScale.data())
+                        .foregroundStyle(.secondary)
+                }
+                HStack(spacing: Space.m) {
+                    Text("磁盘缓存预算")
+                    Spacer(minLength: Space.m)
+                    Text("\(ByteFormatter.string(ArchiveModel.payloadDiskBudget))（软预算）")
+                        .foregroundStyle(.secondary)
+                }
+                HStack(spacing: Space.m) {
+                    Text("缩略图内存缓存")
+                    Spacer(minLength: Space.m)
+                    // NSCache 给不出可靠的实时占用：这里只报预算，不假装是「已用」
+                    Text("最多 \(ThumbnailStore.countLimit) 张 / "
+                         + "\(ByteFormatter.string(ThumbnailStore.bytesLimit)) 预算")
                         .foregroundStyle(.secondary)
                 }
                 HStack(spacing: Space.m) {
@@ -511,9 +527,11 @@ private struct AboutSettingsView: View {
                     }
                 }
             } header: {
-                Text("缓存")
+                Text("缓存管理")
             } footer: {
-                Text("缩略图与预览解出的临时副本，不影响压缩包和其他文件。")
+                Text("只统计预览解出的临时副本，不含原始压缩包和导出文件。"
+                     + "超过磁盘预算时按最久未用回收，正在使用的文件会跳过；"
+                     + "有任务在跑时不会清理。")
             }
         }
         .formStyle(.grouped)

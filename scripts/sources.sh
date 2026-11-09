@@ -30,6 +30,8 @@ SHARED_STATE=(
 APP_ONLY=(
     Sources/ExtractDestination.swift
     Sources/CacheMaintenance.swift
+    # 退出状态机：不碰 AppKit，测试直接跑真的状态迁移
+    Sources/AppLifecycle.swift
     # 键盘导航的滚动决策是纯几何，测试直接验「已可见就不动 / 只补差值」
     Sources/EntryScroll.swift
 )

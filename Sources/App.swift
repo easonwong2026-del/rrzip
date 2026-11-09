@@ -268,6 +268,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     static func attach(_ model: ArchiveModel) {
         Self.model = model
+        // 退出协调要能问队列里还有多少活、能取消、能在排空时收到回调
+        TerminationCoordinator.shared.host = model
         // 访达那边转交过来的结果（跳过 N 个、解压失败），启动时补一句
         if let notice = PendingNotice.take() {
             model.notice = "\(notice.title) · \(notice.message)"
@@ -305,6 +307,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
         requestNotificationPermissionIfNeeded()
+        wireTermination()
+    }
+
+    /// 退出协调的界面部分：状态机在 TerminationCoordinator，这里只提供
+    /// 「弹哪个窗」「怎么回答系统」两件事。
+    private func wireTermination() {
+        let coordinator = TerminationCoordinator.shared
+        coordinator.ask = { [weak self] in
+            self?.askTerminationChoice() ?? .keepUsing
+        }
+        coordinator.onTerminate = {
+            // 走 reply 而不是 exit(0)：让 AppKit 正常走完终止流程
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        coordinator.onAbort = {
+            NSApp.reply(toApplicationShouldTerminate: false)
+        }
+    }
+
+    /// 有任务时的退出确认。默认按钮是「等待完成后退出」，
+    /// Esc 落在「继续使用」——误触不该把正在跑的任务取消掉。
+    private func askTerminationChoice() -> TerminationCoordinator.Choice {
+#if DEBUG
+        // 本机冒烟：无人值守时用配置项代替点按钮，验证「等待 / 取消 / 继续」三条路
+        switch UserDefaults.standard.string(forKey: "rrzip.smokeTerminationChoice") {
+        case "wait": return .waitForCompletion
+        case "cancel": return .cancelAndQuit
+        case "keep": return .keepUsing
+        default: break
+        }
+#endif
+        let alert = NSAlert()
+        alert.messageText = "仍有任务正在运行"
+        alert.informativeText = "当前有任务正在执行或排队，立即退出可能导致操作中断。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "等待完成后退出")
+        alert.addButton(withTitle: "取消任务并退出")
+        alert.addButton(withTitle: "继续使用")
+        // NSAlert 的第一个按钮本来就是默认键；显式写出来免得以后调顺序踩坑
+        alert.buttons.first?.keyEquivalent = "\r"
+        alert.buttons.last?.keyEquivalent = "\u{1b}"
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .waitForCompletion
+        case .alertSecondButtonReturn: return .cancelAndQuit
+        default: return .keepUsing
+        }
+    }
+
+    /// ⌘Q / 菜单退出的唯一入口。
+    /// - 没任务：放行，系统立刻退出。
+    /// - 有任务：先挂住（terminateLater），弹窗问完、队列收尾后再 reply。
+    ///   连续按 ⌘Q 只会走到状态机里已有的那一次，不会重复弹窗。
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        TerminationCoordinator.shared.requestTermination() == .terminateNow
+            ? .terminateNow : .terminateLater
     }
 
     /// 访达那边做完任务后只是「唤起 app」，不带文件参数，

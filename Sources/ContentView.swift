@@ -298,6 +298,26 @@ struct ContentView: View {
         // 排查用：把启动参数落一份，确认 --settings 这类调试开关有没有进来
         try? CommandLine.arguments.joined(separator: " ")
             .write(toFile: "/tmp/rrzip-argv.txt", atomically: true, encoding: .utf8)
+        // 本机冒烟：N 秒后走一次真正的退出流程（NSApp.terminate → delegate），
+        // 用来验 applicationShouldTerminate 与「等待任务收尾再退出」的接线。
+        // 必须用 Timer 而不是 DispatchQueue.main.asyncAfter：从主队列的 block 里
+        // 调 terminate 时，AppKit 会在同一个 block 里等 reply，主队列被自己堵住，
+        // 之后的 reply 永远发不出去——表现就是应用卡在退出确认之后不动。
+        if let seconds = UserDefaults.standard.object(forKey: "rrzip.smokeQuitAfter") as? Double {
+            let deadline = Date().addingTimeInterval(max(0.5, seconds))
+            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { timer in
+                guard Date() >= deadline else { return }
+                timer.invalidate()
+                // 必须在 runloop 回调里同步调用（这里就在主线程），
+                // 不能包一层 Task 或 dispatch：terminate 会占住主线程等 reply，
+                // 从主 actor 任务里发出去，reply 那个任务永远排不上，等于自己锁死。
+                MainActor.assumeIsolated { NSApp.terminate(nil) }
+            }
+        }
+        // 本机冒烟：启动即压一个目录，用来验证「等待任务收尾再退出」
+        if let path = UserDefaults.standard.string(forKey: "rrzip.smokeCompress"), !path.isEmpty {
+            model.quickCompress([URL(fileURLWithPath: path)])
+        }
         // 便于截图/调试：--icons 初始图标视图，--search xxx 预填搜索
         if CommandLine.arguments.contains("--icons") { model.viewMode = .icons }
         // 便于截图：--compact / --full 指定起始工作模式
