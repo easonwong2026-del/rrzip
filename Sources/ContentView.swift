@@ -187,9 +187,9 @@ struct ContentView: View {
         Color.clear.alert(model.passwordRequest?.isRetry == true ? "密码不正确" : "该压缩包已加密",
                           isPresented: Binding(
                             get: { model.passwordRequest != nil },
-                            set: { if !$0 { model.submitPassword(nil) } }
+                            set: { if !$0, model.passwordRequest != nil { model.submitPassword(nil) } }
                           )) {
-            TextField("密码", text: $passwordInput)
+            SecureField("密码", text: $passwordInput)
             Button("解锁") {
                 let value = passwordInput
                 passwordInput = ""

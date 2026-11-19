@@ -50,6 +50,7 @@ enum ArchiveError: LocalizedError {
     case unsupported(String)
     case needsPassword
     case engineUnavailable
+    case unsafePath(String)
 
     var errorDescription: String? {
         switch self {
@@ -58,7 +59,59 @@ enum ArchiveError: LocalizedError {
         case .unsupported(let ext): return "暂不支持 .\(ext) 格式"
         case .needsPassword: return "该压缩包已加密，需要密码"
         case .engineUnavailable: return "7-Zip 引擎不可用，请重新构建应用"
+        case .unsafePath(let path): return "检测到不安全的归档路径，已中止操作：\(path)"
         }
+    }
+}
+
+/// 归档路径与参数安全校验，防范 Zip Slip、目录穿越及选项/listfile 注入
+enum ArchivePathGuard {
+    static func validateRelative(_ path: String, allowEmpty: Bool = false) throws {
+        if path.isEmpty {
+            if allowEmpty { return }
+            throw ArchiveError.unsafePath(path)
+        }
+        if path.hasPrefix("/") || path.hasPrefix("\\") || path.contains("\0") {
+            throw ArchiveError.unsafePath(path)
+        }
+        let segments = path.split(whereSeparator: { $0 == "/" || $0 == "\\" })
+        if segments.contains("..") {
+            throw ArchiveError.unsafePath(path)
+        }
+    }
+
+    static func validateContained(_ child: URL, within base: URL) throws {
+        let basePath = base.standardizedFileURL.path
+        let childPath = child.standardizedFileURL.path
+        let prefix = basePath.hasSuffix("/") ? basePath : basePath + "/"
+        guard childPath == basePath || childPath.hasPrefix(prefix) else {
+            throw ArchiveError.unsafePath(child.path)
+        }
+    }
+
+    static func guardTarOperand(_ name: String) -> String {
+        if name.hasPrefix("-") || name.hasPrefix("@") {
+            return "./" + name
+        }
+        return name
+    }
+
+    static func writeListFile(_ items: [String]) throws -> URL {
+        let listURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rrzip-list-\(UUID().uuidString).txt")
+        let body = items.joined(separator: "\n") + "\n"
+        guard let data = body.data(using: .utf8) else {
+            throw ArchiveError.tool("无法编码条目列表")
+        }
+        let created = FileManager.default.createFile(
+            atPath: listURL.path,
+            contents: data,
+            attributes: [.posixPermissions: 0o600]
+        )
+        guard created else {
+            throw ArchiveError.tool("无法创建临时条目列表文件")
+        }
+        return listURL
     }
 }
 
@@ -209,8 +262,12 @@ enum Tar {
         if let passphrase, !passphrase.isEmpty { args += ["--passphrase", passphrase] }
         // 目标已存在同名文件时默认覆盖；keepExisting 走 bsdtar 的跳过语义
         if keepExisting { args.append("--keep-old-files") }
+        for entry in entries { try ArchivePathGuard.validateRelative(entry) }
         args += ["-xf", archive.path, "-C", destination.path]
-        if !entries.isEmpty { args.append(contentsOf: entries) }
+        if !entries.isEmpty {
+            args.append("--")
+            args.append(contentsOf: entries)
+        }
         try run(args, jobID: jobID)
     }
 
@@ -231,9 +288,10 @@ enum Tar {
         let parent = first.deletingLastPathComponent()
         let relatives = items.map { item -> String in
             item.deletingLastPathComponent().path == parent.path
-                ? item.lastPathComponent
+                ? ArchivePathGuard.guardTarOperand(item.lastPathComponent)
                 : item.path   // 跨目录的少数情况退回绝对路径，至少不丢内容
         }
+        args.append("--")
         args.append(contentsOf: relatives)
         try run(args, cwd: parent, jobID: jobID)
     }
@@ -248,7 +306,7 @@ enum Tar {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         process.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent",
-                             item.path, output.path]
+                             "--", item.path, output.path]
 
         var env = ProcessInfo.processInfo.environment
         env["COPYFILE_DISABLE"] = "1"
@@ -512,7 +570,7 @@ enum SevenZip {
     static func verify(_ archive: URL, password: String? = nil) throws {
         var args = ["t", "-y"]
         if let password, !password.isEmpty { args.append("-p\(password)") }
-        args.append(archive.path)
+        args += ["--", archive.path]
         try run(args)
     }
 
@@ -520,7 +578,7 @@ enum SevenZip {
     static func list(_ archive: URL, password: String? = nil) throws -> [ArchiveEntry] {
         var args = ["l", "-slt", "-ba"]
         if let password, !password.isEmpty { args.append("-p\(password)") }
-        args.append(archive.path)
+        args += ["--", archive.path]
 
         let raw: String
         do {
@@ -564,18 +622,38 @@ enum SevenZip {
         return entries
     }
 
+    /// listfile 的参数尾段。**必须写在 `--` 之前**：7-Zip 的 `--` 只终止开关解析，
+    /// 同时会让 `@file` 退化成普通文件名。实测（26.05）：
+    ///   `x -- a.7z @list` 解出 0 个文件、`d -- a.7z @list` 静默不删、
+    ///   `a -- a.7z @list` 报 `@list` 不存在。
+    /// 条目是从 listfile 读进来的，不会被当成开关，所以这里不需要 `--`；
+    /// `-spd` 关掉通配符，条目里的 [ ] * ? 按字面匹配，避免误删 / 误取。
+    private static func listTail(_ archive: URL, listFile: URL) -> [String] {
+        ["-scsUTF-8", "-spd", archive.path, "@\(listFile.path)"]
+    }
+
     static func extract(_ archive: URL, entries: [String], to destination: URL,
                         password: String? = nil, skipExisting: Bool = false,
                         jobID: UUID? = nil,
                         onProgress: ((Double) -> Void)? = nil) throws {
+        for entry in entries { try ArchivePathGuard.validateRelative(entry) }
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         var args = ["x", "-y"]
         // -aos：已存在的文件跳过，不覆盖
         if skipExisting { args.append("-aos") }
         args.append("-o\(destination.path)")
         if let password, !password.isEmpty { args.append("-p\(password)") }
-        args.append(archive.path)
-        if !entries.isEmpty { args.append(contentsOf: entries) }
+        var listFile: URL?
+        defer {
+            if let listFile { try? FileManager.default.removeItem(at: listFile) }
+        }
+        if !entries.isEmpty {
+            let file = try ArchivePathGuard.writeListFile(entries)
+            listFile = file
+            args += listTail(archive, listFile: file)
+        } else {
+            args += ["--", archive.path]
+        }
         try run(args, jobID: jobID, onProgress: onProgress)
     }
 
@@ -595,17 +673,28 @@ enum SevenZip {
         // 别让用户对着 errno 发懵——反正这类选择也没法塞进同一个包。
         try ensureUniqueNames(items)
 
+        guard ["zip", "7z", "tar"].contains(format) else {
+            throw ArchiveError.unsupported(format)
+        }
+        if let volume, !volume.isEmpty {
+            let validVolume = volume.range(of: #"^\d+[bkmgtBKMGT]?$"#, options: .regularExpression) != nil
+            guard validVolume else {
+                throw ArchiveError.tool("无效的分卷大小参数：\(volume)")
+            }
+        }
+
         var args = ["a", "-t\(format)", "-y"]
         // -mx=0 存而不压，9 是极限；不传则用 7zz 默认（5）
-        if let level { args.append("-mx=\(level)") }
+        if let level { args.append("-mx=\(max(0, min(9, level)))") }
         if let password, !password.isEmpty {
             args.append("-p\(password)")
             if format == "zip" { args.append("-mem=AES256") }
             if format == "7z" { args.append("-mhe=on") }
         }
         if let volume, !volume.isEmpty { args.append("-v\(volume)") }
-        args.append(output.path)
-        args.append(contentsOf: items.map(\.path))
+        let listFile = try ArchivePathGuard.writeListFile(items.map(\.path))
+        defer { try? FileManager.default.removeItem(at: listFile) }
+        args += listTail(output, listFile: listFile)
         try run(args, jobID: jobID, onProgress: onProgress)
     }
 
@@ -637,34 +726,45 @@ enum SevenZip {
         var base = ["a", "-y"]
         if let password, !password.isEmpty { base.append("-p\(password)") }
 
+        try ArchivePathGuard.validateRelative(prefix, allowEmpty: true)
+
         if prefix.isEmpty {
-            try run(base + [archive.path] + items.map(\.path))
+            let listFile = try ArchivePathGuard.writeListFile(items.map(\.path))
+            defer { try? FileManager.default.removeItem(at: listFile) }
+            try run(base + listTail(archive, listFile: listFile))
             return
         }
 
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent("rrzip-add-\(UUID().uuidString)", isDirectory: true)
         let folder = staging.appendingPathComponent(prefix, isDirectory: true)
+        try ArchivePathGuard.validateContained(folder, within: staging)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: staging) }
 
         var relatives: [String] = []
         for item in items {
+            try ArchivePathGuard.validateRelative(item.lastPathComponent)
             let target = folder.appendingPathComponent(item.lastPathComponent)
+            try ArchivePathGuard.validateContained(target, within: staging)
             try? FileManager.default.removeItem(at: target)
             try FileManager.default.createSymbolicLink(at: target, withDestinationURL: item)
             relatives.append(prefix + item.lastPathComponent)
         }
-        try run(base + [archive.path] + relatives, cwd: staging)
+        let listFile = try ArchivePathGuard.writeListFile(relatives)
+        defer { try? FileManager.default.removeItem(at: listFile) }
+        try run(base + listTail(archive, listFile: listFile), cwd: staging)
     }
 
     /// 从归档里删除条目（路径是包内路径，目录要带结尾斜杠）
     static func remove(_ archive: URL, entries: [String], password: String? = nil) throws {
         guard !entries.isEmpty else { return }
+        for entry in entries { try ArchivePathGuard.validateRelative(entry) }
         var args = ["d", "-y"]
         if let password, !password.isEmpty { args.append("-p\(password)") }
-        args.append(archive.path)
-        args.append(contentsOf: entries)
+        let listFile = try ArchivePathGuard.writeListFile(entries)
+        defer { try? FileManager.default.removeItem(at: listFile) }
+        args += listTail(archive, listFile: listFile)
         try run(args)
     }
 }
