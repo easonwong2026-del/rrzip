@@ -152,7 +152,12 @@ enum WorkspaceMode: String, CaseIterable, Identifiable {
 }
 
 /// 应用内拖拽使用的自定义类型：暂存区靠它拿到「包 + 包内路径」，不必先解压
+/// （只有普通文件带这份载荷；目录没有可暂存的内容）
 let rrzipEntryType = UTType(exportedAs: "com.rrzip.entry")
+
+/// 「这次拖拽来自本应用」的标记。文件和目录都会带，主窗口 / 首页据此忽略拖回自己，
+/// 不然拖拽载荷现在同时满足 public.file-url，会被当成外部文件去打开。
+let rrzipDragMarkerType = "com.rrzip.entry-drag"
 
 /// 暂存区里的一条：记住它来自哪个包，才能跨层、跨包累积
 struct StashItem: Identifiable, Hashable {

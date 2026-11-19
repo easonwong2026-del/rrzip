@@ -12,6 +12,7 @@ import UniformTypeIdentifiers
 /// 用户看到的就是「拖出去没反应，也没解压」。
 func runDragTests() {
     testDragOutProvider()
+    testDragBackIntoOwnWindow()
 }
 
 private func testDragOutProvider() {
@@ -57,6 +58,30 @@ private func testDragOutProvider() {
            "实际 \(box.value?.lastPathComponent ?? "nil")")
     expect(box.contents == Data("hello\n".utf8), "内容与源文件一致",
            "实际 \(box.contents.map { "\($0.count) 字节" } ?? "nil")")
+}
+
+/// 拖回自己窗口：文件与目录都不能被当成「外部文件」再打开一次。
+///
+/// 目录没有暂存载荷，只能靠独立的来源标记识别——只判断 rrzipEntryType 的话，
+/// 目录会被漏掉，拖回窗口就开始解压然后报「不支持的格式」。
+private func testDragBackIntoOwnWindow() {
+    print("拖拽 · 拖回自身窗口不触发打开")
+
+    let file = EntryDrag.makeProvider(name: "a.txt", payload: Data("p".utf8)) { done in
+        done(nil, nil)
+    }
+    expect(EntryDrag.isInternal(file), "普通文件被识别为应用内拖拽")
+
+    let folder = EntryDrag.makeProvider(name: "照片", payload: nil) { done in
+        done(nil, nil)
+    }
+    expect(EntryDrag.isInternal(folder), "目录被识别为应用内拖拽")
+    expect(!folder.hasItemConformingToTypeIdentifier(rrzipEntryType.identifier),
+           "目录仍然不带暂存载荷")
+
+    // 外部文件（访达拖进来的）不能被误判成内部拖拽
+    let external = NSItemProvider(contentsOf: URL(fileURLWithPath: "/tmp")) ?? NSItemProvider()
+    expect(!EntryDrag.isInternal(external), "外部拖入不被误判")
 }
 
 /// 跨线程交接用的小盒子：loadFileRepresentation 的回调不一定在主线程

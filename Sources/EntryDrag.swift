@@ -22,6 +22,16 @@ enum EntryDrag {
         // 访达按这个名字落盘，和列表里看到的一致
         provider.suggestedName = name
 
+        // 来源标记：文件和目录都带。窗口与首页靠它认出「这是自己拖出来的」，
+        // 否则拖回自己会被当成外部文件打开（目录连暂存载荷都没有，只能靠这个标记）
+        provider.registerDataRepresentation(
+            forTypeIdentifier: rrzipDragMarkerType,
+            visibility: .ownProcess
+        ) { completion in
+            completion(Data(), nil)
+            return nil
+        }
+
         if let payload {
             // 应用内（暂存条）只读这一份「包 + 包内路径」，不解压
             provider.registerDataRepresentation(
@@ -48,6 +58,11 @@ enum EntryDrag {
             return nil
         }
         return provider
+    }
+
+    /// 这次拖拽是不是从本应用列表里发起的（文件与目录都算）
+    static func isInternal(_ provider: NSItemProvider) -> Bool {
+        provider.hasItemConformingToTypeIdentifier(rrzipDragMarkerType)
     }
 
     @MainActor
