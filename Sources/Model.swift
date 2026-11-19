@@ -2097,6 +2097,8 @@ final class ArchiveModel: ObservableObject {
         let destination = freshScratch()
         let passphrase = passwords[frame.archive.path]
         let engine = frame.engine
+        // 目录要连后代一起解：隐式目录在归档里没有自己的记录
+        let paths = Self.exportPaths(for: entry, in: frame.entries)
         // 预览解压不走任务队列，清缓存看不到它。先在这里登记，
         // 再派任务——顺序反了就没用：调用方紧接着清缓存会漏判。
         // 带目录登记：自动回收也要知道这一份还在写，别删人家的半成品。
@@ -2111,9 +2113,9 @@ final class ArchiveModel: ObservableObject {
                 try ArchivePathGuard.validateContained(file, within: destination)
                 switch engine {
                 case .libarchive:
-                    try Tar.extract(frame.archive, entries: [entry.path], to: destination, passphrase: passphrase)
+                    try Tar.extract(frame.archive, entries: paths, to: destination, passphrase: passphrase)
                 case .sevenZip:
-                    try SevenZip.extract(frame.archive, entries: [entry.path], to: destination, password: passphrase)
+                    try SevenZip.extract(frame.archive, entries: paths, to: destination, password: passphrase)
                 }
                 guard FileManager.default.fileExists(atPath: file.path) else {
                     throw ArchiveError.tool("导出失败")
@@ -2131,6 +2133,24 @@ final class ArchiveModel: ObservableObject {
                 waiter(url)
             }
         }
+    }
+
+    /// 导出目录时交给引擎的条目列表：目录自己 + 它下面的所有后代。
+    ///
+    /// 界面里的目录有两种来源：归档里真实存在的目录记录，以及 `children(of:)`
+    /// 按文件路径**推导**出来的目录。后者在 `entries` 里根本没有自己那一条，
+    /// 只解 `[entry.path]` 会一个文件都拿不到——拖出去就是「没反应」。
+    nonisolated static func exportPaths(for entry: ArchiveEntry, in entries: [ArchiveEntry]) -> [String] {
+        guard entry.isDirectory else { return [entry.path] }
+        let prefix = entry.path.hasSuffix("/") ? entry.path : entry.path + "/"
+        var seen = Set<String>()
+        var paths: [String] = []
+        // 显式目录（尤其是空目录）只有自己这一条，必须留在列表里
+        if seen.insert(entry.path).inserted { paths.append(entry.path) }
+        for item in entries where item.path.hasPrefix(prefix) {
+            if seen.insert(item.path).inserted { paths.append(item.path) }
+        }
+        return paths
     }
 
     /// 按字节回收 `scratch`：正在被界面占用的、正在写入的、正在浏览的嵌套包都不动。

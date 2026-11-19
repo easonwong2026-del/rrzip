@@ -13,6 +13,7 @@ import UniformTypeIdentifiers
 func runDragTests() {
     testDragOutProvider()
     testDragBackIntoOwnWindow()
+    testDirectoryExport()
 }
 
 private func testDragOutProvider() {
@@ -102,4 +103,122 @@ private final class ResultBox: @unchecked Sendable {
         stored = url
         storedContents = contents
     }
+}
+
+/// 目录拖出：必须连后代一起导出。
+///
+/// 界面里的目录有两种：归档里真有的目录记录（显式），以及按文件路径推导出来的
+/// （隐式）。隐式目录在 `entries` 里没有自己那一条，只解 `[entry.path]` 会拿到
+/// 0 个文件——访达里就是「拖出去没反应」。
+func testDirectoryExport() {
+    print("拖拽 · 目录导出")
+    let work = FileManager.default.temporaryDirectory
+        .appendingPathComponent("rrzip-dir-\(UUID().uuidString)", isDirectory: true)
+    let src = work.appendingPathComponent("src", isDirectory: true)
+    try? FileManager.default.createDirectory(at: src.appendingPathComponent("photos/nested"),
+                                             withIntermediateDirectories: true)
+    try? FileManager.default.createDirectory(at: src.appendingPathComponent("empty"),
+                                             withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: work) }
+
+    try? Data("A".utf8).write(to: src.appendingPathComponent("photos/a.jpg"))
+    try? Data("B".utf8).write(to: src.appendingPathComponent("photos/b.jpg"))
+    try? Data("C".utf8).write(to: src.appendingPathComponent("photos/nested/c.txt"))
+
+    // 1. 隐式目录的 zip：只有文件记录，没有 photos/ 这一条
+    let implicitZip = work.appendingPathComponent("implicit.zip")
+    runTool("/usr/bin/zip", ["-X", "-q", implicitZip.path,
+                             "photos/a.jpg", "photos/b.jpg", "photos/nested/c.txt"], cwd: src)
+
+    // 2. 显式目录的 zip：带 photos/ 与空目录 empty/
+    let explicitZip = work.appendingPathComponent("explicit.zip")
+    runTool("/usr/bin/zip", ["-X", "-q", "-r", explicitZip.path, "photos", "empty"], cwd: src)
+
+    expectDirectoryExport(implicitZip, label: "隐式目录 zip", expectsExplicitEntry: false)
+    expectDirectoryExport(explicitZip, label: "显式目录 zip", expectsExplicitEntry: true)
+
+    // 3. 显式目录的 7z（引擎不在就跳过，不让它把整套测试带红）
+    let sevenZip = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent("Assets/7zz")
+    if FileManager.default.isExecutableFile(atPath: sevenZip.path) {
+        let explicit7z = work.appendingPathComponent("explicit.7z")
+        runTool(sevenZip.path, ["a", "-t7z", "-y", explicit7z.path, "photos", "empty"], cwd: src)
+        expectDirectoryExport(explicit7z, label: "显式目录 7z", expectsExplicitEntry: true)
+    } else {
+        print("  · 跳过 7z：Assets/7zz 不存在")
+    }
+}
+
+private func expectDirectoryExport(_ archive: URL, label: String, expectsExplicitEntry: Bool) {
+    MainActor.assumeIsolated {
+    let model = ArchiveModel()
+    model.open(url: archive)
+    guard waitUntil(20, { model.current != nil }), let frame = model.current else {
+        expect(false, "\(label) 没打开")
+        return
+    }
+
+    let hasExplicit = frame.entries.contains { $0.path == "photos/" }
+    expect(hasExplicit == expectsExplicitEntry, "\(label) 目录记录符合预期",
+           "实际 explicit=\(hasExplicit)")
+
+    guard let dir = model.entries(at: "").first(where: { $0.name == "photos" && $0.isDirectory }) else {
+        expect(false, "\(label) 列表里没有 photos 目录")
+        return
+    }
+    let paths = ArchiveModel.exportPaths(for: dir, in: frame.entries)
+    expect(paths.count >= 4, "\(label) 目录导出包含后代", "实际 \(paths.count) 条")
+
+    var result: URL?
+    var done = false
+    model.payloadURL(for: dir) { url in
+        result = url
+        done = true
+    }
+    expect(waitUntil(60, { done }), "\(label) 导出完成")
+    guard let exported = result else {
+        expect(false, "\(label) 导出失败（返回 nil）")
+        return
+    }
+    let fm = FileManager.default
+    expect(fm.fileExists(atPath: exported.appendingPathComponent("a.jpg").path),
+           "\(label) 后代文件已导出")
+    expect(fm.fileExists(atPath: exported.appendingPathComponent("nested/c.txt").path),
+           "\(label) 子目录已重建")
+    let text = try? String(contentsOf: exported.appendingPathComponent("nested/c.txt"),
+                           encoding: .utf8)
+    expect(text == "C", "\(label) 内容正确", "实际 \(text ?? "nil")")
+
+    if expectsExplicitEntry {
+        guard let empty = model.entries(at: "").first(where: { $0.name == "empty" && $0.isDirectory }) else {
+            expect(false, "\(label) 列表里没有 empty 目录")
+            return
+        }
+        var emptyURL: URL?
+        var emptyDone = false
+        model.payloadURL(for: empty) { url in
+            emptyURL = url
+            emptyDone = true
+        }
+        expect(waitUntil(30, { emptyDone }), "\(label) 空目录导出完成")
+        expect(emptyURL != nil, "\(label) 显式空目录也能导出")
+    }
+    }
+}
+
+@discardableResult
+private func runTool(_ path: String, _ args: [String], cwd: URL) -> Int32 {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: path)
+    process.arguments = args
+    process.currentDirectoryURL = cwd
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    do {
+        try process.run()
+        process.waitUntilExit()
+    } catch {
+        return -1
+    }
+    return process.terminationStatus
 }
