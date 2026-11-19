@@ -121,11 +121,22 @@ jobs:
           hdiutil imageinfo "$DMG" >/dev/null || { echo "::error::$DMG 不是可用的磁盘镜像"; exit 1; }
           echo "dmg 就绪：$DMG"
 
+      # upload-artifact 传「单个目录」时上传的是目录内容：直接指 build/rrzip.app，
+      # 下载下来的 zip 根目录就是 Contents/，看起来像个坏包。先摊到 dist 再传 dist，
+      # 这样 zip 根是 rrzip.app/。ditto 保留扩展属性与权限，复制后再验一次签名。
+      - name: 暂存 app 产物
+        run: |
+          set -e
+          rm -rf dist && mkdir -p dist
+          ditto build/rrzip.app dist/rrzip.app
+          test -d dist/rrzip.app/Contents/MacOS
+          codesign --verify --deep --strict dist/rrzip.app
+
       - name: 上传 app
         uses: actions/upload-artifact@v4
         with:
           name: rrzip-app
-          path: build/rrzip.app
+          path: dist
           retention-days: 7
 
       # PR 页面上直接能下 dmg，省得本地再打一次
