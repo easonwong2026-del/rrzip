@@ -8,10 +8,22 @@ import QuickLookUI
 @objc(PreviewProvider)
 final class PreviewProvider: NSViewController, QLPreviewingController {
 
+    private final class CancellationFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+        var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    }
+
     private var tableView: NSTableView?
     private var titleLabel: NSTextField?
     private var subtitleLabel: NSTextField?
     private var rows: [(name: String, size: String)] = []
+    private var currentFlag: CancellationFlag?
+
+    deinit {
+        currentFlag?.cancel()
+    }
 
     override func loadView() {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 760, height: 500))
@@ -76,32 +88,43 @@ final class PreviewProvider: NSViewController, QLPreviewingController {
     /// 结果回主线程再刷表格。
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
         _ = view
+        currentFlag?.cancel()
+        let flag = CancellationFlag()
+        currentFlag = flag
+
         titleLabel?.stringValue = url.lastPathComponent
         subtitleLabel?.stringValue = "正在读取…"
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let outcome: Result<[ArchiveEntry], Error>
+            let outcome: Result<(entries: [ArchiveEntry], totalCount: Int), Error>
             do {
-                // 走统一入口：扩展里用进程内 libarchive，起不了子进程也能读
-                outcome = .success(try ArchiveService.list(url, password: nil))
+                // 扩展内存上限严苛：流式截断只实例化前 300 项，超出仅累加计数
+                let summary = try InProcessArchive.listSummary(
+                    url, passphrase: nil, limit: 300, isCancelled: { flag.isCancelled }
+                )
+                outcome = .success(summary)
             } catch {
                 outcome = .failure(error)
             }
             DispatchQueue.main.async {
+                guard !flag.isCancelled else {
+                    handler(nil)
+                    return
+                }
                 self?.render(outcome)
                 handler(nil)
             }
         }
     }
 
-    private func render(_ outcome: Result<[ArchiveEntry], Error>) {
+    private func render(_ outcome: Result<(entries: [ArchiveEntry], totalCount: Int), Error>) {
         switch outcome {
-        case .success(let entries):
-            rows = entries.prefix(300).map { ($0.name, $0.isDirectory ? "—" : $0.displaySize) }
-            let suffix = entries.count > 300 ? "（仅显示前 300 项）" : ""
-            subtitleLabel?.stringValue = entries.isEmpty
+        case .success(let summary):
+            rows = summary.entries.map { ($0.name, $0.isDirectory ? "—" : $0.displaySize) }
+            let suffix = summary.totalCount > 300 ? "（仅显示前 300 项）" : ""
+            subtitleLabel?.stringValue = summary.totalCount == 0
                 ? "这个压缩包里没有项目"
-                : "\(entries.count) 个项目 \(suffix)"
+                : "\(summary.totalCount) 个项目 \(suffix)"
         case .failure(ArchiveError.needsPassword):
             rows = []
             subtitleLabel?.stringValue = "已加密：这里看不到内容，请在 rrzip 里输入密码"
@@ -124,10 +147,19 @@ extension PreviewProvider: NSTableViewDataSource, NSTableViewDelegate {
         guard row < rows.count else { return nil }
         let item = rows[row]
         let isName = tableColumn?.identifier.rawValue == "name"
-        let label = NSTextField(labelWithString: isName ? item.name : item.size)
-        label.font = .systemFont(ofSize: 11.5)
+        let identifier = NSUserInterfaceItemIdentifier(isName ? "nameCell" : "sizeCell")
+        let label: NSTextField
+        if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTextField {
+            label = reused
+        } else {
+            let created = NSTextField(labelWithString: "")
+            created.identifier = identifier
+            created.font = .systemFont(ofSize: 11.5)
+            created.lineBreakMode = .byTruncatingMiddle
+            label = created
+        }
+        label.stringValue = isName ? item.name : item.size
         label.textColor = isName ? .labelColor : .secondaryLabelColor
-        label.lineBreakMode = .byTruncatingMiddle
         return label
     }
 }

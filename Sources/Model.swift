@@ -1062,13 +1062,31 @@ final class ArchiveModel: ObservableObject {
         }
     }
 
+    private var loadTask: Task<Void, Never>?
+    private var loadGeneration: UInt64 = 0
+
     private func loadFrame(url: URL, resetTrail: Bool, restorePrefix: String? = nil) {
+        loadTask?.cancel()
+        loadGeneration &+= 1
+        let generation = loadGeneration
         isLoading = true
         status = "正在读取 \(url.lastPathComponent)…"
-        Task { await performLoad(url: url, resetTrail: resetTrail, restorePrefix: restorePrefix) }
+        loadTask = Task {
+            await performLoad(
+                url: url,
+                resetTrail: resetTrail,
+                restorePrefix: restorePrefix,
+                generation: generation
+            )
+        }
     }
 
-    private func performLoad(url: URL, resetTrail: Bool, restorePrefix: String? = nil) async {
+    private func performLoad(
+        url: URL,
+        resetTrail: Bool,
+        restorePrefix: String? = nil,
+        generation: UInt64
+    ) async {
         // 嵌套包在 enter() 里挂过占用：从解压完成一直兜到它进 trail。
         // 这里所有出口（成功、读失败、等密码时被取消）都要放掉，否则那份临时
         // 目录永远占着、回收也动不了它。非嵌套包的路径上没有 hold，release 是空操作。
@@ -1137,6 +1155,9 @@ final class ArchiveModel: ObservableObject {
             }
         }
 
+        // 若加载期间已切换到另一个归档，静默丢弃过期结果，防止 ABA 覆写新状态
+        guard generation == loadGeneration, !Task.isCancelled else { return }
+
         guard let entries else {
             isLoading = false
             status = "读取失败"
@@ -1181,7 +1202,12 @@ final class ArchiveModel: ObservableObject {
     private func resumePendingExtractionIfNeeded(for url: URL) {
         guard let pending = PendingExtraction.read(),
               pending.archives.contains(url.path) else { return }
-        PendingExtraction.clear()
+        let remaining = pending.archives.filter { $0 != url.path }
+        if remaining.isEmpty {
+            PendingExtraction.clear()
+        } else {
+            PendingExtraction.write(archives: remaining.map { URL(fileURLWithPath: $0) }, mode: pending.mode)
+        }
 
         // 太久以前的记录不动手：用户可能只是顺手打开了同名的另一个包
         guard Date().timeIntervalSince(pending.createdAt) < PendingExtraction.validInterval,
@@ -1266,7 +1292,12 @@ final class ArchiveModel: ObservableObject {
                 try await Task.detached(priority: .userInitiated) {
                     try SevenZip.add(archive, items: items, prefix: prefix, password: password)
                 }.value
-                self.loadFrame(url: archive, resetTrail: true, restorePrefix: prefix)
+                if self.current?.archive.path == archive.path {
+                    self.loadFrame(url: archive, resetTrail: true, restorePrefix: prefix)
+                } else {
+                    self.isLoading = false
+                    self.status = "已加入 \(items.count) 项"
+                }
             } catch {
                 self.isLoading = false
                 self.status = "加入失败"
@@ -1324,7 +1355,12 @@ final class ArchiveModel: ObservableObject {
                 try await Task.detached(priority: .userInitiated) {
                     try SevenZip.remove(archive, entries: paths, password: password)
                 }.value
-                self.loadFrame(url: archive, resetTrail: true, restorePrefix: prefix)
+                if self.current?.archive.path == archive.path {
+                    self.loadFrame(url: archive, resetTrail: true, restorePrefix: prefix)
+                } else {
+                    self.isLoading = false
+                    self.status = "已删除 \(paths.count) 项"
+                }
             } catch {
                 self.isLoading = false
                 self.status = "删除失败"
@@ -1989,6 +2025,16 @@ final class ArchiveModel: ObservableObject {
                     // 与其假装干净，不如直接说清楚。
                     self.status = "已取消，目标目录可能留有部分文件"
                     return .cancelled
+                } catch ArchiveError.needsPassword {
+                    guard attempt == 0,
+                          let typed = await self.askPassword(for: frame.archive,
+                                                            wrong: passphrase != nil) else {
+                        self.errorMessage = "密码错误或已取消"
+                        self.status = "解压失败"
+                        return .failed("密码错误或已取消")
+                    }
+                    passphrase = typed
+                    self.passwords[frame.archive.path] = typed
                 } catch let ArchiveError.tool(message) where Tar.looksEncrypted(message) {
                     guard attempt == 0,
                           let typed = await self.askPassword(for: frame.archive,

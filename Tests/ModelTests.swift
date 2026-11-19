@@ -18,7 +18,7 @@ func testBatchDestination() {
 
             let archive = URL(fileURLWithPath: "/tmp/demo.zip")
             let folder = BatchRunner.uniqueFolder(for: archive, in: root)
-            expect(folder.lastPathComponent == "demo (2)", "重名时自动加序号", "实际 \(folder.lastPathComponent)")
+            expect(folder.lastPathComponent == "demo 2", "重名时自动加序号（与 UniquePath 统一为「名字 2」）", "实际 \(folder.lastPathComponent)")
 
             let fresh = BatchRunner.uniqueFolder(for: URL(fileURLWithPath: "/tmp/fresh.zip"), in: root)
             expect(fresh.lastPathComponent == "fresh", "不重名时用原名")

@@ -58,7 +58,19 @@ enum InProcessArchive {
     /// 与 `Tar.list` 同语义同结构：失败抛 `ArchiveError`，加密抛 `.needsPassword`。
     static func list(_ url: URL, passphrase: String? = nil) throws -> [ArchiveEntry] {
         let reader = Reader()
-        return try reader.list(url, passphrase: passphrase)
+        return try reader.listSummary(url, passphrase: passphrase, limit: nil, isCancelled: nil).entries
+    }
+
+    /// 流式摘要列目录：最多仅实例化前 `limit` 条 `ArchiveEntry`，超出部分只累加 `totalCount`，
+    /// 避免 Quick Look 扩展在超大压缩包下因全量分配触发 Jetsam OOM。
+    static func listSummary(
+        _ url: URL,
+        passphrase: String? = nil,
+        limit: Int = 300,
+        isCancelled: (() -> Bool)? = nil
+    ) throws -> (entries: [ArchiveEntry], totalCount: Int) {
+        let reader = Reader()
+        return try reader.listSummary(url, passphrase: passphrase, limit: limit, isCancelled: isCancelled)
     }
 
     private struct Reader {
@@ -67,7 +79,12 @@ enum InProcessArchive {
         private let retry: Int32 = -10
         private let warn: Int32 = -20
 
-        func list(_ url: URL, passphrase: String?) throws -> [ArchiveEntry] {
+        func listSummary(
+            _ url: URL,
+            passphrase: String?,
+            limit: Int?,
+            isCancelled: (() -> Bool)?
+        ) throws -> (entries: [ArchiveEntry], totalCount: Int) {
             guard let handle = C.readNew() else {
                 throw ArchiveError.tool("无法初始化 libarchive")
             }
@@ -89,7 +106,11 @@ enum InProcessArchive {
             formatter.dateFormat = "yyyy-MM-dd HH:mm"
 
             var entries: [ArchiveEntry] = []
+            if let limit { entries.reserveCapacity(min(limit, 512)) }
+            var totalCount = 0
+
             while true {
+                if isCancelled?() == true { throw ArchiveError.cancelled }
                 var raw: OpaquePointer?
                 let status = C.nextHeader(handle, &raw)
                 if status == eof { break }
@@ -98,8 +119,10 @@ enum InProcessArchive {
                     throw Self.mapError(handle, fallback: "无法读取 \(url.lastPathComponent)")
                 }
                 guard let entry = raw, let pathPointer = C.pathname(entry) else { continue }
+                guard pathPointer.pointee != 0 else { continue }
+                totalCount += 1
+                if let limit, entries.count >= limit { continue }
                 let path = String(cString: pathPointer)
-                guard !path.isEmpty else { continue }
                 let isDirectory = (C.filetype(entry) & S_IFMT) == S_IFDIR || path.hasSuffix("/")
                 entries.append(ArchiveEntry(
                     path: path,
@@ -108,7 +131,7 @@ enum InProcessArchive {
                     mode: isDirectory ? "drwxr-xr-x" : "-rw-r--r--"
                 ))
             }
-            return entries
+            return (entries, totalCount)
         }
 
         /// libarchive 的错误字符串只在这一层有意义；加密要单独认出来，

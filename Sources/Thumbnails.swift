@@ -36,7 +36,11 @@ final class ThumbnailStore: ObservableObject {
         // version 自增用来通知界面重绘（缓存现在是空的）
         version &+= 1
     }
-    private var inFlight = Set<String>()
+    /// 同 key 并发请求合并：正在渲染时后来的调用者（如悬停卡片）挂入等待列表，不再误返 nil
+    private var inFlight: [String: [(CGImage?) -> Void]] = [:]
+    private var activeRenders = 0
+    private let maxConcurrentRenders = 4
+    private var pendingRenders: [() -> Void] = []
     /// 渲染失败的键：避免滚动回来时反复解压同一个坏文件
     private var failed = Set<String>()
     /// 缩略图落盘后自增：视图只读缓存，靠这个信号刷新，避免依赖 @State
@@ -49,8 +53,8 @@ final class ThumbnailStore: ObservableObject {
     private static let imageSizeLimit: Int64 = 12 * 1024 * 1024
     /// PDF 首页渲染稍贵，阈值放宽到 40 MB
     private static let pdfSizeLimit: Int64 = 40 * 1024 * 1024
-    /// 视频只取一张首帧，但解压本身要落盘，限制到 300 MB
-    private static let videoSizeLimit: Int64 = 300 * 1024 * 1024
+    /// 视频只取一张首帧，但解压本身要落盘，限制到 50 MB 避免网格滚动瞬间解压数 GB
+    private static let videoSizeLimit: Int64 = 50 * 1024 * 1024
     /// AVFoundation 能解的容器（mkv/avi 不在此列，避免白跑一趟）
     nonisolated private static let videoExts: Set<String> = ["mp4", "mov", "m4v", "mpg", "mpeg"]
 
@@ -135,40 +139,66 @@ final class ThumbnailStore: ObservableObject {
             completion?(hit.image)
             return
         }
-        guard supports(entry),
-              !inFlight.contains(key as String),
-              !failed.contains(key as String) else {
+        let keyString = key as String
+        guard supports(entry), !failed.contains(keyString) else {
             completion?(nil)
             return
         }
-        inFlight.insert(key as String)
+        if inFlight[keyString] != nil {
+            if let completion { inFlight[keyString]?.append(completion) }
+            return
+        }
+        inFlight[keyString] = completion.map { [$0] } ?? []
 
         let ext = entry.ext
-        model.payloadURL(for: entry) { url in
-            guard let url else {
-                Task { @MainActor in self.inFlight.remove(key as String) }
-                completion?(nil)
-                return
-            }
-            // 渲染要读这个临时文件：清缓存不能删，自动按预算回收也不能。
-            // 登记带上文件路径，回收按目录前缀就能认出这一份正在被读。
-            ScratchUsage.shared.beginWork(on: url.path)
-            Task.detached(priority: .utility) {
-                let image = Self.render(url: url, ext: ext, maxPixel: maxPixel)
-                await MainActor.run {
-                    ScratchUsage.shared.endWork(on: url.path)
-                    self.inFlight.remove(key as String)
-                    guard let image else {
-                        // 坏图 / 解不开的 PDF：记下来，滚动回来不再反复解压
-                        self.failed.insert(key as String)
-                        completion?(nil)
-                        return
+        let work: () -> Void = { [weak self] in
+            guard let self else { return }
+            model.payloadURL(for: entry) { url in
+                guard let url else {
+                    Task { @MainActor in
+                        self.finishRender(key: key, keyString: keyString, image: nil, recordFailure: false)
                     }
-                    self.cache.setObject(CGImageBox(image), forKey: key, cost: Self.cost(of: image))
-                    self.version &+= 1
-                    completion?(image)
+                    return
+                }
+                // 渲染要读这个临时文件：清缓存不能删，自动按预算回收也不能。
+                // 登记带上文件路径，回收按目录前缀就能认出这一份正在被读。
+                ScratchUsage.shared.beginWork(on: url.path)
+                Task.detached(priority: .utility) {
+                    let image = Self.render(url: url, ext: ext, maxPixel: maxPixel)
+                    await MainActor.run {
+                        ScratchUsage.shared.endWork(on: url.path)
+                        self.finishRender(key: key, keyString: keyString, image: image, recordFailure: image == nil)
+                    }
                 }
             }
+        }
+        enqueueRender(work)
+    }
+
+    private func enqueueRender(_ work: @escaping () -> Void) {
+        if activeRenders < maxConcurrentRenders {
+            activeRenders += 1
+            work()
+        } else {
+            pendingRenders.append(work)
+        }
+    }
+
+    private func finishRender(key: NSString, keyString: String, image: CGImage?, recordFailure: Bool) {
+        let waiters = inFlight.removeValue(forKey: keyString) ?? []
+        if let image {
+            cache.setObject(CGImageBox(image), forKey: key, cost: Self.cost(of: image))
+            version &+= 1
+        } else if recordFailure {
+            failed.insert(keyString)
+        }
+        for waiter in waiters { waiter(image) }
+
+        if !pendingRenders.isEmpty {
+            let next = pendingRenders.removeFirst()
+            next()
+        } else {
+            activeRenders = max(0, activeRenders - 1)
         }
     }
 

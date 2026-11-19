@@ -109,10 +109,16 @@ final class BatchRunner: ObservableObject {
                             }
                         }
                     }
+                } catch ArchiveError.needsPassword {
+                    await MainActor.run {
+                        if let index = self.jobs.firstIndex(where: { $0.id == job.id }) {
+                            self.jobs[index].state = .skipped
+                            self.jobs[index].detail = "已加密，需要密码"
+                        }
+                    }
                 } catch {
                     let message = error.localizedDescription
-                    let encrypted = message.lowercased().contains("password")
-                        || message.lowercased().contains("encrypted")
+                    let encrypted = Tar.looksEncrypted(message)
                     await MainActor.run {
                         if let index = self.jobs.firstIndex(where: { $0.id == job.id }) {
                             self.jobs[index].state = encrypted ? .skipped : .failed
@@ -145,17 +151,11 @@ final class BatchRunner: ObservableObject {
         }
     }
 
-    /// 目标目录下建一个不重名的文件夹，避免两个包解到一起
+    /// 目标目录下建一个不重名的文件夹，复用全局 UniquePath 命名规则
     nonisolated static func uniqueFolder(for archive: URL, in root: URL) -> URL {
-        let fm = FileManager.default
         let base = archive.deletingPathExtension().lastPathComponent
-        var candidate = root.appendingPathComponent(base, isDirectory: true)
-        var index = 2
-        while fm.fileExists(atPath: candidate.path) {
-            candidate = root.appendingPathComponent("\(base) (\(index))", isDirectory: true)
-            index += 1
-        }
-        return candidate
+        let target = root.appendingPathComponent(base.isEmpty ? "归档" : base, isDirectory: true)
+        return UniquePath.directory(target)
     }
 
     private static func defaultDestination() -> URL? {

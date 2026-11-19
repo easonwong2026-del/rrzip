@@ -13,20 +13,42 @@ import Foundation
 
 enum UniquePath {
 
-    /// 文件版：`a.zip` → `a 2.zip`
+    private static let maxAttempts = 10_000
+
+    /// 拆分复合扩展名（如 `backup.tar.gz` → `("backup", "tar.gz")`），普通文件按单后缀拆分
+    private static func splitNameAndExtension(_ filename: String) -> (base: String, ext: String) {
+        let lower = filename.lowercased()
+        let compoundExts = FormatCatalog.compounds
+            .flatMap(\.extensions)
+            .sorted { $0.count > $1.count }
+        for compound in compoundExts {
+            let suffix = "." + compound
+            if lower.hasSuffix(suffix), filename.count > suffix.count {
+                let splitIndex = filename.index(filename.endIndex, offsetBy: -suffix.count)
+                return (String(filename[..<splitIndex]), String(filename[filename.index(after: splitIndex)...]))
+            }
+        }
+        let ns = filename as NSString
+        let ext = ns.pathExtension
+        let base = ext.isEmpty ? filename : ns.deletingPathExtension
+        return (base, ext)
+    }
+
+    /// 文件版：`a.zip` → `a 2.zip`，`backup.tar.gz` → `backup 2.tar.gz`
     static func file(_ url: URL) -> URL {
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return url }
         let folder = url.deletingLastPathComponent()
-        let base = url.deletingPathExtension().lastPathComponent
-        let ext = url.pathExtension
-        var index = 2
-        while true {
-            let candidate = folder.appendingPathComponent("\(base) \(index)")
-                .appendingPathExtension(ext)
+        let (base, ext) = splitNameAndExtension(url.lastPathComponent)
+        for index in 2...(maxAttempts + 1) {
+            let name = ext.isEmpty ? "\(base) \(index)" : "\(base) \(index).\(ext)"
+            let candidate = folder.appendingPathComponent(name)
             if !fm.fileExists(atPath: candidate.path) { return candidate }
-            index += 1
         }
+        let fallback = ext.isEmpty
+            ? "\(base) \(UUID().uuidString.prefix(8))"
+            : "\(base) \(UUID().uuidString.prefix(8)).\(ext)"
+        return folder.appendingPathComponent(fallback)
     }
 
     /// 目录版：`a` → `a 2`。
@@ -37,9 +59,13 @@ enum UniquePath {
         let base = url.lastPathComponent
         var candidate = url
         var index = 2
-        while fm.fileExists(atPath: candidate.path) || reserved.contains(candidate.path) {
+        while (fm.fileExists(atPath: candidate.path) || reserved.contains(candidate.path))
+                && index <= maxAttempts + 1 {
             candidate = parent.appendingPathComponent("\(base) \(index)", isDirectory: true)
             index += 1
+        }
+        if fm.fileExists(atPath: candidate.path) || reserved.contains(candidate.path) {
+            return parent.appendingPathComponent("\(base) \(UUID().uuidString.prefix(8))", isDirectory: true)
         }
         return candidate
     }
