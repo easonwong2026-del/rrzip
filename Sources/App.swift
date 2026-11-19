@@ -285,9 +285,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static func open(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
         guard let model else {
-            pendingOpen = urls
+            pendingOpen.append(contentsOf: urls)
             return
         }
+        restoreMainWindow(in: NSApp)
         let archives = urls.filter {
             if case .open = OpenGate.decide($0) { return true }
             return false
@@ -300,6 +301,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if let first = urls.first {
             // 交回 model 走 unrecognized 分支，给出真实提示而不是静默返回
             model.open(url: first)
+        }
+    }
+
+    @MainActor
+    static func restoreMainWindow(in app: NSApplication) {
+        if let main = app.windows.first(where: { !($0 is NSPanel) && $0.canBecomeMain && $0.title != "设置" }) {
+            if main.isMiniaturized { main.deminiaturize(nil) }
+            main.makeKeyAndOrderFront(nil)
+        } else if let fallback = app.windows.first(where: { !($0 is NSPanel) }) {
+            fallback.makeKeyAndOrderFront(nil)
         }
     }
 
@@ -497,7 +508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 窗口关掉后再点 Dock 图标，把主窗口找回来
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
-            sender.windows.first?.makeKeyAndOrderFront(nil)
+            AppDelegate.restoreMainWindow(in: sender)
         }
         return true
     }

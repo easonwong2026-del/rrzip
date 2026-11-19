@@ -16,6 +16,7 @@
 //  这里不另起一套文件管理框架。
 
 import AppKit
+import Darwin
 import Foundation
 
 enum SaveAsError: LocalizedError {
@@ -43,11 +44,14 @@ enum SafeSave {
     /// - 不做「先删目标再复制」，任何分支都不会让目标先消失。
     nonisolated static func commit(_ source: URL, to destination: URL) throws {
         let fm = FileManager.default
+        if let vals = try? source.resourceValues(forKeys: [.isSymbolicLinkKey]),
+           vals.isSymbolicLink == true {
+            throw SaveAsError.stagingFailed("不支持将符号链接直接另存为普通文件")
+        }
+
         let folder = destination.deletingLastPathComponent()
-        // 暂存名带随机后缀：同时保存两个同名文件不会互相截断，
-        // 失败时也只删自己这一份
-        let staging = folder.appendingPathComponent(
-            ".rrzip-save-\(UUID().uuidString.prefix(8))-\(destination.lastPathComponent)")
+        // 使用固定长度随机暂存名，避免长中文文件名拼前缀后触发 ENAMETOOLONG（255 字节上限）
+        let staging = folder.appendingPathComponent(".rrzip-tmp-\(UUID().uuidString)")
 
         do {
             // 先落到目标同目录：rename 只在同一个文件系统内可靠，
@@ -56,6 +60,13 @@ enum SafeSave {
         } catch {
             try? fm.removeItem(at: staging)
             throw SaveAsError.stagingFailed(error.localizedDescription)
+        }
+
+        // 在原子 rename 前落盘 fsync，降低外置卷或异常断电导致 0 字节文件的风险
+        let fd = open(staging.path, O_RDONLY)
+        if fd >= 0 {
+            _ = fsync(fd)
+            _ = close(fd)
         }
 
         // rename 覆盖目标：能走到这里说明用户在保存面板里已经明确确认过替换。

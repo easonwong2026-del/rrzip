@@ -362,12 +362,26 @@ struct PreviewPane: View {
 
         switch ext {
         case "png", "jpg", "jpeg", "heic", "gif", "webp", "tiff", "bmp":
-            image = NSImage(contentsOf: url)
+            let raw = await Task.detached(priority: .userInitiated) {
+                try? Data(contentsOf: url, options: .mappedIfSafe)
+            }.value
+            guard !Task.isCancelled else { return }
+            image = raw.flatMap { NSImage(data: $0) }
         case "pdf":
-            pdf = PDFDocument(url: url)
+            let raw = await Task.detached(priority: .userInitiated) {
+                try? Data(contentsOf: url, options: .mappedIfSafe)
+            }.value
+            guard !Task.isCancelled else { return }
+            pdf = raw.flatMap { PDFDocument(data: $0) }
         case "txt", "md", "json", "swift", "js", "ts", "py", "sh", "html", "css", "xml", "yml", "yaml", "log", "csv":
-            let data = (try? Data(contentsOf: url, options: .mappedIfSafe))?.prefix(120_000)
-            if let data { text = String(decoding: data, as: UTF8.self) }
+            let loadedText = await Task.detached(priority: .userInitiated) { () -> String? in
+                guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+                defer { try? handle.close() }
+                guard let data = try? handle.read(upToCount: 120_000) else { return nil }
+                return String(decoding: data, as: UTF8.self)
+            }.value
+            guard !Task.isCancelled else { return }
+            text = loadedText
         default:
             note = "这种格式没有内联预览"
         }
@@ -393,6 +407,8 @@ struct PDFKitView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: PDFView, context: Context) {
-        nsView.document = document
+        if nsView.document !== document {
+            nsView.document = document
+        }
     }
 }

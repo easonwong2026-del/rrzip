@@ -41,29 +41,33 @@ struct JobRecord: Codable, Sendable {
 /// JSONL，一条一行，保留最近 200 条。
 /// 通知被系统关掉时，这里至少还能看到「刚才那两个包解到哪了」。
 enum FinderJobLog {
+    private static let ioQueue = DispatchQueue(label: "com.rrzip.finder.joblog")
+
     static var fileURL: URL {
         SharedPaths.support.appendingPathComponent("finder-jobs.log")
     }
 
     static func append(_ record: JobRecord, limit: Int = 200) {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        guard let line = try? encoder.encode(record) else { return }
+        ioQueue.sync {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            guard let line = try? encoder.encode(record) else { return }
 
-        let url = fileURL
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                 withIntermediateDirectories: true)
+            let url = fileURL
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
 
-        var data = (try? Data(contentsOf: url)) ?? Data()
-        data.append(line)
-        data.append(0x0A)
+            var data = (try? Data(contentsOf: url)) ?? Data()
+            data.append(line)
+            data.append(0x0A)
 
-        // 超上限就只留最后 limit 条，避免日志无限长
-        let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
-        if lines.count > limit {
-            data = Data(lines.suffix(limit).flatMap { Array($0) + [0x0A] })
+            // 超上限就只留最后 limit 条，避免日志无限长
+            let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+            if lines.count > limit {
+                data = Data(lines.suffix(limit).flatMap { Array($0) + [0x0A] })
+            }
+            try? data.write(to: url, options: .atomic)
         }
-        try? data.write(to: url, options: .atomic)
     }
 
     /// 新的在前
@@ -114,16 +118,16 @@ enum FinderNotifier {
         }
     }
 
-    /// 同一批多选会调多次，1 秒内只跳一次，别把访达刷屏
-    nonisolated(unsafe) private static var lastReveal = Date.distantPast
+    /// 同一批多选会调多次，1 秒内只跳一次，别把访达刷屏（仅在主线程访问，消除跨线程竞态）
+    @MainActor private static var lastReveal = Date.distantPast
 
     /// 在访达里选中产物。沙盒扩展调用它只是给 Finder 发个事件，不需要文件权限。
     private static func revealInFinder(_ url: URL?) {
         guard let url else { return }
-        let now = Date()
-        guard now.timeIntervalSince(lastReveal) > 1.0 else { return }
-        lastReveal = now
-        DispatchQueue.main.async {
+        Task { @MainActor in
+            let now = Date()
+            guard now.timeIntervalSince(lastReveal) > 1.0 else { return }
+            lastReveal = now
             NSWorkspace.shared.activateFileViewerSelecting([url])
         }
     }
@@ -141,9 +145,10 @@ enum FinderJobRunner {
             let name = plan.archive.lastPathComponent
             let existed = FileManager.default.fileExists(atPath: plan.destination.path)
 
-            // 先探一次：需要密码就别解了，免得留下空目录再删
+            // 先探一次：需要密码就别解了，免得留下空目录再删；同时复用结果计算冲突数，避免重复列目录
+            var listedEntries: [ArchiveEntry]?
             do {
-                _ = try ArchiveService.list(plan.archive, password: nil)
+                listedEntries = try ArchiveService.list(plan.archive, password: nil)
             } catch ArchiveError.needsPassword {
                 outcome.needsPassword.append(name)
                 continue
@@ -153,7 +158,7 @@ enum FinderJobRunner {
 
             // 只有「解到已有目录」才可能撞名；新建目录里不会有同名文件
             let clashes = (existed && plan.onConflict == .skip)
-                ? conflictCount(archive: plan.archive, destination: plan.destination, password: nil)
+                ? conflictCount(entries: listedEntries, destination: plan.destination)
                 : 0
 
             do {
@@ -263,12 +268,14 @@ enum FinderJobRunner {
         }
     }
 
-    /// 目标目录里已存在多少个包内同名文件（只数文件，不数目录）
-    private static func conflictCount(archive: URL, destination: URL, password: String?) -> Int {
-        guard let entries = try? ArchiveService.list(archive, password: password) else { return 0 }
+    /// 目标目录里已存在多少个包内同名文件（只数文件，不数目录，且过滤越界路径）
+    private static func conflictCount(entries: [ArchiveEntry]?, destination: URL) -> Int {
+        guard let entries else { return 0 }
         return entries.filter { entry in
             guard !entry.isDirectory else { return false }
+            guard (try? ArchivePathGuard.validateRelative(entry.path)) != nil else { return false }
             let target = destination.appendingPathComponent(entry.path)
+            guard (try? ArchivePathGuard.validateContained(target, within: destination)) != nil else { return false }
             return FileManager.default.fileExists(atPath: target.path)
         }.count
     }

@@ -76,6 +76,9 @@ enum FinderService {
     /// 合并压缩：多个源压成一个 ZIP。失败时带可展示的原因。
     @discardableResult
     static func compressMerged(_ urls: [URL]) -> Task<FinderCompressResult, Never> {
+        guard !urls.isEmpty else {
+            return Task { FinderCompressResult(failure: "没有要压缩的文件") }
+        }
         guard let token = FormalWriteLedger.shared.begin(
             .finderService, label: "访达服务 · 压缩 \(urls.count) 项"
         ) else {

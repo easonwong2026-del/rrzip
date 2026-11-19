@@ -121,6 +121,13 @@ struct CreateArchiveSheet: View {
             }
         }
         .padding(18)
+        .onChange(of: format) { _, _ in
+            if plain {
+                encrypted = false
+                password = ""
+                volume = .none
+            }
+        }
     }
 
     private var footer: some View {
@@ -132,14 +139,14 @@ struct CreateArchiveSheet: View {
                 var options = CreateOptions()
                 options.format = format
                 options.level = level
-                options.password = encrypted ? password : ""
-                options.volume = volume
+                options.password = (!plain && encrypted) ? password : ""
+                options.volume = plain ? .none : volume
                 onConfirm(options)
             }
             .keyboardShortcut(.defaultAction)
             .buttonStyle(.borderedProminent)
             .tint(Palette.brand)
-            .disabled(encrypted && password.isEmpty)
+            .disabled(!plain && encrypted && password.isEmpty)
         }
         .padding(18)
     }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 rrzip contributors
 //
+import Darwin
 import Foundation
 
 /// 一层归档的条目
@@ -148,10 +149,19 @@ enum Tar {
 
         // stderr 写临时文件而不是管道：两个管道顺序读会在错误输出超过缓冲区时互等
         let out = Pipe()
+        defer { try? out.fileHandleForReading.close() }
         let errFile = FileManager.default.temporaryDirectory
             .appendingPathComponent("rrzip-stderr-\(UUID().uuidString)")
-        FileManager.default.createFile(atPath: errFile.path, contents: nil)
+        FileManager.default.createFile(
+            atPath: errFile.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        )
+        defer { try? FileManager.default.removeItem(at: errFile) }
         let errHandle = try FileHandle(forWritingTo: errFile)
+        var errClosed = false
+        defer { if !errClosed { try? errHandle.close() } }
+
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = out
         process.standardError = errHandle
@@ -159,15 +169,14 @@ enum Tar {
         // 只有队列任务才登记进程归属。批量、预览这些临时进程不登记，
         // 否则会把当前任务的句柄顶掉，取消就打到别人身上了。
         if let jobID { TaskRegistry.begin(process, for: jobID) }
+        defer { if let jobID { TaskRegistry.endProcess(process, for: jobID) } }
 
         let outData = out.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         let wasCancelled = jobID.map { TaskRegistry.wasCancelled($0) } ?? false
-        // 只注销这个进程，别释放任务归属——解压重试还要用同一个 jobID
-        if let jobID { TaskRegistry.endProcess(process, for: jobID) }
         try? errHandle.close()
+        errClosed = true
         let errData = (try? Data(contentsOf: errFile)) ?? Data()
-        try? FileManager.default.removeItem(at: errFile)
 
         // 主动取消也会让退出码非 0，先把它和真正的失败分开
         if wasCancelled { throw ArchiveError.cancelled }
@@ -268,7 +277,11 @@ enum Tar {
             args.append("--")
             args.append(contentsOf: entries)
         }
-        try run(args, jobID: jobID)
+        do {
+            try run(args, jobID: jobID)
+        } catch let ArchiveError.tool(message) where looksEncrypted(message) {
+            throw ArchiveError.needsPassword
+        }
     }
 
     static func create(at output: URL, from items: [URL], format: String,
@@ -356,9 +369,8 @@ enum TaskRegistry {
     private struct State {
         var current: Process?
         var owner: UUID?
-        /// 记的是「哪个任务要被取消」，不是一个布尔。
-        /// 用布尔的话，取消 A 之后排队中的 B 一 claim 就会误吞这个标志。
-        var cancelRequested: UUID?
+        /// 记录每个已请求取消的任务 ID，避免取消排队任务时覆写当前运行任务的取消标记
+        var cancelledIDs: Set<UUID> = []
     }
 
     private static let lock = NSLock()
@@ -374,14 +386,11 @@ enum TaskRegistry {
     /// 任务开始前占位。已经请求过取消就直接抛错，连进程都不启动。
     static func claim(_ id: UUID) throws {
         let rejected = withState { state -> Bool in
-            if state.cancelRequested == id {
-                state.cancelRequested = nil
+            if state.cancelledIDs.remove(id) != nil {
                 state.owner = nil
                 state.current = nil
                 return true
             }
-            // 过期的取消信号（针对已完成的任务）在这里丢掉
-            state.cancelRequested = nil
             state.owner = id
             state.current = nil
             return false
@@ -395,11 +404,9 @@ enum TaskRegistry {
             guard state.owner == id else { return false }
             state.current = process
             // claim 之后、begin 之前来的取消，在这里补一刀
-            return state.cancelRequested == id
+            return state.cancelledIDs.contains(id)
         }
-        // terminate 对「还没启动」的 Process 会抛 NSInvalidArgumentException，
-        // 对「已经退出」的则是空操作；这里再确认一次，别让取消变成崩溃。
-        if terminate, process.isRunning { process.terminate() }
+        if terminate { terminateWithFallback(process, for: id) }
     }
 
     /// 单个子进程退出：只注销这一个进程，owner 留给任务本身。
@@ -415,38 +422,53 @@ enum TaskRegistry {
     /// 任务真正结束（`finishJob` 里调）。这里才释放归属。
     static func release(_ id: UUID) {
         let leftover = withState { state -> Process? in
+            state.cancelledIDs.remove(id)
             guard state.owner == id else { return nil }
             let running = state.current
             state.current = nil
             state.owner = nil
-            if state.cancelRequested == id { state.cancelRequested = nil }
             return running
         }
         // 正常路径不会走到这儿（进程都已 waitUntilExit）；真留下活进程就是有 bug，
         // 与其让它在后台继续写用户的磁盘，不如收掉。
-        if let leftover, leftover.isRunning { leftover.terminate() }
+        if let leftover { terminateWithFallback(leftover, for: id) }
     }
 
     /// 只对当前 owner 生效。串行保证了同一时刻只有一个任务，
     /// 但临时进程可能正在跑——它们的取消由自己的调用方负责。
     static func cancel(_ id: UUID) {
         let target = withState { state -> Process? in
-            state.cancelRequested = id
+            state.cancelledIDs.insert(id)
             return state.owner == id ? state.current : nil
         }
-        // 已经退出的进程 terminate 是空操作；这里防的是「查的时候还在、杀的时候没了」
-        if let target, target.isRunning { target.terminate() }
+        if let target { terminateWithFallback(target, for: id) }
+    }
+
+    /// 先发 SIGTERM；若 3 秒后子进程仍在运行且仍归属该任务，再升级 SIGKILL 兜底
+    private static func terminateWithFallback(_ process: Process, for id: UUID) {
+        guard process.isRunning else { return }
+        let pid = process.processIdentifier
+        process.terminate()
+        guard pid > 0 else { return }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3.0) {
+            let stillActive = withState { state in
+                state.owner == id && state.current?.processIdentifier == pid && (state.current?.isRunning ?? false)
+            }
+            if stillActive {
+                _ = kill(pid, SIGKILL)
+            }
+        }
     }
 
     /// 进程退出后判断：是我这个任务被取消了吗。
     /// 必须在 `endProcess` 之前问——owner 一放掉就无从判断了。
     static func wasCancelled(_ id: UUID) -> Bool {
-        withState { $0.owner == id && $0.cancelRequested == id }
+        withState { $0.owner == id && $0.cancelledIDs.contains(id) }
     }
 
     // 测试用
     static var currentOwner: UUID? { withState { $0.owner } }
-    static var pendingCancel: UUID? { withState { $0.cancelRequested } }
+    static var pendingCancel: UUID? { withState { $0.cancelledIDs.first } }
     static var hasProcess: Bool { withState { $0.current != nil } }
 }
 
@@ -490,9 +512,13 @@ enum SevenZip {
 
     static var isAvailable: Bool { binary != nil }
 
+    private static let percentRegex = try? NSRegularExpression(pattern: #"(\d{1,3})%"#)
+    private static let diagnosticBufferLimit = 65_536
+
     @discardableResult
     static func run(_ args: [String], cwd: URL? = nil,
                     jobID: UUID? = nil,
+                    captureOutput: Bool = true,
                     onProgress: ((Double) -> Void)? = nil) throws -> String {
         guard let binary else { throw ArchiveError.engineUnavailable }
         let process = Process()
@@ -511,24 +537,41 @@ enum SevenZip {
         process.environment = env
 
         let out = Pipe()
+        defer { try? out.fileHandleForReading.close() }
         let errFile = FileManager.default.temporaryDirectory
             .appendingPathComponent("rrzip-stderr-\(UUID().uuidString)")
-        FileManager.default.createFile(atPath: errFile.path, contents: nil)
+        FileManager.default.createFile(
+            atPath: errFile.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        )
+        defer { try? FileManager.default.removeItem(at: errFile) }
         let errHandle = try FileHandle(forWritingTo: errFile)
+        var errClosed = false
+        defer { if !errClosed { try? errHandle.close() } }
+
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = out
         process.standardError = errHandle
         try process.run()
         if let jobID { TaskRegistry.begin(process, for: jobID) }
+        defer { if let jobID { TaskRegistry.endProcess(process, for: jobID) } }
 
-        // 有进度回调时边读边解析，不能等 EOF 再读——那要等任务跑完才拿到数据
+        // 有进度回调时边读边解析；非列表操作只保留最近 64 KB 用于错误诊断，防止大包进度输出 OOM
         var outData = Data()
         var tail = ""
         let handle = out.fileHandleForReading
         while true {
             let chunk = handle.availableData
             if chunk.isEmpty { break }
-            outData.append(chunk)
+            if captureOutput {
+                outData.append(chunk)
+            } else {
+                outData.append(chunk)
+                if outData.count > diagnosticBufferLimit {
+                    outData = Data(outData.suffix(diagnosticBufferLimit))
+                }
+            }
             guard onProgress != nil,
                   let text = String(data: chunk, encoding: .utf8) else { continue }
             tail += text
@@ -539,11 +582,9 @@ enum SevenZip {
 
         process.waitUntilExit()
         let wasCancelled = jobID.map { TaskRegistry.wasCancelled($0) } ?? false
-        // 只注销这个进程，别释放任务归属——解压重试还要用同一个 jobID
-        if let jobID { TaskRegistry.endProcess(process, for: jobID) }
         try? errHandle.close()
+        errClosed = true
         let errData = (try? Data(contentsOf: errFile)) ?? Data()
-        try? FileManager.default.removeItem(at: errFile)
 
         if wasCancelled { throw ArchiveError.cancelled }
 
@@ -559,7 +600,7 @@ enum SevenZip {
     /// 取文本里最后一个 `NN%`。
     /// 7zz 用 \b 退格原地刷新进度行，行内会堆着 0%、1%、2%…，按行取会拿到最早的。
     private static func lastPercent(in text: String) -> Double? {
-        guard let regex = try? NSRegularExpression(pattern: #"(\d{1,3})%"#) else { return nil }
+        guard let regex = percentRegex else { return nil }
         let ns = text as NSString
         let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
         guard let last = matches.last else { return nil }
@@ -571,7 +612,7 @@ enum SevenZip {
         var args = ["t", "-y"]
         if let password, !password.isEmpty { args.append("-p\(password)") }
         args += ["--", archive.path]
-        try run(args)
+        try run(args, captureOutput: false)
     }
 
     /// `7zz l -slt` 的块状输出解析
@@ -654,7 +695,17 @@ enum SevenZip {
         } else {
             args += ["--", archive.path]
         }
-        try run(args, jobID: jobID, onProgress: onProgress)
+        do {
+            try run(args, jobID: jobID, captureOutput: false, onProgress: onProgress)
+        } catch let ArchiveError.tool(message) {
+            let lower = message.lowercased()
+            if lower.contains("wrong password")
+                || lower.contains("password")
+                || lower.contains("encrypted") {
+                throw ArchiveError.needsPassword
+            }
+            throw ArchiveError.tool(message)
+        }
     }
 
     /// format: "zip" | "7z" | "tar"
@@ -695,7 +746,7 @@ enum SevenZip {
         let listFile = try ArchivePathGuard.writeListFile(items.map(\.path))
         defer { try? FileManager.default.removeItem(at: listFile) }
         args += listTail(output, listFile: listFile)
-        try run(args, jobID: jobID, onProgress: onProgress)
+        try run(args, jobID: jobID, captureOutput: false, onProgress: onProgress)
     }
 
     /// 不同目录下的同名项：7-Zip 会拒绝，提前给可读的提示。
@@ -731,7 +782,7 @@ enum SevenZip {
         if prefix.isEmpty {
             let listFile = try ArchivePathGuard.writeListFile(items.map(\.path))
             defer { try? FileManager.default.removeItem(at: listFile) }
-            try run(base + listTail(archive, listFile: listFile))
+            try run(base + listTail(archive, listFile: listFile), captureOutput: false)
             return
         }
 
@@ -753,7 +804,7 @@ enum SevenZip {
         }
         let listFile = try ArchivePathGuard.writeListFile(relatives)
         defer { try? FileManager.default.removeItem(at: listFile) }
-        try run(base + listTail(archive, listFile: listFile), cwd: staging)
+        try run(base + listTail(archive, listFile: listFile), cwd: staging, captureOutput: false)
     }
 
     /// 从归档里删除条目（路径是包内路径，目录要带结尾斜杠）
@@ -765,6 +816,6 @@ enum SevenZip {
         let listFile = try ArchivePathGuard.writeListFile(entries)
         defer { try? FileManager.default.removeItem(at: listFile) }
         args += listTail(archive, listFile: listFile)
-        try run(args)
+        try run(args, captureOutput: false)
     }
 }
