@@ -72,8 +72,27 @@ enum ArchiveService {
                         onConflict: ArchiveConflictPolicy = .overwrite,
                         jobID: UUID? = nil,
                         onProgress: (@Sendable (Double) -> Void)? = nil) throws {
+        for entry in entries {
+            try ArchivePathGuard.validateRelative(entry)
+        }
+        // 全量解压前预检归档条目，提前拦截含绝对路径或 `..` 穿越的恶意归档
+        if entries.isEmpty {
+            do {
+                let inspected = try list(url, password: password)
+                for item in inspected {
+                    try ArchivePathGuard.validateRelative(item.path)
+                }
+            } catch ArchiveError.unsafePath(let bad) {
+                throw ArchiveError.unsafePath(bad)
+            } catch ArchiveError.needsPassword {
+                throw ArchiveError.needsPassword
+            } catch {
+                // 个别格式仅能直接解压或依赖后续引擎报错，不在此吞掉真实解压错误
+            }
+        }
+
         var lastError: Error?
-        for engine in engineOrder(for: url) {
+        for engine in engineOrder(for: url) where engine.isAvailable {
             do {
                 switch engine {
                 case .libarchive:
@@ -92,6 +111,9 @@ enum ArchiveService {
                 throw ArchiveError.cancelled
             } catch ArchiveError.needsPassword {
                 throw ArchiveError.needsPassword
+            } catch ArchiveError.unsafePath(let bad) {
+                // 安全拦截禁止回退到另一个引擎重试
+                throw ArchiveError.unsafePath(bad)
             } catch {
                 lastError = error
             }

@@ -38,14 +38,29 @@ fi
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
 echo "==> 签名 $VERSION（$IDENTITY）"
 
-# 先签扩展再签主 app，不加 --deep：--deep 会覆盖扩展自己的 entitlements
+# 1. 先签内置辅助二进制（Notarization 要求包内所有 Mach-O 均带 Hardened Runtime 与时间戳）
+if [ -f "$APP/Contents/Resources/7zz" ]; then
+    echo "    Contents/Resources/7zz"
+    codesign --force --timestamp --options runtime \
+        --sign "$IDENTITY" "$APP/Contents/Resources/7zz"
+fi
+
+# 2. 分别携带各自的最小权限 entitlements 签名扩展，避免 --force 清空沙盒配置
 for appex in "$APP"/Contents/PlugIns/*.appex; do
     [ -d "$appex" ] || continue
-    echo "    $(basename "$appex")"
+    name=$(basename "$appex" .appex)
+    entitlements="$ROOT/Entitlements/${name}.entitlements"
+    if [ ! -f "$entitlements" ]; then
+        echo "缺少扩展 entitlements 文件：$entitlements"
+        exit 1
+    fi
+    echo "    ${name}.appex（$entitlements）"
     codesign --force --timestamp --options runtime \
+        --entitlements "$entitlements" \
         --sign "$IDENTITY" "$appex"
 done
 
+# 3. 签主 app（不加 --deep，避免覆盖扩展的 entitlements）
 codesign --force --timestamp --options runtime --sign "$IDENTITY" "$APP"
 
 echo "==> 校验签名"
@@ -70,5 +85,20 @@ else
     exit 1
 fi
 
-echo "==> 完成：$APP"
-echo "    分发时打包 build/rrzip-$VERSION.zip（ditto 保留权限与签名）"
+echo "==> 重新打包并签名公证 DMG"
+DMG="$ROOT/build/rrzip-${VERSION}.dmg"
+STAGE_ROOT=$(mktemp -d)
+trap 'rm -rf "$STAGE_ROOT"' EXIT
+STAGE="$STAGE_ROOT/rrzip"
+mkdir -p "$STAGE"
+cp -R "$APP" "$STAGE/"
+ln -s /Applications "$STAGE/Applications"
+rm -f "$DMG"
+hdiutil create -quiet -volname "rrzip ${VERSION}" -srcfolder "$STAGE" \
+    -fs HFS+ -format UDZO -ov "$DMG"
+codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait
+xcrun stapler staple "$DMG"
+xcrun stapler validate "$DMG"
+
+echo "==> 完成：$APP 与 $DMG"

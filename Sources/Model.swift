@@ -1786,23 +1786,57 @@ final class ArchiveModel: ObservableObject {
         drained?()
     }
 
-    private var passwordContinuation: CheckedContinuation<String?, Never>?
+    private struct PendingPasswordPrompt {
+        let request: PasswordRequest
+        let continuation: CheckedContinuation<String?, Never>
+    }
 
-    /// 悬起一个密码询问。解压与打开加密包共用；测试直接调它验证
-    /// 「取消退出时必须恢复 continuation」这条路径。
+    private var activePasswordPrompt: PendingPasswordPrompt?
+    private var passwordPromptQueue: [PendingPasswordPrompt] = []
+
+    /// 悬起一个密码询问。采用 FIFO 队列串行展示，避免后台解压与前台打开
+    /// 同时触发密码弹窗时互相覆盖 continuation 导致崩溃或队列死锁。
     func askPassword(for archive: URL, wrong: Bool) async -> String? {
         return await withCheckedContinuation { continuation in
-            passwordContinuation = continuation
-            passwordRequest = PasswordRequest(archive: archive, isRetry: wrong)
+            let item = PendingPasswordPrompt(
+                request: PasswordRequest(archive: archive, isRetry: wrong),
+                continuation: continuation
+            )
+            if activePasswordPrompt == nil && passwordRequest == nil {
+                activePasswordPrompt = item
+                passwordRequest = item.request
+            } else {
+                passwordPromptQueue.append(item)
+            }
         }
     }
 
-    /// 弹窗回调；nil 表示取消
+    /// 弹窗回调；nil 表示取消。恢复当前队头后自动弹出下一条排队请求。
     func submitPassword(_ value: String?) {
-        guard passwordRequest != nil else { return }
+        guard passwordRequest != nil || activePasswordPrompt != nil else { return }
+        let currentPrompt = activePasswordPrompt
+        activePasswordPrompt = nil
         passwordRequest = nil
-        passwordContinuation?.resume(returning: value)
-        passwordContinuation = nil
+        currentPrompt?.continuation.resume(returning: value)
+
+        if !passwordPromptQueue.isEmpty {
+            let next = passwordPromptQueue.removeFirst()
+            activePasswordPrompt = next
+            passwordRequest = next.request
+        }
+    }
+
+    /// 退出取消时一次性放行所有挂起的密码询问（含当前弹窗与排队项）
+    private func cancelAllPasswordPrompts() {
+        let active = activePasswordPrompt
+        let queued = passwordPromptQueue
+        activePasswordPrompt = nil
+        passwordPromptQueue.removeAll()
+        passwordRequest = nil
+        active?.continuation.resume(returning: nil)
+        for item in queued {
+            item.continuation.resume(returning: nil)
+        }
     }
 
     // MARK: - 嵌套浏览
@@ -2019,13 +2053,17 @@ final class ArchiveModel: ObservableObject {
         Task {
             defer { ScratchUsage.shared.endWork(on: destination.path) }
             let url = try? await Task.detached { () -> URL in
+                // 先验路径、再解压：这条路径同时给预览和导出用，
+                // 恶意条目不该先写进暂存目录再被发现
+                try ArchivePathGuard.validateRelative(entry.path)
+                let file = destination.appendingPathComponent(entry.path)
+                try ArchivePathGuard.validateContained(file, within: destination)
                 switch engine {
                 case .libarchive:
                     try Tar.extract(frame.archive, entries: [entry.path], to: destination, passphrase: passphrase)
                 case .sevenZip:
                     try SevenZip.extract(frame.archive, entries: [entry.path], to: destination, password: passphrase)
                 }
-                let file = destination.appendingPathComponent(entry.path)
                 guard FileManager.default.fileExists(atPath: file.path) else {
                     throw ArchiveError.tool("导出失败")
                 }
@@ -2368,8 +2406,8 @@ extension ArchiveModel: TerminationHost {
 
         // 2. 卡在密码输入上的任务要先放走：continuation 一直挂着，
         //    这个任务永远不会结束，退出就会卡死在「等待收尾」。
-        if passwordRequest != nil {
-            submitPassword(nil)
+        if passwordRequest != nil || activePasswordPrompt != nil || !passwordPromptQueue.isEmpty {
+            cancelAllPasswordPrompts()
         }
 
         // 3. 正在跑的交给 TaskRegistry 终止子进程。这里不能直接退进程：

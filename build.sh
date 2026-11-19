@@ -179,17 +179,6 @@ cat > "$APEXPATH/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-cat > /tmp/rrzip-appex.entitlements <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.app-sandbox</key><true/>
-    <key>com.apple.security.files.user-selected.read-only</key><true/>
-</dict>
-</plist>
-PLIST
-
 xcrun swiftc \
     -O -swift-version 5 -parse-as-library \
     -target arm64-apple-macos${MIN_MACOS} \
@@ -201,7 +190,7 @@ xcrun swiftc \
     "${ARCHIVE_CORE[@]}" QuickLook/PreviewProvider.swift
 
 strip -x "$APEXPATH/Contents/MacOS/ArchivePreview"
-codesign --force --sign - --entitlements /tmp/rrzip-appex.entitlements "$APEXPATH" >/dev/null 2>&1
+codesign --force --sign - --entitlements Entitlements/ArchivePreview.entitlements "$APEXPATH" >/dev/null
 
 echo "==> 构建访达扩展"
 FSXPATH="$BUNDLE/Contents/PlugIns/ArchiveFinder.appex"
@@ -247,30 +236,12 @@ xcrun swiftc \
 #   · absolute-path：FinderSync 的 selectedItemURLs 在 ad-hoc 签名下不会自动获得沙盒授权，
 #     用户右键选中的包会被拒（弹「ArchiveFinder 没有权限打开 …」）。
 #     正式 Developer ID 签名时这一条应该能被自动授权取代，届时可以删掉再验一次。
-cat > /tmp/rrzip-finder.entitlements <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.app-sandbox</key><true/>
-    <key>com.apple.security.files.user-selected.read-write</key><true/>
-    <key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
-    <array>
-        <string>/Library/Application Support/rrzip/</string>
-    </array>
-    <key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
-    <array>
-        <string>/</string>
-        <string>/private/var/folders/</string>
-    </array>
-</dict>
-</plist>
-PLIST
 strip -x "$FSXPATH/Contents/MacOS/ArchiveFinder"
-codesign --force --sign - --entitlements /tmp/rrzip-finder.entitlements "$FSXPATH" >/dev/null 2>&1
+# ad-hoc 签名使用独立的 ArchiveFinder-adhoc.entitlements；正式公证在 notarize.sh 中切换为最小权限版
+codesign --force --sign - --entitlements Entitlements/ArchiveFinder-adhoc.entitlements "$FSXPATH" >/dev/null
 
 echo "==> 签名（ad-hoc）"
-codesign --force --sign - "$BUNDLE" >/dev/null 2>&1  # 不用 --deep，避免覆盖扩展的 entitlements
+codesign --force --sign - "$BUNDLE" >/dev/null  # 不用 --deep，避免覆盖扩展的 entitlements
 
 echo "==> 完成：$BUNDLE"
 du -sh "$BUNDLE"

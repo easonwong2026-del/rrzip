@@ -65,6 +65,7 @@ final class TerminationCoordinator {
 
     enum State: String, Equatable {
         case idle
+        case prompting
         case waiting
         case cancelling
         case terminating
@@ -106,6 +107,7 @@ final class TerminationCoordinator {
     /// 不能把前面压缩跑的一分钟也算进去，否则宽限期永远早就过了。
     private var scratchWaitStartedAt: Date?
     private var pollScheduled = false
+    private var pollTask: Task<Void, Never>?
 
     init() {}
 
@@ -170,7 +172,7 @@ final class TerminationCoordinator {
     /// ⌘Q / 菜单退出。返回 `.terminateNow` 时调用方直接放行。
     func requestTermination() -> Decision {
         switch state {
-        case .waiting, .cancelling, .terminating:
+        case .prompting, .waiting, .cancelling, .terminating:
             // 已经有流程在跑：不弹第二个窗，也不注册第二个回调。
             // 这里返回 later 是为了让重复的 ⌘Q 仍然被挂住，而不是绕过队列退出。
             return .terminateLater
@@ -180,7 +182,7 @@ final class TerminationCoordinator {
 
         guard hasUnfinishedWork else { return .terminateNow }
 
-        state = .waiting
+        state = .prompting
         promptCount += 1
         // 弹窗还开着的时候就先禁掉新任务：用户已经按了 ⌘Q，
         // 这期间再往队列里塞东西，等待完成后退出就不再是「已有任务的收尾」。
@@ -189,8 +191,9 @@ final class TerminationCoordinator {
         host?.beginTerminationWait()
         if defersPrompt {
             Task { @MainActor in
-                // 让 applicationShouldTerminate 先返回，再弹模态框
-                guard self.state == .waiting else { return }
+                // 让 applicationShouldTerminate 先返回，再弹模态框；
+                // 弹窗期间保持 .prompting，避免后台任务恰好排空时绕过用户直接强退。
+                guard self.state == .prompting else { return }
                 self.apply(self.ask())
             }
         } else {
@@ -201,19 +204,21 @@ final class TerminationCoordinator {
 
     /// 用户选择的结果。测试直接调这个，生产由弹窗回调。
     func apply(_ choice: Choice) {
-        guard state == .waiting else { return }
+        guard state == .prompting else { return }
 
         switch choice {
         case .keepUsing:
             state = .idle
             abortCount += 1
+            scratchWaitStartedAt = nil
+            cancelPoll()
             host?.onWorkDrained = nil
             // 用户改主意了：先把写入闸门打开，再恢复任务提交
             FormalWriteLedger.shared.setGate(.idle)
             host?.resumeAfterAbortedTermination()
             onAbort()
         case .waitForCompletion:
-            // 模型已在 requestTermination 里进入等待态，这里只等队列自己跑完
+            state = .waiting
             FormalWriteLedger.shared.setGate(.waiting)
             armDrainCallback()
             checkDrained()
@@ -269,11 +274,19 @@ final class TerminationCoordinator {
     private func schedulePoll(after interval: TimeInterval) {
         guard !pollScheduled else { return }
         pollScheduled = true
-        Task { @MainActor in
+        pollTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(max(0.01, interval) * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
             self.pollScheduled = false
+            self.pollTask = nil
             self.checkDrained()
         }
+    }
+
+    private func cancelPoll() {
+        pollTask?.cancel()
+        pollTask = nil
+        pollScheduled = false
     }
 
     /// 模型排空队列时会主动回调，别只靠轮询
@@ -286,6 +299,8 @@ final class TerminationCoordinator {
     private func finishTermination() {
         guard state == .waiting || state == .cancelling else { return }
         state = .terminating
+        scratchWaitStartedAt = nil
+        cancelPoll()
         // 真正退出前永久关闸：即便还有回调挤进来，也不再接受新的正式写入
         FormalWriteLedger.shared.setGate(.terminating)
         host?.onWorkDrained = nil
@@ -301,7 +316,7 @@ final class TerminationCoordinator {
         terminateCount = 0
         abortCount = 0
         scratchWaitStartedAt = nil
-        pollScheduled = false
+        cancelPoll()
         host?.onWorkDrained = nil
         FormalWriteLedger.shared.setGate(.idle)
     }

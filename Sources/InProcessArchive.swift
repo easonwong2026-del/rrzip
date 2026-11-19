@@ -15,6 +15,7 @@
 //  这里按 ABI 声明用到的那几个入口。
 //
 
+import Darwin
 import Foundation
 
 enum InProcessArchive {
@@ -47,7 +48,7 @@ enum InProcessArchive {
         @_silgen_name("archive_entry_size")
         static func size(_ e: OpaquePointer) -> Int64
         @_silgen_name("archive_entry_filetype")
-        static func filetype(_ e: OpaquePointer) -> UInt32
+        static func filetype(_ e: OpaquePointer) -> mode_t
         @_silgen_name("archive_entry_mtime")
         static func mtime(_ e: OpaquePointer) -> Int64
     }
@@ -63,8 +64,8 @@ enum InProcessArchive {
     private struct Reader {
         private let ok: Int32 = 0
         private let eof: Int32 = 1
+        private let retry: Int32 = -10
         private let warn: Int32 = -20
-        private let ifdir: UInt32 = 0o040000
 
         func list(_ url: URL, passphrase: String?) throws -> [ArchiveEntry] {
             guard let handle = C.readNew() else {
@@ -83,22 +84,27 @@ enum InProcessArchive {
                 throw Self.mapError(handle, fallback: "无法读取 \(url.lastPathComponent)")
             }
 
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd HH:mm"
+
             var entries: [ArchiveEntry] = []
             while true {
                 var raw: OpaquePointer?
                 let status = C.nextHeader(handle, &raw)
                 if status == eof { break }
+                if status == retry { continue }
                 if status < warn {
                     throw Self.mapError(handle, fallback: "无法读取 \(url.lastPathComponent)")
                 }
                 guard let entry = raw, let pathPointer = C.pathname(entry) else { continue }
                 let path = String(cString: pathPointer)
                 guard !path.isEmpty else { continue }
-                let isDirectory = C.filetype(entry) == ifdir || path.hasSuffix("/")
+                let isDirectory = (C.filetype(entry) & S_IFMT) == S_IFDIR || path.hasSuffix("/")
                 entries.append(ArchiveEntry(
                     path: path,
                     size: isDirectory ? 0 : C.size(entry),
-                    modified: Self.dateText(C.mtime(entry)),
+                    modified: Self.dateText(C.mtime(entry), using: formatter),
                     mode: isDirectory ? "drwxr-xr-x" : "-rw-r--r--"
                 ))
             }
@@ -118,11 +124,8 @@ enum InProcessArchive {
             return .tool(message)
         }
 
-        private static func dateText(_ epoch: Int64) -> String {
+        private static func dateText(_ epoch: Int64, using formatter: DateFormatter) -> String {
             guard epoch > 0 else { return "—" }
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.dateFormat = "yyyy-MM-dd HH:mm"
             return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(epoch)))
         }
     }
