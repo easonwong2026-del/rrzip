@@ -248,20 +248,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var model: ArchiveModel?
     static weak var mainWindow: NSWindow?
     fileprivate static weak var settingsWindow: NSWindow?
+    fileprivate static var openPrimaryWindow: (() -> Void)?
 
     private static let finderTaskWorker = FinderTaskWorker(
         askPassword: { url, wrong in
             NSApp.activate(ignoringOtherApps: true)
             if !AppDelegate.restoreMainWindow(in: NSApp) {
-                let config = NSWorkspace.OpenConfiguration()
-                config.activates = true
-                do {
-                    _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config)
-                } catch {
-                    AppDelegate.primaryModel.notice = "无法打开窗口输入访达任务密码"
-                    return nil
+                if let openPrimaryWindow = AppDelegate.openPrimaryWindow {
+                    openPrimaryWindow()
+                } else {
+                    let config = NSWorkspace.OpenConfiguration()
+                    config.activates = true
+                    do {
+                        _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config)
+                    } catch {
+                        AppDelegate.primaryModel.notice = "无法打开窗口输入访达任务密码"
+                        return nil
+                    }
                 }
             }
+            let gate = FormalWriteLedger.shared.currentGate
+            guard gate != .cancelling && gate != .terminating else { return nil }
             return await AppDelegate.primaryModel.askPassword(for: url, wrong: wrong)
         },
         feedback: { receipt, outcome, operation in
@@ -569,6 +576,7 @@ extension Notification.Name {
 
 // 通过两种 scene 的内容标记窗口，保留 SwiftUI 已分配的 identifier。
 private struct WindowRegistration: NSViewRepresentable {
+    @Environment(\.openWindow) private var openWindow
     let isMain: Bool
 
     final class WindowView: NSView {
@@ -590,6 +598,9 @@ private struct WindowRegistration: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> WindowView {
+        // 只剩设置窗口时，Launch Services 可能只激活它。由 scene 显式重新打开主窗口。
+        let open = openWindow
+        AppDelegate.openPrimaryWindow = { open(id: MainWindowRecovery.sceneID) }
         let view = WindowView()
         view.isMain = isMain
         return view
