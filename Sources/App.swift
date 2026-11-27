@@ -167,9 +167,9 @@ struct RrzipApp: App {
     }
 
     var body: some Scene {
-        Window("rrzip", id: "main") {
+        Window("rrzip", id: MainWindowRecovery.sceneID) {
             ContentView(model: model)
-                .background(MainWindowRegistration())
+                .background(WindowRegistration(isMain: true))
                 // 最小尺寸与模式无关：简化与完整共用同一个下限，
                 // 否则窗口永远缩不进触发自动收起的宽度
                 .frame(minWidth: Layout.minWindowWidth, minHeight: Layout.minWindowHeight)
@@ -237,6 +237,7 @@ struct RrzipApp: App {
         // 设置中心：⌘, 由系统菜单自动提供
         Settings {
             SettingsView(model: model)
+                .background(WindowRegistration(isMain: false))
         }
     }
 }
@@ -245,6 +246,7 @@ struct RrzipApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var model: ArchiveModel?
     static weak var mainWindow: NSWindow?
+    fileprivate static weak var settingsWindow: NSWindow?
 
     /// 冷启动时收到的文件。此时窗口还没建好、`model` 仍是 nil，
     /// 直接调 `.open` 会被可选链吞掉——表现就是「右键用 rrzip 打开，毫无反应」。
@@ -293,7 +295,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     static func restoreMainWindow(in app: NSApplication) {
-        guard let main = mainWindow, app.windows.contains(main) else { return }
+        let windows = app.windows.filter { !($0 is NSPanel) }
+        let candidates = windows.map {
+            MainWindowRecovery.Candidate(identifier: $0.identifier?.rawValue,
+                                         canBecomeMain: $0.canBecomeMain, isSettings: $0 === settingsWindow)
+        }
+        let registered = mainWindow.flatMap { windows.firstIndex(of: $0) }
+        guard let index = MainWindowRecovery.choose(registered: registered, candidates: candidates) else { return }
+        let main = windows[index]
+        mainWindow = main
         if main.isMiniaturized { main.deminiaturize(nil) }
         main.makeKeyAndOrderFront(nil)
     }
@@ -512,15 +522,33 @@ extension Notification.Name {
 }
 
 
-// 主窗口用自己的视图登记，设置窗口的标题和系统语言不参与判断。
-private struct MainWindowRegistration: NSViewRepresentable {
+// 通过两种 scene 的内容标记窗口，保留 SwiftUI 已分配的 identifier。
+private struct WindowRegistration: NSViewRepresentable {
+    let isMain: Bool
+
     final class WindowView: NSView {
+        var isMain = false
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            if let window { AppDelegate.mainWindow = window }
+            guard let window else { return }
+            if isMain {
+                AppDelegate.mainWindow = window
+            } else {
+                AppDelegate.settingsWindow = window
+            }
+            if window.identifier == nil {
+                let id = isMain ? MainWindowRecovery.mainID : MainWindowRecovery.settingsID
+                window.identifier = NSUserInterfaceItemIdentifier(id)
+            }
         }
     }
 
-    func makeNSView(context: Context) -> WindowView { WindowView() }
+    func makeNSView(context: Context) -> WindowView {
+        let view = WindowView()
+        view.isMain = isMain
+        return view
+    }
+
     func updateNSView(_ nsView: WindowView, context: Context) {}
 }

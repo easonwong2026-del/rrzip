@@ -369,6 +369,7 @@ func testPasswordContinuationResumesOnCancel() {
 }
 
 func runLifecycleTests() {
+    testMainWindowRecovery()
     testTerminationWithoutWork()
     testTerminationWaitsForQueue()
     testTerminationCancelAndQuit()
@@ -380,4 +381,22 @@ func runLifecycleTests() {
     testTerminationClearsPasswordWait()
     testTerminationCompletesAfterFailure()
     testPasswordContinuationResumesOnCancel()
+}
+
+private func testMainWindowRecovery() {
+    print("窗口恢复 · 标识和登记优先")
+    let settings = MainWindowRecovery.Candidate(identifier: MainWindowRecovery.settingsID, canBecomeMain: true)
+    let systemSettings = MainWindowRecovery.Candidate(identifier: "com_apple_SwiftUI_Settings_window", canBecomeMain: true)
+    let trackedSettings = MainWindowRecovery.Candidate(identifier: nil, canBecomeMain: true, isSettings: true)
+    let background = MainWindowRecovery.Candidate(identifier: nil, canBecomeMain: false)
+    let main = MainWindowRecovery.Candidate(identifier: MainWindowRecovery.sceneID, canBecomeMain: true)
+    let unregistered = MainWindowRecovery.Candidate(identifier: nil, canBecomeMain: true)
+    let candidates = [settings, background, unregistered, main]
+    expect(MainWindowRecovery.choose(registered: 2, candidates: candidates) == 2, "已登记窗口优先")
+    expect(MainWindowRecovery.choose(registered: nil, candidates: candidates) == 3, "重建后优先匹配主窗口标识")
+    expect(MainWindowRecovery.choose(registered: 4, candidates: [settings, background, unregistered]) == 2,
+           "旧窗口不在候选列表时回退到可成为主窗口的窗口")
+    expect(MainWindowRecovery.choose(registered: 0, candidates: candidates) == 3, "错误登记也不恢复设置窗口")
+    expect(MainWindowRecovery.choose(registered: nil, candidates: [settings, systemSettings, trackedSettings, background]) == nil,
+           "设置和不可成为主窗口的窗口都跳过")
 }

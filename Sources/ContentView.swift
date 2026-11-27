@@ -184,24 +184,30 @@ struct ContentView: View {
     /// 挂到 background 的隐藏视图上：同一个视图链上两个 .alert 只会生效一个，
     /// 「出错了」那个会把这个吃掉。
     var passwordPrompt: some View {
-        Color.clear.alert(model.passwordRequest?.isRetry == true ? "密码不正确" : "该压缩包已加密",
-                          isPresented: Binding(
-                            get: { model.passwordRequest != nil },
-                            set: { if !$0, model.passwordRequest != nil { model.submitPassword(nil) } }
-                          )) {
-            SecureField("密码", text: $passwordInput)
-            Button("解锁") {
-                let value = passwordInput
-                passwordInput = ""
-                model.submitPassword(value.isEmpty ? nil : value)
+        let request = model.passwordRequest
+        return Color.clear
+            .id(request?.id)
+            .alert(request?.isRetry == true ? "密码不正确" : "该压缩包已加密",
+                   isPresented: Binding(
+                    get: { request != nil && model.passwordRequest?.id == request?.id },
+                    set: { presented in
+                        if !presented, let request { model.submitPassword(nil, requestID: request.id) }
+                    }
+                   ), presenting: request) { item in
+                SecureField("密码", text: $passwordInput)
+                Button("解锁") {
+                    let value = passwordInput
+                    passwordInput = ""
+                    model.submitPassword(value.isEmpty ? nil : value, requestID: item.id)
+                }
+                Button("取消", role: .cancel) {
+                    passwordInput = ""
+                    model.submitPassword(nil, requestID: item.id)
+                }
+            } message: { item in
+                Text("\(item.archive.lastPathComponent)\n输入密码后即可浏览与解压。")
             }
-            Button("取消", role: .cancel) {
-                passwordInput = ""
-                model.submitPassword(nil)
-            }
-        } message: {
-            Text("\(model.passwordRequest?.archive.lastPathComponent ?? "")\n输入密码后即可浏览与解压。")
-        }
+            .onChange(of: request?.id) { _, _ in passwordInput = "" }
     }
 
     func scheduleNoticeClear(_ newValue: String?) {

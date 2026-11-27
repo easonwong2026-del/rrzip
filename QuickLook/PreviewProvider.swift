@@ -8,6 +8,12 @@ import QuickLookUI
 @objc(PreviewProvider)
 final class PreviewProvider: NSViewController, QLPreviewingController {
 
+    // Quick Look 传入 ObjC 回调。只把它传递到主线程，并始终在那里调用一次。
+    private struct PreviewCompletion: @unchecked Sendable {
+        let handler: (Error?) -> Void
+        @MainActor func finish() { handler(nil) }
+    }
+
     private final class CancellationFlag: @unchecked Sendable {
         private let lock = NSLock()
         private var cancelled = false
@@ -86,7 +92,15 @@ final class PreviewProvider: NSViewController, QLPreviewingController {
     /// Quick Look 在显示窗口前调用。Apple 明确要求这里别阻塞主线程：
     /// 大归档列目录可能几十万条，同步跑会把整个预览卡住，所以派到后台队列，
     /// 结果回主线程再刷表格。
-    func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
+    nonisolated func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
+        let completion = PreviewCompletion(handler: handler)
+        Task { @MainActor [weak self] in
+            guard let self else { return completion.finish() }
+            self.prepare(url, completion: completion)
+        }
+    }
+
+    private func prepare(_ url: URL, completion: PreviewCompletion) {
         _ = view
         currentFlag?.cancel()
         let flag = CancellationFlag()
@@ -95,25 +109,17 @@ final class PreviewProvider: NSViewController, QLPreviewingController {
         titleLabel?.stringValue = url.lastPathComponent
         subtitleLabel?.stringValue = "正在读取…"
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let outcome: Result<(entries: [ArchiveEntry], totalCount: Int), Error>
-            do {
-                // 扩展内存上限严苛：流式截断只实例化前 300 项，超出仅累加计数
-                let summary = try InProcessArchive.listSummary(
-                    url, passphrase: nil, limit: 300, isCancelled: { flag.isCancelled }
-                )
-                outcome = .success(summary)
-            } catch {
-                outcome = .failure(error)
-            }
-            DispatchQueue.main.async {
-                guard !flag.isCancelled else {
-                    handler(nil)
-                    return
+        Task { [weak self] in
+            let outcome = await Task.detached(priority: .userInitiated) {
+                Result {
+                    // 扩展内存上限严苛：仅实例化前 300 项，超出只计数。
+                    try InProcessArchive.listSummary(
+                        url, passphrase: nil, limit: 300, isCancelled: { flag.isCancelled }
+                    )
                 }
-                self?.render(outcome)
-                handler(nil)
-            }
+            }.value
+            if !flag.isCancelled { self?.render(outcome) }
+            completion.finish()
         }
     }
 
