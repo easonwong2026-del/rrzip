@@ -147,6 +147,7 @@ final class BatchRunner {
         try fm.createDirectory(at: folder, withIntermediateDirectories: false)
         do {
             try ArchiveService.extract(archive, entries: [], to: folder, password: nil, jobID: jobID)
+            try TaskRegistry.checkCancellation(jobID)
         } catch {
             try? fm.removeItem(at: folder)
             throw error

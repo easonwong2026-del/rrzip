@@ -169,7 +169,7 @@ enum FinderJobRunner {
         let parent = intoNewFolder ? plan.destination.deletingLastPathComponent() : plan.destination
         let staged = parent.appendingPathComponent(".rrzip-\(UUID().uuidString)", isDirectory: true)
         guard mkdir(staged.path, intoNewFolder ? 0o777 : 0o700) == 0 else { throw fileError(errno) }
-        defer { try? FileManager.default.removeItem(at: staged) }
+        defer { removeExtractionStage(staged) }
         try ArchiveService.extract(plan.archive, entries: [], to: staged, password: password,
                                    onConflict: plan.onConflict, jobID: jobID, onProgress: onProgress)
         try TaskRegistry.checkCancellation(jobID)
@@ -180,7 +180,7 @@ enum FinderJobRunner {
         let directory = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard directory >= 0 else { throw fileError(errno) }
         defer { close(directory) }
-        return (parent, try publishContents(of: staged, into: directory))
+        return (parent, try publishContents(of: staged, into: directory, jobID: jobID))
     }
 
     /// 压缩。`each` 为真时每个项目各生成一个包。
@@ -280,16 +280,68 @@ enum FinderJobRunner {
         POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
     }
 
+    /// 只改即将丢弃的真实暂存目录。整个搬出的目录仍保留归档中的权限。
+    private static func makeStageWritable(_ url: URL) throws -> Bool {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { throw fileError(errno) }
+        guard (info.st_mode & S_IFMT) == S_IFDIR else { return false }
+        if (info.st_mode & 0o700) != 0o700,
+           fchmodat(AT_FDCWD, url.path, (info.st_mode & 0o7777) | 0o700, AT_SYMLINK_NOFOLLOW) != 0 {
+            throw fileError(errno)
+        }
+        return true
+    }
+
+    private static func removeExtractionStage(_ url: URL) {
+        let fm = FileManager.default
+        do {
+            try fm.removeItem(at: url)
+        } catch {
+            guard (try? makeStageWritable(url)) == true else { return }
+            if let descendants = fm.enumerator(at: url, includingPropertiesForKeys: nil) {
+                for case let child as URL in descendants { _ = try? makeStageWritable(child) }
+            }
+            try? fm.removeItem(at: url)
+        }
+    }
+
+    private static func publishChild(_ child: URL, into destination: Int32) throws -> Bool {
+        let name = child.lastPathComponent
+        let flags = UInt32(RENAME_EXCL)
+        if renameatx_np(AT_FDCWD, child.path, destination, name, flags) == 0 { return true }
+        let code = errno
+        if code == EEXIST { return false }
+        guard code == EACCES else { throw fileError(code) }
+
+        // 跨父目录移动只读子目录时，macOS 也需要能更新该目录的「..」。
+        var info = stat()
+        guard lstat(child.path, &info) == 0 else { throw fileError(errno) }
+        guard (info.st_mode & S_IFMT) == S_IFDIR, (info.st_mode & 0o700) != 0o700 else {
+            throw fileError(code)
+        }
+        guard try makeStageWritable(child) else { throw ArchiveError.unsafePath(child.path) }
+        let fd = open(child.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw fileError(errno) }
+        defer { close(fd) }
+        if renameatx_np(AT_FDCWD, child.path, destination, name, flags) == 0 {
+            guard fchmod(fd, info.st_mode & 0o7777) == 0 else { throw fileError(errno) }
+            return true
+        }
+        let retryCode = errno
+        if retryCode == EEXIST { return false }
+        throw fileError(retryCode)
+    }
+
     /// 只合并真实目录。用已打开的目录描述符发布，避免既有软链或重名改变写入位置。
-    private static func publishContents(of staged: URL, into destination: Int32?) throws -> Int {
+    private static func publishContents(of staged: URL, into destination: Int32?, jobID: UUID?) throws -> Int {
+        try TaskRegistry.checkCancellation(jobID)
+        guard try makeStageWritable(staged) else { throw ArchiveError.unsafePath(staged.path) }
         var skipped = 0
         for child in try FileManager.default.contentsOfDirectory(at: staged, includingPropertiesForKeys: nil) {
+            // 已发布的是完整文件或目录。取消只停止下一次发布，避免改动用户已经能看到的产物。
+            try TaskRegistry.checkCancellation(jobID)
             let name = child.lastPathComponent
-            if let destination {
-                if renameatx_np(AT_FDCWD, child.path, destination, name, UInt32(RENAME_EXCL)) == 0 { continue }
-                let code = errno
-                guard code == EEXIST else { throw fileError(code) }
-            }
+            if let destination, try publishChild(child, into: destination) { continue }
             var info = stat()
             guard lstat(child.path, &info) == 0 else { throw fileError(errno) }
             if (info.st_mode & S_IFMT) == S_IFDIR {
@@ -298,7 +350,7 @@ enum FinderJobRunner {
                 if destination != nil, next < 0, errno != ENOTDIR, errno != ELOOP, errno != ENOENT {
                     throw fileError(errno)
                 }
-                skipped += try publishContents(of: child, into: next >= 0 ? next : nil)
+                skipped += try publishContents(of: child, into: next >= 0 ? next : nil, jobID: jobID)
             } else {
                 skipped += 1
             }
