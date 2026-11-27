@@ -105,4 +105,102 @@ func runInProcessArchiveTests() {
     testInProcessSniffsContent()
     testInProcessEncryptedNeedsPassword()
     testInProcessRejectsGarbage()
+    testOpenFailureIsNotPasswordPrompt()
+    testInProcessEncryptedZip()
+    testInProcessMetadata()
+    testZipAndSevenZipLinkMetadata()
+}
+
+private func testInProcessEncryptedZip() {
+    print("进程内读取 · ZIP 密码验证")
+    guard SevenZip.isAvailable else { return }
+    let url = fixtures.appendingPathComponent("secret-zip.zip")
+    do {
+        let empty = fixtures.appendingPathComponent("0-empty.txt")
+        try Data().write(to: empty)
+        try SevenZip.create(at: url, from: [empty, fixtures.appendingPathComponent("src/说明.txt")],
+                            format: "zip", password: "pw123", volume: nil)
+        for password in [nil, "wrong", ""] {
+            do {
+                _ = try ArchiveService.list(url, password: password)
+                expect(false, "缺失或错误 ZIP 密码应被拒绝")
+            } catch ArchiveError.needsPassword {
+                expect(true, "缺失或错误 ZIP 密码报告需要密码")
+            }
+        }
+        let result = try ArchiveService.listWithEngine(url, password: "pw123")
+        expect(result.engine == .libarchive, "AES ZIP 使用进程内引擎")
+        expect(result.entries.map(\.path) == ["0-empty.txt", "说明.txt"], "正确密码列出空文件及中文条目")
+        expect(result.entries.first?.size == 0, "开头的零字节条目不能代替后续密码验证")
+        expect(result.entries.last?.size == 6, "加密条目保留真实大小")
+    } catch {
+        expect(false, "加密 ZIP 列目录测试", "\(error)")
+    }
+}
+
+private func testInProcessMetadata() {
+    print("进程内读取 · 模式、mtime 和软链")
+    let fm = FileManager.default
+    let source = fixtures.appendingPathComponent("libarchive-meta", isDirectory: true)
+    let url = fixtures.appendingPathComponent("libarchive-meta.tar")
+    let date = Date(timeIntervalSince1970: 1_700_000_000)
+    do {
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        let file = source.appendingPathComponent("中文 -> 文件.txt")
+        try Data("test".utf8).write(to: file)
+        try fm.setAttributes([.posixPermissions: 0o751, .modificationDate: date], ofItemAtPath: file.path)
+        let link = source.appendingPathComponent("链接")
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: file.lastPathComponent)
+        try Tar.create(at: url, from: [source], format: "tar")
+        let rows = try InProcessArchive.list(url)
+        let actualFile = rows.first { $0.name == file.lastPathComponent }
+        let actualLink = rows.first { $0.name == link.lastPathComponent }
+        expect(actualFile?.mode == "-rwxr-x--x", "普通文件保留权限位")
+        expect(actualFile?.modifiedDate == date, "保留归档中精确到秒的 mtime")
+        expect(actualLink?.mode.hasPrefix("l") == true, "真实模式识别软链")
+        expect(actualLink?.symlinkTarget == file.lastPathComponent, "软链目标保留中文与箭头")
+        expect(rows.first { $0.isDirectory }?.mode.hasPrefix("d") == true, "目录模式以 d 开头")
+        expect(actualFile?.symlinkTarget == nil, "普通文件名中的箭头不被当作软链分隔符")
+        let tarLink = try Tar.list(url).first { $0.name == link.lastPathComponent }
+        expect(tarLink?.symlinkTarget == file.lastPathComponent, "bsdtar 兼容列表也保留真实软链目标")
+    } catch {
+        expect(false, "进程内条目元数据测试", "\(error)")
+    }
+}
+
+private func testOpenFailureIsNotPasswordPrompt() {
+    let missing = fixtures.appendingPathComponent("missing-encrypted-password.zip")
+    do {
+        _ = try InProcessArchive.list(missing)
+        expect(false, "不存在的归档应报告打开失败")
+    } catch ArchiveError.tool(let message) {
+        expect(message.contains(missing.lastPathComponent), "文件名中的密码字样不改变打开失败诊断")
+    } catch {
+        expect(false, "文件名引发了错误的诊断类型", "\(error)")
+    }
+}
+
+private func testZipAndSevenZipLinkMetadata() {
+    print("进程内读取 · ZIP 与 7z 的真实软链元数据")
+    guard SevenZip.isAvailable else { return }
+    let fm = FileManager.default
+    let folder = fixtures.appendingPathComponent("packed-links", isDirectory: true)
+    do {
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("safe content".utf8).write(to: folder.appendingPathComponent("document"))
+        try fm.createSymbolicLink(atPath: folder.appendingPathComponent("alias").path, withDestinationPath: "document")
+        for format in ["zip", "7z"] {
+            let archive = folder.appendingPathComponent("links.\(format)")
+            try SevenZip.run(["a", "-t\(format)", "-snl", "-y", archive.path, "document", "alias"],
+                             cwd: folder, captureOutput: false)
+            let rows = try InProcessArchive.list(archive)
+            let link = rows.first { $0.path == "alias" }
+            expect(link?.isSymlink == true, "\(format) 进程内列表识别软链")
+            expect(link?.symlinkTarget == "document", "\(format) 进程内列表读取包内链接目标")
+            let fromSevenZip = try SevenZip.list(archive).first { $0.path == "alias" }
+            expect(fromSevenZip?.isSymlink == true, "\(format) 的 7-Zip 属性也能识别软链")
+            try ArchiveService.validateExtraction(entries: rows, compressedSize: nil)
+            expect(true, "\(format) 可核实的包内软链通过预检")
+        }
+    } catch { expect(false, "真实 ZIP/7z 软链元数据", "\(error)") }
 }

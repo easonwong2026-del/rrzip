@@ -16,6 +16,7 @@
 //
 
 import AppKit
+import Darwin
 import Foundation
 // 同上：UNUserNotificationCenter 未标 Sendable，@preconcurrency 只压警告不改语义
 @preconcurrency import UserNotifications
@@ -181,6 +182,7 @@ enum FinderJobRunner {
     /// 压缩。`each` 为真时每个项目各生成一个包。
     static func compress(_ urls: [URL], format: CompressionFormat, each: Bool) -> JobOutcome {
         var outcome = JobOutcome()
+        guard let first = urls.first else { return outcome }
 
         if each {
             for url in urls {
@@ -190,9 +192,9 @@ enum FinderJobRunner {
         } else {
             let hint: String
             if urls.count == 1 {
-                hint = urls[0].deletingPathExtension().lastPathComponent
+                hint = first.deletingPathExtension().lastPathComponent
             } else {
-                hint = urls[0].deletingLastPathComponent().lastPathComponent
+                hint = first.deletingLastPathComponent().lastPathComponent
             }
             append(compressGroup(urls, format: format, nameHint: hint), to: &outcome)
         }
@@ -215,31 +217,33 @@ enum FinderJobRunner {
 
         let folder = first.deletingLastPathComponent()
         let base = nameHint.isEmpty ? "归档" : nameHint
-        let output = uniqueFile(folder
-            .appendingPathComponent(base)
-            .appendingPathExtension(format.rawValue))
+        let requested = folder.appendingPathComponent(base).appendingPathExtension(format.rawValue)
+        let staged = folder.appendingPathComponent(".rrzip-\(UUID().uuidString)")
+            .appendingPathExtension(format.rawValue)
+        defer { try? FileManager.default.removeItem(at: staged) }
 
         do {
             // 沙盒扩展里没有 7zz（spawn 不了），ZIP 退回系统 libarchive；
             // 7Z 只能由主程序创建，这里给一句明确提示而不是静默失败
             if SevenZip.isAvailable {
-                try SevenZip.create(at: output, from: urls, format: format.rawValue,
+                try SevenZip.create(at: staged, from: urls, format: format.rawValue,
                                     password: nil, volume: nil)
             } else if format == .zip {
                 // 单个源走 ditto：deflate 压缩 + 包内只保留源文件名。
                 // 多个源退回 tar 合并（只 store，但不丢内容）。
                 if urls.count == 1, let single = urls.first {
-                    try Tar.createZip(at: output, from: single)
+                    try Tar.createZip(at: staged, from: single)
                 } else {
-                    try Tar.create(at: output, from: urls, format: "zip")
+                    try Tar.create(at: staged, from: urls, format: "zip")
                 }
             } else {
                 throw ArchiveError.tool("右键只能压 ZIP；7Z 请在 rrzip 里新建")
             }
+            let output = try publish(staged, as: requested)
             outcome.succeeded = urls.count == 1 ? [first.lastPathComponent] : [output.lastPathComponent]
             outcome.destination = folder
         } catch {
-            outcome.failed.append(.init(name: output.lastPathComponent,
+            outcome.failed.append(.init(name: requested.lastPathComponent,
                                         reason: error.localizedDescription))
         }
         return outcome
@@ -253,19 +257,17 @@ enum FinderJobRunner {
         if outcome.destination == nil { outcome.destination = part.destination }
     }
 
-    private static func uniqueFile(_ url: URL) -> URL {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return url }
-        let folder = url.deletingLastPathComponent()
-        let base = url.deletingPathExtension().lastPathComponent
-        let ext = url.pathExtension
-        var index = 2
-        while true {
-            let candidate = folder.appendingPathComponent("\(base) \(index)")
-                .appendingPathExtension(ext)
-            if !fm.fileExists(atPath: candidate.path) { return candidate }
-            index += 1
+    /// 与临时文件同目录，原子发布；并行任务抢先占名时再选一次。
+    static func publish(_ staged: URL, as requested: URL) throws -> URL {
+        for _ in 0..<10 {
+            let output = UniquePath.file(requested)
+            if renamex_np(staged.path, output.path, UInt32(RENAME_EXCL)) == 0 { return output }
+            let code = errno
+            guard code == EEXIST else {
+                throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+            }
         }
+        throw ArchiveError.tool("无法为压缩包选定未占用的文件名")
     }
 
     /// 目标目录里已存在多少个包内同名文件（只数文件，不数目录，且过滤越界路径）

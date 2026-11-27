@@ -220,7 +220,7 @@ extension ContentView {
         return EntryRevealMarker(
             tick: entryRevealTick,
             count: entries.count,
-            index: entries.firstIndex { model.selection.contains($0.id) },
+            index: model.firstSelectedIndex,
             metrics: { index, contentHeight in
                 // 从底部反推：不用假设顶部内边距，行高是唯一常量
                 let height = listRowHeight
@@ -291,7 +291,7 @@ extension ContentView {
                     EntryRevealMarker(
                         tick: entryRevealTick,
                         count: items.count,
-                        index: items.firstIndex { model.selection.contains($0.id) },
+                        index: model.firstSelectedIndex,
                         metrics: { index, contentHeight in
                             let height = Metrics.columnRowHeight
                             return (y: contentHeight - 6 - CGFloat(items.count - index) * height,
@@ -334,7 +334,7 @@ extension ContentView {
                 EntryRevealMarker(
                     tick: entryRevealTick,
                     count: entries.count,
-                    index: entries.firstIndex { model.selection.contains($0.id) },
+                    index: model.firstSelectedIndex,
                     metrics: { index, contentHeight in
                         // 网格的格子高度随字号/行数固定，但不想在这里再写死一份：
                         // 由内容总高反推行距，行距减去间距就是格子高度

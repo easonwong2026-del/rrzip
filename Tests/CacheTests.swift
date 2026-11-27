@@ -113,6 +113,7 @@ func testThumbnailClearAllowsRetry() {
             expect(store.failedCount == 0, "清理会清掉失败记录")
             expect(store.version > versionBefore, "清理后通知界面刷新")
 
+            let clearVersion = store.version
             var image: CGImage?
             var done = false
             store.thumbnail(for: entry, model: model, maxPixel: 160) { result in
@@ -122,6 +123,9 @@ func testThumbnailClearAllowsRetry() {
             expect(waitUntil(20, { done }), "清理后重新发起渲染")
             expect(image != nil, "之前失败的图片可以重新生成")
             expect(store.failedCount == 0, "成功后不再记失败")
+            expect(store.version == clearVersion, "单张结果不会广播刷新其他单元格")
+            expect(store.cached(forKey: key) != nil, "重建的单元格可以从共享缓存取回渲染结果")
+            expect(store.cached(forKey: key + "-other") == nil, "结果仅写入本条目当前键")
 
             // 清空之后再清一次：不能因为缓存空就崩或卡住
             store.clear()

@@ -153,26 +153,11 @@ struct RrzipApp: App {
         guard let path = value("--list") else { return nil }
         let url = URL(fileURLWithPath: path)
 
-        // 按识别结果决定先试哪个引擎，失败再换另一个
-        let order: [ArchiveEngine] = FormatDetector.prefersSevenZip(url)
-            ? [.sevenZip, .libarchive] : [.libarchive, .sevenZip]
-
-        var listed: [ArchiveEntry]?
-        var lastError: Error?
-        for engine in order {
-            do {
-                switch engine {
-                case .libarchive: listed = try Tar.list(url, passphrase: password)
-                case .sevenZip: listed = try SevenZip.list(url, password: password)
-                }
-                break
-            } catch {
-                lastError = error
-            }
-        }
-
-        guard let entries = listed else {
-            writeError(lastError?.localizedDescription ?? "读取失败")
+        let entries: [ArchiveEntry]
+        do {
+            entries = try ArchiveService.list(url, password: password)
+        } catch {
+            writeError(error.localizedDescription)
             return 1
         }
         for entry in entries {
@@ -184,6 +169,7 @@ struct RrzipApp: App {
     var body: some Scene {
         Window("rrzip", id: "main") {
             ContentView(model: model)
+                .background(MainWindowRegistration())
                 // 最小尺寸与模式无关：简化与完整共用同一个下限，
                 // 否则窗口永远缩不进触发自动收起的宽度
                 .frame(minWidth: Layout.minWindowWidth, minHeight: Layout.minWindowHeight)
@@ -258,6 +244,7 @@ struct RrzipApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var model: ArchiveModel?
+    static weak var mainWindow: NSWindow?
 
     /// 冷启动时收到的文件。此时窗口还没建好、`model` 仍是 nil，
     /// 直接调 `.open` 会被可选链吞掉——表现就是「右键用 rrzip 打开，毫无反应」。
@@ -306,12 +293,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     static func restoreMainWindow(in app: NSApplication) {
-        if let main = app.windows.first(where: { !($0 is NSPanel) && $0.canBecomeMain && $0.title != "设置" }) {
-            if main.isMiniaturized { main.deminiaturize(nil) }
-            main.makeKeyAndOrderFront(nil)
-        } else if let fallback = app.windows.first(where: { !($0 is NSPanel) }) {
-            fallback.makeKeyAndOrderFront(nil)
-        }
+        guard let main = mainWindow, app.windows.contains(main) else { return }
+        if main.isMiniaturized { main.deminiaturize(nil) }
+        main.makeKeyAndOrderFront(nil)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -525,4 +509,18 @@ extension Notification.Name {
     static let rrzipToggleWorkspaceMode = Notification.Name("rrzipToggleWorkspaceMode")
     /// 帮助菜单：随时重看首次启动那一屏
     static let rrzipShowWelcome = Notification.Name("rrzipShowWelcome")
+}
+
+
+// 主窗口用自己的视图登记，设置窗口的标题和系统语言不参与判断。
+private struct MainWindowRegistration: NSViewRepresentable {
+    final class WindowView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { AppDelegate.mainWindow = window }
+        }
+    }
+
+    func makeNSView(context: Context) -> WindowView { WindowView() }
+    func updateNSView(_ nsView: WindowView, context: Context) {}
 }

@@ -452,4 +452,109 @@ func runExitCoverageTests() {
     testWorkloadSeesFormalWritesWithoutHost()
     testExitWaitingRejectsNewFormalWrites()
     testTerminatingGateStaysClosed()
+    testBatchWaitForQuit()
+    testBatchCancelsRealProcesses()
+}
+
+private func testBatchWaitForQuit() {
+    print("退出 · 等待批量解压并拒绝新批次")
+    MainActor.assumeIsolated {
+        let ledger = FormalWriteLedger.shared
+        ledger.reset()
+        defer { ledger.reset() }
+        let url = fixtures.appendingPathComponent("basic.zip")
+        let runner = BatchRunner(urls: [url], mode: .extract)
+        let root = fixtures.appendingPathComponent("batch-quit-wait", isDirectory: true)
+        runner.destination = root
+
+        let coordinator = TerminationCoordinator()
+        coordinator.defersPrompt = false
+        coordinator.ask = { .waitForCompletion }
+        coordinator.jobPollInterval = 0.01
+
+        runner.start()
+        expect(ledger.count(of: .batchExtract) == 1, "派发前即登记批量解压")
+        expect(coordinator.workload.message.contains("批解压"), "退出文案列出批量解压")
+        expect(coordinator.requestTermination() == .terminateLater, "批量解压单独足以拦住退出")
+        expect(coordinator.state == .waiting, "等待期间保留正在执行的批次")
+        let newcomer = BatchRunner(urls: [url], mode: .verify)
+        newcomer.start()
+        expect(!newcomer.running && ledger.count(of: .batchVerify) == 0, "退出期间拒绝新批次，包括只读校验")
+        expect(waitUntil(10, { coordinator.terminateCount == 1 }), "完整解压和注销之后才退出")
+        expect(runner.jobs.first?.state == .done && !runner.cancelled, "等待退出不取消批次")
+        expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("basic/说明.txt").path),
+               "批量解压的文件完整落地")
+        expect(ledger.isEmpty, "退出前批量登记已注销")
+    }
+}
+
+private func testBatchCancelsRealProcesses() {
+    print("批量任务 · 取消真实 tar / 7zz 子进程")
+    MainActor.assumeIsolated {
+        let fm = FileManager.default
+        let ledger = FormalWriteLedger.shared
+        ledger.reset()
+        defer { ledger.reset() }
+        let folder = fixtures.appendingPathComponent("batch-cancel", isDirectory: true)
+        do {
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            let source = folder.appendingPathComponent("large-data")
+            fm.createFile(atPath: source.path, contents: nil)
+            let handle = try FileHandle(forWritingTo: source)
+            try handle.truncate(atOffset: 384 * 1024 * 1024)
+            try handle.close()
+            let archive = folder.appendingPathComponent("large.tar")
+            try Tar.create(at: archive, from: [source], format: "tar")
+            let root = folder.appendingPathComponent("unpacked", isDirectory: true)
+
+            // 同时登记另一个真实进程，确认批量任务的取消不会误伤队列任务。
+            let other = Process()
+            other.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            other.arguments = ["30"]
+            let otherID = UUID()
+            try TaskRegistry.claim(otherID)
+            defer { TaskRegistry.release(otherID) }
+            try other.run()
+            TaskRegistry.begin(other, for: otherID)
+
+            let extract = BatchRunner(urls: [archive, archive], mode: .extract)
+            extract.destination = root
+            extract.start()
+            let extractID = extract.jobs[0].id
+            expect(waitUntil(5, interval: 0.001, { TaskRegistry.hasProcess(for: extractID) }),
+                   "批量解压的 tar 以该条目的 ID 登记")
+            extract.cancel()
+            expect(waitUntil(5, { !extract.running }), "点击取消后等待 tar 退出")
+            expect(extract.cancelled && extract.jobs[0].state == .skipped, "正在解压的条目记为已取消")
+            expect(extract.jobs[1].state == .pending, "未启动条目没有开始")
+            expect(!fm.fileExists(atPath: root.appendingPathComponent("large").path), "未完成解压目录已清理")
+            expect(other.isRunning && !TaskRegistry.wasCancelled(otherID), "另一个任务的进程仍在运行")
+            expect(ledger.isEmpty && !TaskRegistry.hasProcess(for: extractID), "解压取消后清理进程归属和账本")
+            other.terminate()
+            other.waitUntilExit()
+
+            guard SevenZip.isAvailable else { return }
+            // TAR 没有文件内容 CRC，7zz 可能跳读。ZIP 必须完整读并校验载荷。
+            let zip = folder.appendingPathComponent("large.zip")
+            try SevenZip.create(at: zip, from: [source], format: "zip",
+                                password: nil, volume: nil, level: 1)
+            let verify = BatchRunner(urls: [zip, zip], mode: .verify)
+            verify.start()
+            let verifyID = verify.jobs[0].id
+            expect(waitUntil(5, interval: 0.001, { TaskRegistry.hasProcess(for: verifyID) }),
+                   "批量校验的 7zz 以该条目的 ID 登记")
+            let coordinator = TerminationCoordinator()
+            coordinator.defersPrompt = false
+            coordinator.ask = { .cancelAndQuit }
+            coordinator.jobPollInterval = 0.01
+            expect(coordinator.workload.batchVerifications == 1, "退出流程感知正在校验的批次")
+            expect(coordinator.requestTermination() == .terminateLater, "取消并退出等待 7zz 收尾")
+            expect(waitUntil(5, { coordinator.terminateCount == 1 }), "7zz 收尾后才能退出")
+            expect(verify.cancelled && verify.jobs[0].state == .skipped, "退出取消正在校验的条目")
+            expect(verify.jobs[1].state == .pending, "退出取消不会启动下一条校验")
+            expect(ledger.isEmpty && !TaskRegistry.hasProcess(for: verifyID), "校验取消后释放账本和进程")
+        } catch {
+            expect(false, "批量进程取消测试", "\(error)")
+        }
+    }
 }

@@ -43,7 +43,7 @@ final class ThumbnailStore: ObservableObject {
     private var pendingRenders: [() -> Void] = []
     /// 渲染失败的键：避免滚动回来时反复解压同一个坏文件
     private var failed = Set<String>()
-    /// 缩略图落盘后自增：视图只读缓存，靠这个信号刷新，避免依赖 @State
+    /// 只在清理缓存时广播失效。单张结果仅交给等待同一个键的调用者。
     @Published private(set) var version = 0
 
     private static let imageExts: Set<String> = [
@@ -72,7 +72,7 @@ final class ThumbnailStore: ObservableObject {
         return false
     }
 
-    private func cacheKey(for entry: ArchiveEntry, model: ArchiveModel, maxPixel: CGFloat) -> NSString {
+    func cacheKey(for entry: ArchiveEntry, model: ArchiveModel, maxPixel: CGFloat) -> String {
         let frame = model.current
         let key = Self.cacheKey(
             archivePath: frame?.archive.path ?? "",
@@ -81,7 +81,7 @@ final class ThumbnailStore: ObservableObject {
             entry: entry.path,
             maxPixel: maxPixel
         )
-        return key as NSString
+        return key
     }
 
     /// 缓存键 = 包路径 + 包修改时间 + 包大小 + 条目路径 + 像素档位。
@@ -101,14 +101,8 @@ final class ThumbnailStore: ObservableObject {
     /// 已经记下的失败条数
     var failedCount: Int { failed.count }
 
-    /// 只查缓存，不触发加载
-    func cached(for entry: ArchiveEntry, model: ArchiveModel, maxPixel: CGFloat) -> CGImage? {
-        cache.object(forKey: cacheKey(for: entry, model: model, maxPixel: maxPixel))?.image
-    }
-
-    /// 触发加载；结果进缓存并自增 version
-    func request(for entry: ArchiveEntry, model: ArchiveModel, maxPixel: CGFloat) {
-        load(entry, model: model, maxPixel: maxPixel, completion: nil)
+    func cached(forKey key: String) -> CGImage? {
+        cache.object(forKey: key as NSString)?.image
     }
 
     /// `maxPixel` 越大越清晰，同时用于缓存分档（列表 20pt / 网格 56pt / 悬停 640px）
@@ -127,36 +121,38 @@ final class ThumbnailStore: ObservableObject {
         max(1, image.bytesPerRow * image.height)
     }
 
-    /// request 和 thumbnail 只差「有没有人在等结果」，解压 + 渲染只有这一条路
     private func load(
         _ entry: ArchiveEntry,
         model: ArchiveModel,
         maxPixel: CGFloat,
-        completion: ((CGImage?) -> Void)?
+        completion: @escaping (CGImage?) -> Void
     ) {
-        let key = cacheKey(for: entry, model: model, maxPixel: maxPixel)
-        if let hit = cache.object(forKey: key) {
-            completion?(hit.image)
+        let keyString = cacheKey(for: entry, model: model, maxPixel: maxPixel)
+        if let hit = cached(forKey: keyString) {
+            completion(hit)
             return
         }
-        let keyString = key as String
         guard supports(entry), !failed.contains(keyString) else {
-            completion?(nil)
+            completion(nil)
             return
         }
         if inFlight[keyString] != nil {
-            if let completion { inFlight[keyString]?.append(completion) }
+            inFlight[keyString]?.append(completion)
             return
         }
-        inFlight[keyString] = completion.map { [$0] } ?? []
+        inFlight[keyString] = [completion]
 
         let ext = entry.ext
         let work: () -> Void = { [weak self] in
             guard let self else { return }
+            guard self.cacheKey(for: entry, model: model, maxPixel: maxPixel) == keyString else {
+                self.finishRender(key: keyString, image: nil, recordFailure: false)
+                return
+            }
             model.payloadURL(for: entry) { url in
                 guard let url else {
                     Task { @MainActor in
-                        self.finishRender(key: key, keyString: keyString, image: nil, recordFailure: false)
+                        self.finishRender(key: keyString, image: nil, recordFailure: false)
                     }
                     return
                 }
@@ -167,7 +163,7 @@ final class ThumbnailStore: ObservableObject {
                     let image = Self.render(url: url, ext: ext, maxPixel: maxPixel)
                     await MainActor.run {
                         ScratchUsage.shared.endWork(on: url.path)
-                        self.finishRender(key: key, keyString: keyString, image: image, recordFailure: image == nil)
+                        self.finishRender(key: keyString, image: image, recordFailure: image == nil)
                     }
                 }
             }
@@ -184,13 +180,12 @@ final class ThumbnailStore: ObservableObject {
         }
     }
 
-    private func finishRender(key: NSString, keyString: String, image: CGImage?, recordFailure: Bool) {
-        let waiters = inFlight.removeValue(forKey: keyString) ?? []
+    private func finishRender(key: String, image: CGImage?, recordFailure: Bool) {
+        let waiters = inFlight.removeValue(forKey: key) ?? []
         if let image {
-            cache.setObject(CGImageBox(image), forKey: key, cost: Self.cost(of: image))
-            version &+= 1
+            cache.setObject(CGImageBox(image), forKey: key as NSString, cost: Self.cost(of: image))
         } else if recordFailure {
-            failed.insert(keyString)
+            failed.insert(key)
         }
         for waiter in waiters { waiter(image) }
 
@@ -212,7 +207,8 @@ final class ThumbnailStore: ObservableObject {
     nonisolated private static func render(url: URL, ext: String, maxPixel: CGFloat) -> CGImage? {
         if ext == "pdf" { return pdfFirstPage(url: url, maxPixel: maxPixel) }
         if videoExts.contains(ext) { return videoFirstFrame(url: url, maxPixel: maxPixel) }
-        return downsample(url: url, maxPixel: maxPixel)
+        return downsample(url: url, maxPixel: maxPixel,
+                          maxSourcePixels: InlinePreviewLimits.imageMaxSourcePixels)
     }
 
     /// 取视频首帧：优先 1 秒处（纯黑开场也能拿到画面），短片则取开头
@@ -232,8 +228,15 @@ final class ThumbnailStore: ObservableObject {
         return frame(at: 1.0) ?? frame(at: 0.0)
     }
 
-    nonisolated private static func downsample(url: URL, maxPixel: CGFloat) -> CGImage? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+    nonisolated static func downsample(url: URL, maxPixel: CGFloat, maxSourcePixels: Int? = nil) -> CGImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions) else { return nil }
+        if let maxSourcePixels {
+            guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                  let width = properties[kCGImagePropertyPixelWidth] as? Int, width > 0,
+                  let height = properties[kCGImagePropertyPixelHeight] as? Int, height > 0,
+                  width <= maxSourcePixels / height else { return nil }
+        }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
@@ -278,12 +281,12 @@ final class ThumbnailStore: ObservableObject {
     }
 }
 
-/// 行/网格里的缩略图视图：只读 store 的缓存，加载完成后由 version 触发重绘。
-/// 不把图片放进 @State —— 列表滚动会重建视图，@State 会丢。
+/// 单元格只保存已就绪的请求键，位图由共享缓存管理。
 struct EntryThumbnail: View {
     let entry: ArchiveEntry
     @ObservedObject var model: ArchiveModel
     @ObservedObject private var store = ThumbnailStore.shared
+    @State private var readyRequest: String?
     var side: CGFloat = 20
     var corner: CGFloat = 3
 
@@ -291,8 +294,12 @@ struct EntryThumbnail: View {
     private var pixel: CGFloat { max(160, side * 2) }
 
     var body: some View {
+        let key = store.cacheKey(for: entry, model: model, maxPixel: pixel)
+        let request = "\(key)|\(store.version)"
+        let ready = readyRequest == request
+        let cached = store.cached(forKey: key)
         Group {
-            if let image = store.cached(for: entry, model: model, maxPixel: pixel) {
+            if let image = cached {
                 Image(decorative: image, scale: 1)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -306,8 +313,13 @@ struct EntryThumbnail: View {
                 KindBadge(kind: FileKind(entry), side: side, corner: corner)
             }
         }
-        .onAppear {
-            store.request(for: entry, model: model, maxPixel: pixel)
+        .task(id: request) {
+            guard cached == nil, !ready else { return }
+            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+                store.thumbnail(for: entry, model: model, maxPixel: pixel) { _ in done.resume() }
+            }
+            guard !Task.isCancelled else { return }
+            readyRequest = request
         }
     }
 

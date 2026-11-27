@@ -8,6 +8,9 @@ import Foundation
 
 func runSecurityTests() {
     testPathGuardRejectsTraversalAndAbsolute()
+    testListFileSeparators()
+    testSymlinkPreflight()
+    testExpansionPreflight()
     testTarOperandGuardNeutralizesLeadingSwitchAndListfile()
     testUniquePathCompoundExtension()
     testFinderServiceCompressMergedEmptyArraySafe()
@@ -119,4 +122,126 @@ private func testTerminationPromptingIgnoresPrematureDrain() {
         expect(coordinator.state == .idle, "状态恢复 idle")
         coordinator.reset()
     }
+}
+
+private func testListFileSeparators() {
+    print("安全 · listfile 分隔符")
+    for path in ["first\nsecond", "first\rsecond", "first\r\nsecond", "first\0second"] {
+        do {
+            try ArchivePathGuard.validateRelative(path)
+            expect(false, "相对路径应拒绝控制分隔符")
+        } catch ArchiveError.unsafePath(let value) {
+            expect(value == path, "路径检查报告原始非法值")
+        } catch { expect(false, "路径检查错误类型", "\(error)") }
+
+        do {
+            let url = try ArchivePathGuard.writeListFile(["/absolute/file", path])
+            try? FileManager.default.removeItem(at: url)
+            expect(false, "listfile 应拒绝控制分隔符")
+        } catch ArchiveError.unsafePath(let value) {
+            expect(value == path, "listfile 报告原始非法值")
+        } catch { expect(false, "listfile 错误类型", "\(error)") }
+    }
+    do {
+        let url = try ArchivePathGuard.writeListFile(["/absolute/path with space", "中文.txt"])
+        defer { try? FileManager.default.removeItem(at: url) }
+        let content = try String(contentsOf: url, encoding: .utf8)
+        expect(content == "/absolute/path with space\n中文.txt\n", "安全的绝对源路径仍能写入 listfile")
+    } catch { expect(false, "合法 listfile 写入失败", "\(error)") }
+}
+
+private func testSymlinkPreflight() {
+    print("安全 · 整包解压软链预检")
+    for target in ["/outside", "\\outside", "C:\\outside", "../../outside", "sub/../../../outside", "line\nbreak", ""] {
+        do {
+            try ArchivePathGuard.validateSymlink(target, at: "dir/link")
+            expect(false, "应拒绝越界或非法目标 \(target.debugDescription)")
+        } catch ArchiveError.unsafePath {
+            expect(true, "拒绝越界或非法目标 \(target.debugDescription)")
+        } catch { expect(false, "软链检查错误类型", "\(error)") }
+    }
+    for target in ["../file", "./file", "sub/../../file", ".."] {
+        expect((try? ArchivePathGuard.validateSymlink(target, at: "dir/link")) != nil,
+               "放行留在归档根目录内的目标 \(target)")
+    }
+    expect((try? ArchivePathGuard.validateSymlinks([
+        ("dir/forward", "../target"), ("alias", "dir/forward")
+    ])) != nil, "放行留在根目录内的多级软链")
+    expect((try? ArchivePathGuard.validateSymlinks([
+        ("dir/back", ".."), ("alias", "dir/back/../outside")
+    ])) == nil, "目标解析穿过其他软链后仍检查解压根目录")
+    expect((try? ArchivePathGuard.validateSymlink("../../outside", at: "a\\b/link")) == nil,
+           "反斜杠作为普通字符时也不会把包外路径误算成包内")
+    expect((try? ArchivePathGuard.validateSymlinks([
+        ("dir/alias", ".."), ("dir/alias/nested", "file")
+    ])) == nil, "拒绝把另一个软链写到链式父目录下")
+    expect((try? ArchivePathGuard.validateSymlinks([
+        ("dir/alias", "..")
+    ], entryPaths: ["dir/alias/report.txt"])) == nil, "拒绝通过软链父目录落盘普通条目")
+    expect((try? ArchivePathGuard.validateSymlinks([
+        ("a", "b"), ("b", "a")
+    ])) == nil, "超过软链解析上限时阻断预检")
+    let unknown = ArchiveEntry(path: "link", size: 1, modified: "", mode: "lrwxrwxrwx")
+    do {
+        try ArchiveService.validateExtraction(entries: [unknown], compressedSize: 50)
+        expect(false, "整包解压应拒绝无法确认目标的软链")
+    } catch ArchiveError.unsafePath(let path) {
+        expect(path == "link", "无法确认目标的软链报出具体条目")
+    } catch { expect(false, "缺失软链目标诊断类型", "\(error)") }
+    let fm = FileManager.default
+    let root = fixtures.appendingPathComponent("symlink-preflight", isDirectory: true)
+    do {
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("input", isDirectory: true)
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        let file = source.appendingPathComponent("file")
+        try Data("contents".utf8).write(to: file)
+        let link = source.appendingPathComponent("alias")
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "file")
+        let good = root.appendingPathComponent("good.tar")
+        try Tar.create(at: good, from: [source], format: "tar")
+        let destination = root.appendingPathComponent("out", isDirectory: true)
+        try ArchiveService.extract(good, entries: [], to: destination, password: nil)
+        let target = try fm.destinationOfSymbolicLink(atPath: destination.appendingPathComponent("input/alias").path)
+        expect(target == "file", "整包解压保留指向包内的软链")
+
+        try fm.removeItem(at: link)
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "../../missing")
+        let bad = root.appendingPathComponent("bad.tar")
+        try Tar.create(at: bad, from: [source], format: "tar")
+        let blocked = root.appendingPathComponent("blocked", isDirectory: true)
+        do {
+            try ArchiveService.extract(bad, entries: [], to: blocked, password: nil)
+            expect(false, "越界软链应阻断整包解压")
+        } catch ArchiveError.unsafePath(let path) {
+            expect(path.contains("input/alias"), "整包解压报告对应软链")
+        }
+        expect(!fm.fileExists(atPath: blocked.path), "拦截发生在写入目标目录前")
+    } catch { expect(false, "软链预检集成测试", "\(error)") }
+}
+
+private func testExpansionPreflight() {
+    print("安全 · 解压体积与膨胀比")
+    let limit: Int64 = 50 * 1024 * 1024 * 1024
+    func entry(_ size: Int64, path: String = "data") -> ArchiveEntry {
+        ArchiveEntry(path: path, size: size, modified: "", mode: "-rw-r--r--")
+    }
+    do {
+        try ArchiveService.validateExpansion(entries: [entry(limit)], compressedSize: 1)
+        expect(true, "总大小等于阈值时放行")
+        try ArchiveService.validateExpansion(entries: [entry(limit * 2)], compressedSize: limit / 100)
+        expect(true, "体积很大且压缩比等于 200 倍时放行")
+        try ArchiveService.validateExpansion(entries: [entry(limit), entry(-1)], compressedSize: 1)
+        expect(true, "声明大小未知的条目不计入总量")
+        try ArchiveService.validateExpansion(entries: [entry(limit * 2)], compressedSize: nil)
+        expect(true, "压缩大小未知时没有可比较的比例")
+    } catch { expect(false, "宽松体积阈值不应误拦", "\(error)") }
+
+    do {
+        try ArchiveService.validateExpansion(entries: [entry(limit), entry(Int64.max, path: "second")],
+                                             compressedSize: 1)
+        expect(false, "同时超过两个阈值应阻断")
+    } catch ArchiveError.excessiveExpansion {
+        expect(true, "累加超大声明大小时不会溢出且给出明确错误")
+    } catch { expect(false, "异常膨胀错误类型", "\(error)") }
 }

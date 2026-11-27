@@ -301,10 +301,119 @@ func runArchiveTests() {
     testZipListing()
     testDirectoryFolding()
     testTgzListing()
+    testTarVerboseMetadata()
+    testSevenZipListingDiagnostics()
+    testSevenZipVerifyPasswordDiagnostics()
     testEncrypted7z()
     testFormatDetection()
     testInPlaceEditing()
     testChildIndex()
     testAtomicWrite()
     testVerify()
+}
+
+private func testTarVerboseMetadata() {
+    print("bsdtar 列表 · 时间、locale 与文件类型")
+    let calendar = Calendar(identifier: .gregorian)
+    let now = calendar.date(from: DateComponents(year: 2026, month: 1, day: 5))!
+    let link = Tar.parse(#"lrwxrwxrwx  0 0 0 0 Dec 31 21:48 docs/alias -> ../\350\257\264\346\230\216.txt"#, now: now)
+    expect(link?.path == "docs/alias", "软链名剥离目标")
+    expect(link?.symlinkTarget == "../说明.txt", "兼容非 UTF-8 locale 的八进制目标")
+    expect(link?.modifiedDate.map { calendar.component(.year, from: $0) } == 2025, "年初正确解析去年最近日期")
+    let regular = Tar.parse("-rwSr--r-T  0 0 0 12 Jan  5  2025 file -> name", now: now)
+    expect(regular?.path == "file -> name", "普通文件名保留箭头")
+    expect(regular?.mode == "-rwSr--r-T", "保留 S 与 T 权限位")
+    expect(regular?.modifiedDate == calendar.date(from: DateComponents(year: 2025, month: 1, day: 5)),
+           "带年份的不规则空格日期可解析")
+    for mode in ["brw-rw----", "crw-rw----", "prw-r-----", "srwxrwxrwx"] {
+        expect(Tar.parse("\(mode) 0 root wheel 0 Apr 25  2022 special")?.mode == mode, "支持 \(mode) 模式")
+    }
+    expect(Tar.parse("malformed listing") == nil, "拒绝无效列表行")
+
+    let env = Process()
+    env.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    env.arguments = ["LC_ALL=zh_CN.UTF-8", "LC_TIME=fr_FR.UTF-8",
+                     Bundle.main.executableURL!.path, "--tar-locale", fixtures.path]
+    do {
+        try env.run()
+        env.waitUntilExit()
+        expect(env.terminationStatus == 0, "父进程 LC_ALL / LC_TIME 不影响英文日期或中文路径")
+    } catch {
+        expect(false, "运行 locale 回归测试", "\(error)")
+    }
+}
+
+private func testSevenZipListingDiagnostics() {
+    print("7-Zip 列表 · 密码与损坏诊断")
+    guard SevenZip.isAvailable else { return }
+    for ext in ["7z", "zip"] {
+        let url = fixtures.appendingPathComponent("encrypted-name-broken.\(ext)")
+        do {
+            try Data("plain text".utf8).write(to: url)
+            _ = try SevenZip.list(url)
+            expect(false, "损坏 \(ext) 应报错")
+        } catch ArchiveError.tool(let message) {
+            expect(!message.isEmpty, "损坏 \(ext) 保留引擎诊断")
+        } catch {
+            expect(false, "损坏 \(ext) 被误判", "\(error)")
+        }
+    }
+    let encrypted = fixtures.appendingPathComponent("secret.7z")
+    for password in [nil, "wrong"] {
+        do {
+            _ = try SevenZip.list(encrypted, password: password)
+            expect(false, "应识别头加密归档的缺失或错误密码")
+        } catch ArchiveError.needsPassword {
+            expect(true, "7-Zip 的明确密码诊断会弹出密码提示")
+        } catch {
+            expect(false, "7-Zip 加密诊断未识别", "\(error)")
+        }
+    }
+    let listing = SevenZip.parseList("""
+        Path = folder/link
+        Size = 0
+        Modified = 2025-01-05 13:24:19.312
+        Mode = lrwxrwxrwx
+        Symbolic Link = ../data
+
+        Path = second-link
+        Target = data
+        """)
+    expect(listing.first?.symlinkTarget == "../data", "读取 Symbolic Link 字段")
+    expect(listing.last?.symlinkTarget == "data", "读取 Target 字段")
+    let date = Calendar(identifier: .gregorian).date(
+        from: DateComponents(year: 2025, month: 1, day: 5, hour: 13, minute: 24, second: 19))
+    expect(listing.first?.modifiedDate == date, "7-Zip 时间保留秒")
+    expect(listing.last?.modifiedDate == nil, "没有时间的条目保持无日期")
+}
+
+private func testSevenZipVerifyPasswordDiagnostics() {
+    print("7-Zip 校验 · 条目密码诊断与批量跳过")
+    guard SevenZip.isAvailable else { return }
+    let input = fixtures.appendingPathComponent("src/说明.txt")
+    let zip = fixtures.appendingPathComponent("verify-locked.zip")
+    let seven = fixtures.appendingPathComponent("verify-locked.7z")
+    do {
+        try SevenZip.create(at: zip, from: [input], format: "zip", password: "pw123", volume: nil)
+        try SevenZip.run(["a", "-t7z", "-y", "-ppw123", "-mhe=off", seven.path, "--", input.path],
+                         captureOutput: false)
+        for url in [zip, seven] {
+            for password in [nil, "incorrect"] {
+                do {
+                    try SevenZip.verify(url, password: password)
+                    expect(false, "加密载荷校验应要求密码")
+                } catch ArchiveError.needsPassword {
+                    expect(true, "正确识别 \(url.pathExtension) 载荷的密码诊断")
+                }
+            }
+            try SevenZip.verify(url, password: "pw123")
+            expect(true, "正确密码通过 \(url.pathExtension) 的实际完整性校验")
+        }
+        MainActor.assumeIsolated {
+            let batch = BatchRunner(urls: [zip, seven], mode: .verify)
+            batch.start()
+            expect(waitUntil(10, { !batch.running }), "校验加密归档的批次会正常收尾")
+            expect(batch.jobs.allSatisfy { $0.state == .skipped }, "批量校验把两种数据加密归档标记为跳过")
+        }
+    } catch { expect(false, "条目级密码诊断", "\(error)") }
 }

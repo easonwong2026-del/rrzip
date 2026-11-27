@@ -261,7 +261,9 @@ final class ArchiveModel: ObservableObject {
     }
 
     @Published private(set) var trail: [Frame] = []
-    @Published var selection: Set<ArchiveEntry.ID> = []
+    @Published var selection: Set<ArchiveEntry.ID> = [] {
+        didSet { revealIndexCache = nil }
+    }
     @Published var searchText: String = "" {
         didSet {
             guard searchText != oldValue else { return }
@@ -353,6 +355,7 @@ final class ArchiveModel: ObservableObject {
     /// 列表结果缓存。键里带 frame / 前缀 / 排序 / 关键词，
     /// 任何一项变了就重算——无搜索时也走缓存，否则每次重绘都要重排。
     private var listCache: (key: String, result: [ArchiveEntry])?
+    private var revealIndexCache: (key: String, index: Int?)?
 
     private func cachedFrame() -> FrameCache? {
         guard let frame = current else { return nil }
@@ -410,13 +413,21 @@ final class ArchiveModel: ObservableObject {
     }
 
     private func compare(_ a: ArchiveEntry, _ b: ArchiveEntry) -> Bool {
-        let ascending: Bool
         switch sortKey {
-        case .name: ascending = byName(a, b)
-        case .size: ascending = a.size < b.size
-        case .modified: ascending = a.modified < b.modified
+        case .name:
+            return sortAscending ? byName(a, b) : byName(b, a)
+        case .size:
+            if a.size != b.size { return sortAscending ? a.size < b.size : a.size > b.size }
+        case .modified:
+            switch (a.modifiedDate, b.modifiedDate) {
+            case (let left?, let right?) where left != right:
+                return sortAscending ? left < right : left > right
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default: break
+            }
         }
-        return sortAscending ? ascending : !ascending
+        return byName(a, b)
     }
 
     func toggleSort(_ key: SortKey) {
@@ -433,22 +444,25 @@ final class ArchiveModel: ObservableObject {
         var index: [String: [ArchiveEntry]] = [:]
         var dirs: [String: ArchiveEntry] = [:]
 
-        func noteDirectory(_ dirPath: String, modified: String) {
+        func noteDirectory(_ dirPath: String, modified: String, modifiedDate: Date?) {
             guard !dirPath.isEmpty, dirs[dirPath] == nil else { return }
-            dirs[dirPath] = ArchiveEntry(path: dirPath, size: 0, modified: modified, mode: "drwxr-xr-x")
+            dirs[dirPath] = ArchiveEntry(path: dirPath, size: 0, modified: modified, mode: "drwxr-xr-x",
+                                         modifiedDate: modifiedDate)
             let trimmed = String(dirPath.dropLast())
             if let slash = trimmed.lastIndex(of: "/") {
-                noteDirectory(String(trimmed[trimmed.startIndex...slash]), modified: modified)
+                noteDirectory(String(trimmed[trimmed.startIndex...slash]), modified: modified, modifiedDate: modifiedDate)
             }
         }
 
         for entry in entries {
             if entry.isDirectory {
                 let dir = entry.path.hasSuffix("/") ? entry.path : entry.path + "/"
-                noteDirectory(dir, modified: entry.modified)
+                noteDirectory(dir, modified: entry.modified, modifiedDate: entry.modifiedDate)
+                dirs[dir] = ArchiveEntry(path: dir, size: 0, modified: entry.modified, mode: entry.mode,
+                                         modifiedDate: entry.modifiedDate, symlinkTarget: entry.symlinkTarget)
             } else if let slash = entry.path.lastIndex(of: "/") {
                 let parent = String(entry.path[entry.path.startIndex...slash])
-                noteDirectory(parent, modified: entry.modified)
+                noteDirectory(parent, modified: entry.modified, modifiedDate: entry.modifiedDate)
                 index[parent, default: []].append(entry)
             } else {
                 index["", default: []].append(entry)
@@ -569,6 +583,17 @@ final class ArchiveModel: ObservableObject {
             return entries(at: frame.prefix)
         }
         return displayEntries
+    }
+
+    /// 列表、图标和分栏只在显示顺序或选区变化后重新查找定位行。
+    var firstSelectedIndex: Int? {
+        guard !selection.isEmpty, let frame = current else { return nil }
+        let list = selectionOrder
+        let key = isShowingColumns ? "columns|\(frame.id)|\(frame.prefix)" : listCache?.key ?? ""
+        if let cached = revealIndexCache, cached.key == key { return cached.index }
+        let index = list.firstIndex { selection.contains($0.id) }
+        revealIndexCache = (key, index)
+        return index
     }
 
     /// 当前选中的条目：优先最近一次点中 / 键盘走到的那条，
@@ -1094,60 +1119,26 @@ final class ArchiveModel: ObservableObject {
 
         var passphrase = passwords[url.path]
         let detection = FormatDetector.detect(url)
-        // 磁盘映像类（dmg/vhd/qcow2…）libarchive 读不了，直接交给 7-Zip。
-        // 起始引擎跟批量解压 / 暂存导出一样，都由 ArchiveService 决定。
-        var engine: ArchiveEngine = ArchiveService.engineOrder(for: url).first ?? .libarchive
-        var entries: [ArchiveEntry]?
-        var askedPassword = false
-        var switchedEngine = false
-
-        for _ in 0..<4 {
+        var listing: (entries: [ArchiveEntry], engine: ArchiveEngine)?
+        for attempt in 0..<2 {
             do {
-                // 快照成常量再进并发闭包：Swift 6 不允许捕获可变变量
-                let currentEngine = engine
-                let currentPassphrase = passphrase
-                let result: [ArchiveEntry] = try await Task.detached(priority: .userInitiated) {
-                    switch currentEngine {
-                    case .libarchive: return try Tar.list(url, passphrase: currentPassphrase)
-                    case .sevenZip: return try SevenZip.list(url, password: currentPassphrase)
-                    }
+                let password = passphrase
+                listing = try await Task.detached(priority: .userInitiated) {
+                    try ArchiveService.listWithEngine(url, password: password)
                 }.value
-                entries = result
                 break
             } catch ArchiveError.needsPassword {
-                if !askedPassword {
-                    guard let typed = await askPassword(for: url, wrong: false) else { return finishLocked() }
-                    askedPassword = true
-                    passphrase = typed
-                    passwords[url.path] = typed
-                    continue
+                guard generation == loadGeneration, !Task.isCancelled else { return }
+                guard attempt == 0 else {
+                    errorMessage = "密码不正确"
+                    return finishLocked()
                 }
-                if engine == .libarchive && !switchedEngine {
-                    switchedEngine = true
-                    engine = .sevenZip
-                    continue
-                }
-                errorMessage = "密码不正确"
-                return finishLocked()
-            } catch let ArchiveError.tool(message) {
-                let lower = message.lowercased()
-                if lower.contains("header is encrypted"), engine == .libarchive, !switchedEngine {
-                    switchedEngine = true
-                    engine = .sevenZip
-                    continue
-                }
-                if Tar.looksEncrypted(message), !askedPassword {
-                    guard let typed = await askPassword(for: url, wrong: false) else { return finishLocked() }
-                    askedPassword = true
-                    passphrase = typed
-                    passwords[url.path] = typed
-                    continue
-                }
-                isLoading = false
-                status = "读取失败"
-                errorMessage = message
-                return
+                let typed = await askPassword(for: url, wrong: passphrase != nil)
+                guard generation == loadGeneration, !Task.isCancelled else { return }
+                guard let typed else { return finishLocked() }
+                passphrase = typed
             } catch {
+                guard generation == loadGeneration, !Task.isCancelled else { return }
                 isLoading = false
                 status = "读取失败"
                 errorMessage = error.localizedDescription
@@ -1158,19 +1149,26 @@ final class ArchiveModel: ObservableObject {
         // 若加载期间已切换到另一个归档，静默丢弃过期结果，防止 ABA 覆写新状态
         guard generation == loadGeneration, !Task.isCancelled else { return }
 
-        guard let entries else {
+        guard let (entries, engine) = listing else {
             isLoading = false
             status = "读取失败"
             return
         }
 
-        if passphrase != nil { unlocked.insert(url.path) }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        if let passphrase {
+            passwords[url.path] = passphrase
+            unlocked.insert(url.path)
+        }
+        let attrs = await Task.detached {
+            let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            return (values?.fileSize.map(Int64.init), values?.contentModificationDate)
+        }.value
+        guard generation == loadGeneration, !Task.isCancelled else { return }
         let frame = Frame(
             archive: url, entries: entries, engine: engine, detection: detection,
             isNested: !resetTrail,
-            archiveSize: attrs?[.size] as? Int64,
-            archiveModified: attrs?[.modificationDate] as? Date
+            archiveSize: attrs.0,
+            archiveModified: attrs.1
         )
         // 换包就是换浏览上下文：旧关键词留在输入框里，新包会被旧条件筛成
         // 「没有匹配的文件」，看起来像空包。打开另一个包、进嵌套包都按这个语义走。
@@ -1686,8 +1684,7 @@ final class ArchiveModel: ObservableObject {
 
     // MARK: 任务队列
     //
-    // 一次只跑一个任务。TaskRegistry 只有一个进程槽，并行会取消错进程，
-    // 所以第二个任务排队而不是同时开跑。
+    // 主窗口的队列按顺序运行，批量面板的子进程另按各自的任务 ID 跟踪。
     // 这里只负责「排队 + 状态 + 取消 + 延迟显示」，
     // 压缩、解压的具体逻辑仍留在各自方法里，不搬动。
 
@@ -2001,17 +1998,9 @@ final class ArchiveModel: ObservableObject {
                         self?.reportProgress(value, for: jobID)
                     }
                     try await Task.detached {
-                        switch frame.engine {
-                        case .libarchive:
-                            // tar 没有进度输出，界面保持不确定态
-                            try Tar.extract(frame.archive, entries: paths, to: destination,
-                                            passphrase: currentPassphrase, jobID: jobID)
-                        case .sevenZip:
-                            try SevenZip.extract(frame.archive, entries: paths, to: destination,
-                                                 password: currentPassphrase,
-                                                 jobID: jobID,
-                                                 onProgress: onProgress)
-                        }
+                        try ArchiveService.extract(frame.archive, entries: paths, to: destination,
+                                                   password: currentPassphrase, jobID: jobID,
+                                                   preferredEngine: frame.engine, onProgress: onProgress)
                     }.value
                     self.status = "已解压到 \(destination.lastPathComponent)"
                     // 设置里可以关掉「解压后在访达中显示」
@@ -2169,9 +2158,8 @@ final class ArchiveModel: ObservableObject {
     }
 
     private func cacheKey(_ entry: ArchiveEntry, in frame: Frame) -> String {
-        let mtime = (try? FileManager.default.attributesOfItem(atPath: frame.archive.path)[.modificationDate] as? Date)?
-            .timeIntervalSince1970 ?? 0
-        return "\(frame.archive.path)|\(mtime)|\(entry.path)"
+        ThumbnailStore.cacheKey(archivePath: frame.archive.path, size: frame.archiveSize,
+                                modified: frame.archiveModified, entry: entry.path, maxPixel: 0)
     }
 
     // MARK: - 创建
@@ -2475,11 +2463,24 @@ extension ArchiveModel: TerminationHost {
 /// 的磁盘写入和 I/O，最后还是播不了。所以先按条目大小判断，再决定动不动解压。
 enum InlinePreviewLimits {
     static let media: Int64 = 800 * 1024 * 1024
+    static let image: Int64 = 80 * 1024 * 1024
+    static let pdf: Int64 = 150 * 1024 * 1024
+    static let imageMaxPixel: CGFloat = 4096
+    // 部分解码器会在生成缩略图前展开源位图，单独限制原图像素数。
+    static let imageMaxSourcePixels = 64_000_000
+    static let imageExts: Set<String> = ["png", "jpg", "jpeg", "heic", "heif", "gif", "webp", "tif", "tiff", "bmp"]
     static let videoExts: Set<String> = ["mp4", "mov", "m4v", "mpg", "mpeg"]
     static let audioExts: Set<String> = ["mp3", "m4a", "aac", "wav", "aiff", "flac", "ogg"]
 
     static func isMedia(_ ext: String) -> Bool {
         videoExts.contains(ext) || audioExts.contains(ext)
+    }
+
+    static func exceedsLimit(_ size: Int64, for ext: String) -> Bool {
+        if isMedia(ext) { return size > media }
+        if imageExts.contains(ext) { return size > image }
+        if ext == "pdf" { return size > pdf }
+        return false
     }
 
     /// 已知大小超过上限：不解压，也不生成临时副本。
@@ -2488,6 +2489,6 @@ enum InlinePreviewLimits {
     /// 由调用方拿到临时文件后按实际大小复核——宁可白解一次，也不能凭猜测
     /// 把本来能预览的文件挡在门外。
     static func skipsExtraction(_ entry: ArchiveEntry) -> Bool {
-        isMedia(entry.ext) && entry.size >= 0 && entry.size > media
+        !entry.isDirectory && exceedsLimit(entry.size, for: entry.ext)
     }
 }
