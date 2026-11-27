@@ -120,10 +120,7 @@ final class FinderSync: FIFinderSync {
         DispatchQueue.global(qos: .userInitiated).async {
             let needsAttention: Bool
             do {
-                let sources = urls.map { url in
-                    FinderFileRef(url: url, bookmarkData: try? url.bookmarkData())
-                }
-                try FinderTaskQueue().enqueue(FinderTaskRequest(operation: operation, sources: sources))
+                try FinderTaskQueue().enqueueSelection(operation, urls: urls)
                 needsAttention = false
             } catch {
                 needsAttention = true

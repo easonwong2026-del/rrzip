@@ -5,6 +5,43 @@
 //  模型层：批量、打开判定、工作模式、排序
 
 import Foundation
+import Observation
+import os
+
+private func testModelObservation() {
+    print("Observation · 只使读取过的状态失效")
+    MainActor.assumeIsolated {
+        let model = ArchiveModel()
+        let changed = OSAllocatedUnfairLock(initialState: false)
+        withObservationTracking {
+            _ = model.selection
+        } onChange: {
+            changed.withLock { $0 = true }
+        }
+        model.finderJob = TaskJob(id: UUID(), title: "访达压缩", detail: "大文件", fraction: 0.5)
+        model.status = "压缩中"
+        expect(!changed.withLock { $0 }, "任务进度与状态不使只读选择的视图失效")
+        model.selection.insert("新选中项")
+        expect(changed.withLock { $0 }, "选择变化仍会通知读取选择的视图")
+
+        let runner = BatchRunner(urls: [], mode: .extract)
+        let destinationChanged = OSAllocatedUnfairLock(initialState: false)
+        withObservationTracking {
+            _ = runner.destination
+        } onChange: {
+            destinationChanged.withLock { $0 = true }
+        }
+        runner.destination = fixtures
+        expect(destinationChanged.withLock { $0 }, "批量面板仍观察目标目录更新")
+
+        let entries = try? InProcessArchive.list(fixtures.appendingPathComponent("basic.zip"))
+        let directory = entries?.first(where: \.isDirectory)
+        let file = entries?.first(where: { !$0.isDirectory })
+        expect(directory?.accessibilityDescription == "文件夹", "无障碍条目区分文件夹")
+        expect(file.map { $0.accessibilityDescription == "文件，\($0.displaySize)" } == true,
+               "无障碍文件条目包含人可读的大小")
+    }
+}
 
 /// 批量目标目录
 func testBatchDestination() {
@@ -1029,6 +1066,7 @@ func testStashExportCancelMidWrite() {
 }
 
 func runModelTests() {
+    testModelObservation()
     testModifiedDateSort()
     testAbandonedPasswordPromptDoesNotOverwriteNewFrame()
     testArchivePasswordRetries()

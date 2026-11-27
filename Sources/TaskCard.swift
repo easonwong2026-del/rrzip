@@ -5,6 +5,27 @@
 
 import SwiftUI
 
+struct TaskOverlay: View {
+    let model: ArchiveModel
+    let bottomInset: CGFloat
+
+    var body: some View {
+        VStack(spacing: Space.s) {
+            if model.jobVisible, let job = model.job {
+                TaskCard(job: job) { model.cancelJob() }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            if let job = model.finderJob {
+                TaskCard(job: job) { model.cancelFinderTask?() }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .padding(.bottom, bottomInset)
+        .animation(.easeOut(duration: 0.18), value: model.job?.id)
+        .animation(.easeOut(duration: 0.18), value: model.finderJob?.id)
+    }
+}
+
 // MARK: - 任务进度卡
 
 /// 长任务的进度卡。有真实百分比就画条，没有就转圈——
@@ -19,6 +40,7 @@ struct TaskCard: View {
                 Image(systemName: "arrow.triangle.2.circlepath")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Palette.brand)
+                    .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text("\(job.title)…")
@@ -34,6 +56,7 @@ struct TaskCard: View {
 
                 Button("取消", action: onCancel)
                     .controlSize(.small)
+                    .accessibilityLabel("取消任务 \(job.title)")
             }
 
             if job.queued > 0 {
@@ -46,15 +69,18 @@ struct TaskCard: View {
                 HStack(spacing: 8) {
                     ProgressView(value: min(max(fraction, 0), 1))
                         .tint(Palette.brand)
+                        .accessibilityLabel("\(job.title)进度")
                     Text("\(Int(fraction * 100))%")
                         .font(.system(size: 10, weight: .medium).monospacedDigit())
                         .foregroundStyle(.secondary)
                         .frame(width: 34, alignment: .trailing)
+                        .accessibilityHidden(true)
                 }
             } else {
                 ProgressView()
                     .controlSize(.small)
                     .tint(Palette.brand)
+                    .accessibilityLabel("\(job.title)正在进行")
             }
         }
         .padding(12)
@@ -65,6 +91,7 @@ struct TaskCard: View {
                 .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.16), radius: 10, y: 3)
+        .accessibilityElement(children: .contain)
     }
 }
 

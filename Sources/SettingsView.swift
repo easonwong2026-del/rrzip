@@ -17,7 +17,7 @@ import SwiftUI
 @preconcurrency import UserNotifications
 
 struct SettingsView: View {
-    @ObservedObject var model: ArchiveModel
+    var model: ArchiveModel
     @State private var tab: Tab = .general
 
     enum Tab: String, CaseIterable, Identifiable {
@@ -111,7 +111,7 @@ struct SettingsView: View {
 // MARK: - 通用
 
 private struct GeneralSettingsView: View {
-    @ObservedObject var model: ArchiveModel
+    @Bindable var model: ArchiveModel
     @AppStorage("rrzip.autoWorkspaceMode") private var autoMode = true
     @AppStorage("rrzip.showSidebar") private var showSidebar = true
     @AppStorage("rrzip.showInspector") private var showInspector = true
@@ -177,7 +177,7 @@ private struct GeneralSettingsView: View {
 // MARK: - 文件操作
 
 private struct FilesSettingsView: View {
-    @ObservedObject var model: ArchiveModel
+    @Bindable var model: ArchiveModel
     @AppStorage("rrzip.defaultCreateFormat") private var formatRaw = CreateFormat.zip.rawValue
     /// 空串 = 每次询问
     @AppStorage("rrzip.extractDestination") private var destination = ""
@@ -462,7 +462,7 @@ private struct IntegrationSettingsView: View {
 // MARK: - 关于与维护
 
 private struct AboutSettingsView: View {
-    @ObservedObject var model: ArchiveModel
+    var model: ArchiveModel
     @State private var cacheBytes: Int64 = 0
     @State private var cleanupReport: CacheCleanupReport?
 

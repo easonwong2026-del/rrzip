@@ -97,6 +97,7 @@ extension ContentView {
                                         in: RoundedRectangle(cornerRadius: 5, style: .continuous))
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("返回上一级")
                     .help("返回上一级（⌘[）")
                     .padding(.trailing, 2)
                 }
@@ -106,6 +107,7 @@ extension ContentView {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 8.5, weight: .semibold))
                             .foregroundStyle(.quaternary)
+                            .accessibilityHidden(true)
                     }
                     crumb(index: index, frame: frame)
                 }
@@ -148,6 +150,8 @@ extension ContentView {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(frame.title)
+        .accessibilityAddTraits(isLast ? .isSelected : [])
         .help(frame.title)
     }
 

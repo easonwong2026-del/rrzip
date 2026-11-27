@@ -32,6 +32,15 @@ func expect(_ condition: Bool, _ name: String, _ detail: @autoclosure () -> Stri
 
 let fixtures = URL(fileURLWithPath: CommandLine.arguments[1])
 
+/// 直接写入数据。用 truncate 生成的空洞会被 tar 跳过，解压可能在测试发出取消前结束。
+func makeLargeCancellationFixture(at url: URL) throws {
+    FileManager.default.createFile(atPath: url.path, contents: nil)
+    let handle = try FileHandle(forWritingTo: url)
+    defer { try? handle.close() }
+    let chunk = Data(repeating: 0xa5, count: 1024 * 1024)
+    for _ in 0..<384 { try handle.write(contentsOf: chunk) }
+}
+
 /// 跑主线程 runloop 直到条件成立或超时。测试里等队列里的异步任务用，
 /// 别用固定 sleep：机器快慢不一样，固定等待不是慢就是脆。
 /// interval 可调小，用来抓「进程刚好在跑」这种短窗口。

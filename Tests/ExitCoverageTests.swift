@@ -499,10 +499,7 @@ private func testBatchCancelsRealProcesses() {
         do {
             try fm.createDirectory(at: folder, withIntermediateDirectories: true)
             let source = folder.appendingPathComponent("large-data")
-            fm.createFile(atPath: source.path, contents: nil)
-            let handle = try FileHandle(forWritingTo: source)
-            try handle.truncate(atOffset: 384 * 1024 * 1024)
-            try handle.close()
+            try makeLargeCancellationFixture(at: source)
             let archive = folder.appendingPathComponent("large.tar")
             try Tar.create(at: archive, from: [source], format: "tar")
             let root = folder.appendingPathComponent("unpacked", isDirectory: true)

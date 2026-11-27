@@ -7,6 +7,8 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import Observation
+import os
 
 /// 造一张真 PNG：随机字节的假图渲染必然失败，验不了「重新生成」
 private func makePNG(at url: URL, side: Int = 8) -> Bool {
@@ -114,6 +116,12 @@ func testThumbnailClearAllowsRetry() {
             expect(store.version > versionBefore, "清理后通知界面刷新")
 
             let clearVersion = store.version
+            let invalidated = OSAllocatedUnfairLock(initialState: false)
+            withObservationTracking {
+                _ = store.version
+            } onChange: {
+                invalidated.withLock { $0 = true }
+            }
             var image: CGImage?
             var done = false
             store.thumbnail(for: entry, model: model, maxPixel: 160) { result in
@@ -124,11 +132,13 @@ func testThumbnailClearAllowsRetry() {
             expect(image != nil, "之前失败的图片可以重新生成")
             expect(store.failedCount == 0, "成功后不再记失败")
             expect(store.version == clearVersion, "单张结果不会广播刷新其他单元格")
+            expect(!invalidated.withLock { $0 }, "Observation 不会用一张缩略图刷新其他键")
             expect(store.cached(forKey: key) != nil, "重建的单元格可以从共享缓存取回渲染结果")
             expect(store.cached(forKey: key + "-other") == nil, "结果仅写入本条目当前键")
 
             // 清空之后再清一次：不能因为缓存空就崩或卡住
             store.clear()
+            expect(invalidated.withLock { $0 }, "清理会使观察了版本的缩略图失效")
             expect(store.failedCount == 0, "空缓存重复清理也不出错")
         } catch {
             expect(false, "缩略图清理 抛出异常", "\(error)")

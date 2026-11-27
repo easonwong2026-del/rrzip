@@ -21,11 +21,157 @@ private func queueFile(_ id: UUID, in folder: URL) -> URL {
 func runFinderTaskQueueTests() {
     testQueuePublishAndClaim()
     testQueueRejectsInvalidInput()
+    testQueueSelectionBookmarkBudget()
     testQueueExpiryAndRecovery()
     testWorkerRunsOperations()
+    testExtractionPreservesReadOnlyDirectories()
     testWorkerWakesForNewQueueFiles()
     testWorkerPasswordAndQuit()
     testWorkerStopsStartingFilesOnCancelQuit()
+    testWorkerCancelsRealProcesses()
+    testWorkerCancelsPasswordPrompt()
+    testWorkerCancelsDuringPublication()
+}
+
+private func testExtractionPreservesReadOnlyDirectories() {
+    print("访达解压 · 合并只读归档目录")
+    let fm = FileManager.default
+    let root = fixtures.appendingPathComponent("finder-read-only")
+    let input = root.appendingPathComponent("input")
+    let output = root.appendingPathComponent("output")
+    let archivedDirs = ["merged", "preserved", "blocked"].map { input.appendingPathComponent($0) }
+    let existing = Data("existing".utf8)
+    let fromArchive = Data("from archive".utf8)
+    do {
+        try fm.createDirectory(at: output.appendingPathComponent("merged"), withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+        for directory in archivedDirs {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            try fromArchive.write(to: directory.appendingPathComponent("new.txt"))
+        }
+        try fromArchive.write(to: input.appendingPathComponent("merged/old.txt"))
+        for directory in archivedDirs { try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: directory.path) }
+        defer {
+            for directory in archivedDirs { try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path) }
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: output.appendingPathComponent("preserved").path)
+        }
+        try existing.write(to: output.appendingPathComponent("merged/old.txt"))
+        try existing.write(to: output.appendingPathComponent("blocked"))
+        let archive = output.appendingPathComponent("read-only.tar")
+        try Tar.create(at: archive, from: archivedDirs, format: "tar")
+
+        let plan = PlannedExtraction(archive: archive, destination: output, onConflict: .skip)
+        let result = try FinderJobRunner.extract(plan, password: nil, intoNewFolder: false, jobID: nil, onProgress: nil)
+        expect(result.destination == output, "只读源仍能解压到当前目录")
+        expect(result.skipped == 2, "记录同名旧文件和被旧文件阻挡的目录")
+        expect(try Data(contentsOf: output.appendingPathComponent("merged/new.txt")) == fromArchive,
+               "只读暂存目录里的新文件可以发布")
+        expect(try Data(contentsOf: output.appendingPathComponent("merged/old.txt")) == existing,
+               "保留合并目录里的现有文件")
+        expect(try Data(contentsOf: output.appendingPathComponent("blocked")) == existing, "旧文件不会被目录替换")
+        let existingMode = try fm.attributesOfItem(atPath: output.appendingPathComponent("merged").path)[.posixPermissions] as? Int
+        let newMode = try fm.attributesOfItem(atPath: output.appendingPathComponent("preserved").path)[.posixPermissions] as? Int
+        expect(existingMode == 0o700, "保留现有目录权限")
+        expect(newMode == 0o555, "完整发布的新目录保留归档的只读权限")
+        expect(try !fm.contentsOfDirectory(atPath: output.path).contains { $0.hasPrefix(".rrzip-") },
+               "合并后清理只读暂存目录")
+
+        let occupied = output.appendingPathComponent("occupied")
+        try fm.createDirectory(at: occupied, withIntermediateDirectories: true)
+        try existing.write(to: occupied.appendingPathComponent("original.txt"))
+        let newFolderPlan = PlannedExtraction(archive: archive, destination: occupied, onConflict: .skip)
+        let newFolder = try FinderJobRunner.extract(newFolderPlan, password: nil, intoNewFolder: true,
+                                                    jobID: nil, onProgress: nil).destination
+        defer {
+            for name in ["merged", "preserved", "blocked"] {
+                try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newFolder.appendingPathComponent(name).path)
+            }
+        }
+        expect(newFolder.lastPathComponent == "occupied 2", "发布文件夹时原子避让已被占用的名称")
+        expect(try Data(contentsOf: occupied.appendingPathComponent("original.txt")) == existing,
+               "发布新文件夹不替换先存在的目录")
+    } catch { expect(false, "合并只读归档目录", "\(error)") }
+}
+
+private func testWorkerCancelsDuringPublication() {
+    print("访达解压 · 发布中取消")
+    let fm = FileManager.default
+    let root = fixtures.appendingPathComponent("finder-cancel-publish")
+    let input = root.appendingPathComponent("input/shared")
+    let output = root.appendingPathComponent("shared")
+    let archive = root.appendingPathComponent("many-files.tar")
+    let fileCount = 2048
+    let content = Data("complete".utf8)
+    do {
+        try fm.createDirectory(at: input, withIntermediateDirectories: true)
+        try fm.createDirectory(at: output, withIntermediateDirectories: true)
+        let existing = output.appendingPathComponent("existing.txt")
+        try content.write(to: existing)
+        for index in 0..<fileCount { try content.write(to: input.appendingPathComponent("\(index).txt")) }
+        try Tar.create(at: archive, from: [input], format: "tar")
+        let queue = newFinderQueue()
+        let request = makeFinderRequest(.extractHere, urls: [archive])
+        try queue.enqueue(request)
+
+        try MainActor.assumeIsolated {
+            let worker = FinderTaskWorker(queue: queue, ledger: FormalWriteLedger(),
+                askPassword: { _, _ in nil }, feedback: { _, _, _ in }, log: { _ in })
+            var drained = false
+            Task {
+                await worker.drain()
+                drained = true
+            }
+            expect(waitUntil(10, interval: 0.001, {
+                guard let names = try? fm.contentsOfDirectory(atPath: output.path),
+                      names.count > 1, names.count <= fileCount else { return false }
+                worker.cancelCurrent()
+                return true
+            }), "至少一个条目已发布时直接取消")
+            expect(waitUntil(8, { drained }), "发布中取消后执行器收尾")
+            expect(try queue.receipt(for: request.id)?.state == .cancelled, "发布中断登记取消回执")
+            let names = try fm.contentsOfDirectory(atPath: output.path)
+            expect(names.count > 1 && names.count <= fileCount, "只保留已完整发布的条目")
+            expect(try names.allSatisfy { try Data(contentsOf: output.appendingPathComponent($0)) == content },
+                   "保留原始文件和已完整发布的内容")
+            expect(try !fm.contentsOfDirectory(atPath: root.path).contains { $0.hasPrefix(".rrzip-") },
+                   "取消发布后清理剩余暂存")
+        }
+    } catch { expect(false, "发布中取消测试", "\(error)") }
+}
+
+private func testQueueSelectionBookmarkBudget() {
+    print("访达队列 · 多选书签大小降级")
+    let queue = newFinderQueue()
+    let urls = (0..<FinderTaskQueue.maxSources).map {
+        fixtures.appendingPathComponent("deep/目录/文件-\($0).txt")
+    }
+    let bookmark = Data(repeating: 1, count: 3072)
+    do {
+        expect(try queue.enqueueSelection(.compressZip, urls: urls, bookmark: { _ in bookmark }),
+               "100 项书签超出队列上限时仍能提交合法路径")
+        let request = try queue.claimNext()
+        expect(request?.sources.map(\.path) == urls.map(\.path), "降级保留路径和选择顺序")
+        expect(request?.sources.allSatisfy { $0.bookmarkData == nil } == true, "仅超限时移除所有大书签")
+        expect(try queue.enqueueSelection(.compressZip, urls: [urls[0]], bookmark: { _ in bookmark }),
+               "小请求正常入队")
+        expect(try queue.claimNext()?.sources.first?.bookmarkData == bookmark, "小请求保留原书签")
+
+        let existing = fixtures.appendingPathComponent("basic.zip")
+        expect(try queue.enqueueSelection(.extractHere, urls: [existing]), "真实文件使用默认书签构建")
+        let bookmarkData = try queue.claimNext()?.sources.first?.bookmarkData
+        expect(bookmarkData?.isEmpty == false, "默认构建保存真实的 minimal bookmark")
+
+        let longPaths = (0..<FinderTaskQueue.maxSources).map {
+            fixtures.appendingPathComponent(String(repeating: "tail/", count: 550) + "\($0).txt")
+        }
+        do {
+            try queue.enqueueSelection(.compressZip, urls: longPaths, bookmark: { _ in bookmark })
+            expect(false, "路径自身超限时应拒绝入队")
+        } catch FinderTaskQueueError.tooLarge {
+            expect(true, "移除书签后仍验证队列编码上限")
+        }
+        expect(try queue.claimNext() == nil, "超限重试失败不会留下半条请求")
+    } catch { expect(false, "多选书签大小降级", "\(error)") }
 }
 
 private func testQueuePublishAndClaim() {
@@ -197,6 +343,9 @@ private func testWorkerRunsOperations() {
         let existing = root.appendingPathComponent("说明.txt")
         let keep = Data("keep existing".utf8)
         try keep.write(to: existing)
+        let existingNested = root.appendingPathComponent("照片/城市/001.jpg")
+        try fm.createDirectory(at: existingNested.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try keep.write(to: existingNested)
         let fileA = root.appendingPathComponent("work-a.txt")
         let fileB = root.appendingPathComponent("work-b.txt")
         try Data("A".utf8).write(to: fileA)
@@ -235,12 +384,14 @@ private func testWorkerRunsOperations() {
                 expect(statuses[request.id]?.state == .succeeded, "\(request.operation.rawValue) 成功")
                 expect(statuses[request.id]?.fraction == 1, "成功任务的进度完成")
             }
-            expect(outcomes[requests[0].id]?.skippedFiles == 1, "解压到此处计数同名跳过")
+            expect(outcomes[requests[0].id]?.skippedFiles == 2, "解压到此处计数同名跳过，包括已有目录内的文件")
             expect(statuses[requests[0].id]?.outputNames == [], "解压到此处不报告跳转产物")
             expect(statuses[requests[1].id]?.outputNames == ["new-folder"], "解到文件夹回传产物名称")
             expect(statuses[requests[3].id]?.outputNames.count == 2, "分别压缩回传两个产物")
         }
         expect(try Data(contentsOf: existing) == keep, "解压到此处保留旧文件")
+        expect(try Data(contentsOf: existingNested) == keep, "合并已有目录时保留嵌套旧文件")
+        expect(fm.fileExists(atPath: root.appendingPathComponent("照片/002.jpg").path), "合并已有目录时写入新文件")
         expect(fm.fileExists(atPath: root.appendingPathComponent("new-folder/说明.txt").path), "新文件夹真实解压")
         let outputs = try fm.contentsOfDirectory(atPath: root.path)
         expect(outputs.contains("work-a.zip") && outputs.contains("work-a 2.zip") && outputs.contains("work-b.zip"),
@@ -250,6 +401,108 @@ private func testWorkerRunsOperations() {
             expect(try InProcessArchive.list(output).map(\.path) == ["work-a.txt"], "真正生成可读 7Z")
         }
     } catch { expect(false, "队列执行测试", "\(error)") }
+}
+
+private func testWorkerCancelsRealProcesses() {
+    print("访达队列 · 取消真实 tar / 7zz 并清理暂存")
+    let fm = FileManager.default
+    let root = fixtures.appendingPathComponent("finder-task-cancel-live")
+    let inputs = root.appendingPathComponent("inputs")
+    let source = inputs.appendingPathComponent("large-input")
+    let archive = root.appendingPathComponent("large.tar")
+    do {
+        try fm.createDirectory(at: inputs, withIntermediateDirectories: true)
+        try makeLargeCancellationFixture(at: source)
+        try Tar.create(at: archive, from: [source], format: "tar")
+
+        try MainActor.assumeIsolated {
+            let ledger = FormalWriteLedger.shared
+            ledger.reset()
+            defer { ledger.reset() }
+            let model = ArchiveModel()
+            var operations: [(FinderTaskRequest.Operation, URL, URL)] = [
+                (.extractHere, archive, root.appendingPathComponent(source.lastPathComponent)),
+                (.extractToFolder, archive, root.appendingPathComponent("large"))
+            ]
+            if SevenZip.isAvailable {
+                operations.append((.compressSevenZip, source, source.appendingPathExtension("7z")))
+            }
+            for (operation, input, output) in operations {
+                ledger.reset()
+                let queue = newFinderQueue()
+                let request = makeFinderRequest(operation, urls: [input])
+                try queue.enqueue(request)
+                let worker = FinderTaskWorker(queue: queue, ledger: ledger, askPassword: { _, _ in nil },
+                    feedback: { _, _, _ in }, activity: { model.finderJob = $0 }, log: { _ in })
+                model.cancelFinderTask = { worker.cancelCurrent() }
+                var drained = false
+                Task {
+                    await worker.drain()
+                    drained = true
+                }
+                let running = waitUntil(6, interval: 0.001) {
+                    guard let id = model.finderJob?.id else { return false }
+                    return TaskRegistry.hasProcess(for: id)
+                }
+                expect(running, "\(operation.rawValue) 的真实引擎进程与任务卡使用同一 ID")
+                let job = model.finderJob
+                expect(job?.id != nil && job?.id != request.id, "子进程 ID 独立于持久化请求")
+                expect(job?.detail == input.lastPathComponent, "任务卡显示当前源文件")
+                if operation == .compressSevenZip {
+                    expect(waitUntil(5, interval: 0.001, { model.finderJob?.fraction != nil }),
+                           "真实 7zz 进度抵达访达任务卡")
+                }
+                if operation == .extractToFolder {
+                    let coordinator = TerminationCoordinator()
+                    coordinator.host = model
+                    coordinator.ask = { .cancelAndQuit }
+                    coordinator.defersPrompt = false
+                    expect(coordinator.requestTermination() == .terminateLater, "⌘Q 等待正在解压的访达任务")
+                    expect(coordinator.state == .cancelling, "取消并退出通过模型取消访达进程")
+                    expect(waitUntil(8, { drained && coordinator.terminateCount == 1 }), "收尾和回执完成后退出")
+                    model.resumeAfterAbortedTermination()
+                } else {
+                    model.cancelFinderTask?()
+                    expect(waitUntil(8, { drained }), "进度卡取消后执行器收尾")
+                }
+                expect(try queue.receipt(for: request.id)?.state == .cancelled, "真实进程取消写入取消回执")
+                expect(ledger.isEmpty && model.finderJob == nil && worker.currentJob == nil,
+                       "取消后释放账本并移除进度卡")
+                expect(job.map { !TaskRegistry.hasProcess(for: $0.id) } == true, "退出后的子进程不再登记")
+                expect(!fm.fileExists(atPath: output.path), "取消不发布本项的半成品")
+                let siblings = try fm.contentsOfDirectory(atPath: output.deletingLastPathComponent().path)
+                expect(!siblings.contains { $0.hasPrefix(".rrzip-") || $0.hasPrefix("..rrzip-") },
+                       "取消清理归档暂存文件和目录")
+            }
+        }
+    } catch { expect(false, "真实访达进程取消", "\(error)") }
+}
+
+private func testWorkerCancelsPasswordPrompt() {
+    guard SevenZip.isAvailable else { return }
+    print("访达队列 · 取消暂停等待密码的任务")
+    let queue = newFinderQueue()
+    let request = makeFinderRequest(.extractToFolder, urls: [fixtures.appendingPathComponent("secret.7z")])
+    MainActor.assumeIsolated {
+        do {
+            try queue.enqueue(request)
+            let model = ArchiveModel()
+            let ledger = FormalWriteLedger()
+            let worker = FinderTaskWorker(queue: queue, ledger: ledger,
+                                          askPassword: { await model.askPassword(for: $0, wrong: $1) },
+                                          feedback: { _, _, _ in }, log: { _ in })
+            var drained = false
+            Task {
+                await worker.drain()
+                drained = true
+            }
+            expect(waitUntil(8, { model.passwordRequest != nil }), "加密归档打开真实模型密码提示")
+            worker.cancelCurrent()
+            expect(waitUntil(8, { drained }), "取消终止等待密码的访达任务")
+            expect(model.passwordRequest == nil && ledger.isEmpty, "取消只需关闭当前任务的密码提示并注销写入")
+            expect(try queue.receipt(for: request.id)?.state == .cancelled, "等待密码取消写入终态回执")
+        } catch { expect(false, "取消暂停等待密码的任务", "\(error)") }
+    }
 }
 
 private func testWorkerPasswordAndQuit() {

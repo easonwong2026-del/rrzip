@@ -2,7 +2,7 @@
 
 ## 目标与边界
 
-Finder 扩展继续识别选择项、构建菜单和接收点击。压缩、解压、密码、进度、取消及退出收尾由主程序执行。现有 App 服务和 Finder 扩展分别执行任务，本阶段只确定协议与迁移顺序。
+Finder 扩展识别选择项、构建菜单并投递任务。压缩、解压、密码、进度、取消及退出收尾由主程序执行。App 服务仍作为 Finder 扩展不可用时的兼容入口。
 
 ## 方案比较
 
@@ -23,7 +23,7 @@ Finder 扩展已能根据 appex 路径定位主程序。发布一条请求后，
 | 记录 | 字段 |
 | --- | --- |
 | 请求 | `version`、`id`、`createdAt`、`operation`、`sources`、`destination`、`conflictPolicy` |
-| 文件引用 | 签名版用文件选择产生的 bookmark data 和显示名。ad-hoc 过渡可使用本机绝对路径，由主程序重新验证。 |
+| 文件引用 | 路径、显示名和可选的最小书签。书签使整条请求超出队列上限时，重试只携带已校验的路径。 |
 | 操作 | `extractHere`、`extractToFolder`、`compressZip`、`compressSevenZip`、`compressEach`。扩展只提交白名单操作。 |
 | 目标 | 可选的已授权目录引用，或由主程序按原目录和该操作的规则计算。解压到已有目录时默认跳过同名文件，压缩输出重名时自动改名。 |
 | 回执 | `version`、`id`、`state`、`updatedAt`、`completedCount`、`totalCount`、可选 `fraction`、`errorCode`、`message`、产物显示名。 |
@@ -32,7 +32,7 @@ Finder 扩展已能根据 appex 路径定位主程序。发布一条请求后，
 - 同一 UUID 在待处理、运行和终态中只能受理一次。启动后将上次遗留的已领取任务标为 `interrupted`，提示检查结果，再由用户发起新请求，避免重复写入。
 - 以 30 秒无受理回执作为启动异常提示，排队文件保留 10 分钟；超时后写 `expired`。已经运行的任务没有统一时限，大归档由用户主动取消，结束后保留回执 24 小时供扩展或主程序读取。
 - 回执阶段为 `queued`、`running`、`needsPassword`、`succeeded`、`failed`、`cancelled`、`expired` 或 `interrupted`。退出接管时，新请求记录 `appQuitting` 并留在终态，已受理任务遵循主程序的等待与取消规则。
-- 主程序按 UUID 接入任务队列与正式写入协调。进度更新合并到每秒最多四次，终态立即写出。Finder 可在短时间内读取回执，任务离开 Finder 生命周期后仍由主程序报告。
+- 主程序以独立的进程内任务 ID 登记引擎和正式写入。任务卡显示 7-Zip 报告的百分比，tar 使用不确定进度。队列在项目完成及状态切换时写回执。卡片取消和取消退出都会终止当前引擎并清理暂存，已经发布的项目保留。
 - 无权限返回 `accessDenied`，沙盒书签失效时请用户在主程序重选文件或目标目录。其他错误沿用归档安全预检、密码、占用及取消语义。密码只由主程序交互获取，队列、回执和日志均不保存密码。
 
 App Group 共享的是队列数据，文件访问仍依赖系统授予的选择权限。跨进程书签和持久化书签的授权行为不同，必须在 macOS 14 及较新版本中验证 Finder 选择所得授权能否被主程序使用；授权不足时在主程序重新选择。[Accessing Files from the macOS App Sandbox](https://developer.apple.com/documentation/security/accessing-files-from-the-macos-app-sandbox)

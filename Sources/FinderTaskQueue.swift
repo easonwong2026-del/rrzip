@@ -96,6 +96,26 @@ struct FinderTaskQueue: Sendable {
     var status: URL { root.appendingPathComponent("status", isDirectory: true) }
 
     @discardableResult
+    func enqueueSelection(_ operation: FinderTaskRequest.Operation, urls: [URL],
+                          bookmark: (URL) -> Data? = { try? $0.bookmarkData(options: .minimalBookmark) }) throws -> Bool {
+        guard !urls.isEmpty, urls.count <= Self.maxSources else { throw FinderTaskQueueError.tooLarge }
+        let request = FinderTaskRequest(operation: operation, sources: urls.map {
+            FinderFileRef(url: $0, bookmarkData: bookmark($0))
+        })
+        do {
+            return try enqueue(request)
+        } catch FinderTaskQueueError.tooLarge where request.sources.contains(where: { $0.bookmarkData != nil }) {
+            let paths = request.sources.map { source in
+                var ref = source
+                ref.bookmarkData = nil
+                return ref
+            }
+            return try enqueue(FinderTaskRequest(id: request.id, createdAt: request.createdAt,
+                                                 operation: operation, sources: paths))
+        }
+    }
+
+    @discardableResult
     func enqueue(_ request: FinderTaskRequest) throws -> Bool {
         try validate(request)
         let bytes = try JSONEncoder().encode(request)
