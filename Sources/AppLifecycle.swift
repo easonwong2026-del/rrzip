@@ -18,6 +18,33 @@
 
 import Foundation
 
+/// 不依赖窗口标题或系统语言，优先恢复已登记的主窗口。
+enum MainWindowRecovery {
+    static let sceneID = "main"
+    static let mainID = "com.rrzip.window.main"
+    static let settingsID = "com.rrzip.window.settings"
+    private static let swiftUISettingsID = "com_apple_SwiftUI_Settings_window"
+
+    struct Candidate {
+        let identifier: String?
+        let canBecomeMain: Bool
+        var isSettings = false
+    }
+
+    static func choose(registered: Int?, candidates: [Candidate]) -> Int? {
+        func isSettings(_ candidate: Candidate) -> Bool {
+            candidate.isSettings || candidate.identifier == settingsID || candidate.identifier == swiftUISettingsID
+        }
+        if let registered, candidates.indices.contains(registered), !isSettings(candidates[registered]) {
+            return registered
+        }
+        let eligible = candidates.indices.filter { candidates[$0].canBecomeMain && !isSettings(candidates[$0]) }
+        return eligible.first {
+            candidates[$0].identifier == mainID || candidates[$0].identifier == sceneID
+        } ?? eligible.first
+    }
+}
+
 /// 退出流程对模型的全部要求。实现见 ArchiveModel 的扩展。
 @MainActor
 protocol TerminationHost: AnyObject {

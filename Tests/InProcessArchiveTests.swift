@@ -5,6 +5,7 @@
 //  进程内读归档：Quick Look 扩展起不了子进程，改走 libarchive。
 //  这里拿它和 bsdtar 的结果对齐，保证两条路读同一份包得到同样的东西。
 
+import AppKit
 import Foundation
 
 /// 与 `Tar.list` 逐项对齐：路径、大小、目录判定
@@ -109,6 +110,7 @@ func runInProcessArchiveTests() {
     testInProcessEncryptedZip()
     testInProcessMetadata()
     testZipAndSevenZipLinkMetadata()
+    testPreviewProviderCompletion()
 }
 
 private func testInProcessEncryptedZip() {
@@ -203,4 +205,36 @@ private func testZipAndSevenZipLinkMetadata() {
             expect(true, "\(format) 可核实的包内软链通过预检")
         }
     } catch { expect(false, "真实 ZIP/7z 软链元数据", "\(error)") }
+}
+
+private func testPreviewProviderCompletion() {
+    print("快速查看 · 取消与完成回调")
+    MainActor.assumeIsolated {
+        _ = NSApplication.shared
+        let provider = PreviewProvider(nibName: nil, bundle: nil)
+        var first = 0
+        var second = 0
+        var allOnMain = true
+        provider.preparePreviewOfFile(at: fixtures.appendingPathComponent("basic.zip")) { _ in
+            allOnMain = allOnMain && Thread.isMainThread
+            first += 1
+        }
+        provider.preparePreviewOfFile(at: fixtures.appendingPathComponent("bundle.tgz")) { _ in
+            allOnMain = allOnMain && Thread.isMainThread
+            second += 1
+        }
+        expect(waitUntil(10, { first > 0 && second > 0 }), "替换预览后两个请求都交付完成回调")
+        expect(first == 1 && second == 1 && allOnMain, "快速查看给每个请求在主线程回调一次")
+
+        var released: PreviewProvider? = PreviewProvider(nibName: nil, bundle: nil)
+        weak var weakProvider: PreviewProvider?
+        weakProvider = released
+        var called = false
+        released?.preparePreviewOfFile(at: fixtures.appendingPathComponent("bundle.tgz")) { _ in
+            called = Thread.isMainThread
+        }
+        released = nil
+        expect(weakProvider == nil, "后台准备不保留已释放的控制器")
+        expect(waitUntil(10, { called }), "控制器释放后仍完成系统回调")
+    }
 }

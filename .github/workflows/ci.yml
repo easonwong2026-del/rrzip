@@ -38,11 +38,11 @@ jobs:
             done
             exit "$status"
           fi
-          # Sprint 3/4 完整套件（含 7zz）：941 项断言，原基线 782 项。
+          # Sprint 5 完整套件（含 7zz）：961 项断言，原基线 941 项。
           count=$(grep -o '全部通过（[0-9]* 项）' /tmp/test.log | grep -o '[0-9]*' | head -1)
           echo "测试通过 $count 项"
-          if [ "${count:-0}" -lt 941 ]; then
-            echo "::error::测试数 $count 低于 Sprint 3/4 基线 941"
+          if [ "${count:-0}" -lt 961 ]; then
+            echo "::error::测试数 $count 低于 Sprint 5 基线 961"
             exit 1
           fi
 
@@ -61,9 +61,19 @@ jobs:
 
       - name: 并发严格检查
         run: |
-          # 输出落文件再转成 ::error::，失败时不用抓日志就能看到具体哪一行
-          if ! xcrun swiftc -typecheck -swift-version 5 -strict-concurrency=complete \
-                -target arm64-apple-macos14.0 Sources/*.swift > /tmp/check.log 2>&1; then
+          source scripts/sources.sh
+          flags=(-typecheck -swift-version 5 -strict-concurrency=complete -warnings-as-errors
+                 -target arm64-apple-macos14.0)
+          check() {
+            echo "==> $1"
+            shift
+            xcrun swiftc "${flags[@]}" "$@"
+          }
+          if ! (
+            check rrzip Sources/*.swift &&
+            check ArchivePreview -DARCHIVE_EXTENSION "${ARCHIVE_CORE[@]}" "${QUICKLOOK_CORE[@]}" &&
+            check ArchiveFinder -DARCHIVE_EXTENSION "${ARCHIVE_CORE[@]}" "${SHARED_STATE[@]}" "${FINDER_CORE[@]}" FinderSync/FinderSync.swift
+          ) > /tmp/check.log 2>&1; then
             tail -80 /tmp/check.log | while IFS= read -r line; do
               echo "::error::$line"
             done

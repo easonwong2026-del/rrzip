@@ -24,10 +24,12 @@ SHARED_STATE=(
     Sources/UniquePath.swift
 )
 
-# 只有主程序和测试用得到的设置解析层。
-# 扩展不需要（它们不读解压位置），所以不并进 SHARED_STATE；
-# 但测试要跑真实行为，Model.swift 依赖它，这里必须列进来。
+# 主程序与测试共用的模型、界面流程和写入协调，扩展不编入这些文件。
 APP_ONLY=(
+    Sources/ArchiveWriter.swift
+    Sources/ArchiveIndex.swift
+    Sources/PayloadCache.swift
+    Sources/ArchiveStash.swift
     Sources/ExtractDestination.swift
     Sources/CacheMaintenance.swift
     # 退出状态机：不碰 AppKit，测试直接跑真的状态迁移
@@ -46,3 +48,6 @@ FINDER_CORE=(
     FinderSync/JobKit.swift
     FinderSync/JobRunner.swift
 )
+
+# 扩展入口也编入测试，用真实控制器验证 Quick Look 完成回调。
+QUICKLOOK_CORE=(QuickLook/PreviewProvider.swift)

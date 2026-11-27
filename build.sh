@@ -189,7 +189,7 @@ xcrun swiftc \
     -framework AppKit -framework QuickLookUI -larchive \
     -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$APEXPATH/Contents/MacOS/ArchivePreview" \
-    "${ARCHIVE_CORE[@]}" QuickLook/PreviewProvider.swift
+    "${ARCHIVE_CORE[@]}" "${QUICKLOOK_CORE[@]}"
 
 strip -x "$APEXPATH/Contents/MacOS/ArchivePreview"
 codesign --force --sign - --entitlements Entitlements/ArchivePreview.entitlements "$APEXPATH" >/dev/null

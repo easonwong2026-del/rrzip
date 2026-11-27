@@ -170,37 +170,33 @@ func testExtractDestinationSetting() {
 
 /// 设置页切换工作模式 = 手动切换，冷却期必须生效
 func testWorkspaceModeFromSettings() {
-    do {
-        print("设置页切工作模式")
-        MainActor.assumeIsolated {
-            UserDefaults.standard.removeObject(forKey: "rrzip.workspaceMode")
-            let model = ArchiveModel()
-            let collapse = Layout.autoCollapseWidth
+    print("设置页切工作模式")
+    MainActor.assumeIsolated {
+        UserDefaults.standard.removeObject(forKey: "rrzip.workspaceMode")
+        let model = ArchiveModel()
+        let collapse = Layout.autoCollapseWidth
 
-            // 先让自动模式建立一帧宽度基准
-            _ = model.autoMode(forWidth: collapse - 100)
-            model.selectWorkspaceModeFromSettings(.full)
-            expect(model.workspaceMode == .full, "设置页切到完整模式")
-            expect(UserDefaults.standard.string(forKey: "rrzip.workspaceMode") == "full",
-                   "切换后立即落盘")
+        // 先让自动模式建立一帧宽度基准
+        _ = model.autoMode(forWidth: collapse - 100)
+        model.selectWorkspaceModeFromSettings(.full)
+        expect(model.workspaceMode == .full, "设置页切到完整模式")
+        expect(UserDefaults.standard.string(forKey: "rrzip.workspaceMode") == "full",
+               "切换后立即落盘")
 
-            // 冷却期内自动模式不许抢：这正是旧版直接绑 workspaceMode 的洞
-            expect(model.autoMode(forWidth: collapse - 200) == nil,
-                   "设置页切换后冷却期内不被自动模式覆盖")
+        // 冷却期内自动模式不许抢：这正是旧版直接绑 workspaceMode 的洞
+        expect(model.autoMode(forWidth: collapse - 200) == nil,
+               "设置页切换后冷却期内不被自动模式覆盖")
 
-            // 冷却期一过，自动模式恢复工作（方向感知照旧）
-            let later = Date().addingTimeInterval(301)
-            _ = model.autoMode(forWidth: collapse - 100, now: later)
-            expect(model.autoMode(forWidth: collapse - 50, now: later) == .compact,
-                   "冷却期过后自动收起仍然有效")
+        // 冷却期一过，自动模式恢复工作（方向感知照旧）
+        let later = Date().addingTimeInterval(301)
+        _ = model.autoMode(forWidth: collapse - 100, now: later)
+        expect(model.autoMode(forWidth: collapse - 50, now: later) == .compact,
+               "冷却期过后自动收起仍然有效")
 
-            // 切到当前已是的模式也算一次手动操作，仍然钉住
-            model.setWorkspaceMode(.compact, manual: false)
-            model.selectWorkspaceModeFromSettings(.compact)
-            expect(model.autoMode(forWidth: collapse + 100) == nil, "选同一个模式也进入冷却期")
-        }
-    } catch {
-        expect(false, "设置页切工作模式 抛出异常", "\(error)")
+        // 切到当前已是的模式也算一次手动操作，仍然钉住
+        model.setWorkspaceMode(.compact, manual: false)
+        model.selectWorkspaceModeFromSettings(.compact)
+        expect(model.autoMode(forWidth: collapse + 100) == nil, "选同一个模式也进入冷却期")
     }
 }
 
@@ -288,48 +284,44 @@ func testFinderConfigCompat() {
 
 /// 清理缓存与真实预览交错：解压在飞时不许动
 func testCacheInFlightPreview() {
-    do {
-        print("清理缓存 · 预览交错")
-        MainActor.assumeIsolated {
-            ScratchUsage.shared.reset()
-            UserDefaults.standard.removeObject(forKey: "rrzip.workspaceMode")
+    print("清理缓存 · 预览交错")
+    MainActor.assumeIsolated {
+        ScratchUsage.shared.reset()
+        UserDefaults.standard.removeObject(forKey: "rrzip.workspaceMode")
 
-            let model = ArchiveModel()
-            let zip = fixtures.appendingPathComponent("basic.zip")
-            model.open(url: zip)
-            guard waitUntil(15, { model.current != nil }) else {
-                expect(false, "归档没打开，后续无从验证")
-                return
-            }
-            guard let entry = model.current?.entries.first(where: { $0.path == "说明.txt" }) else {
-                expect(false, "样例包里找不到 说明.txt")
-                return
-            }
-
-            var payload: URL?
-            model.payloadURL(for: entry) { payload = $0 }
-
-            // 关键交错：payloadURL 刚派发、解压还在跑，这时候点「清理缓存」。
-            // 旧实现只判 job != nil，会把这个临时目录整个删掉
-            expect(ScratchUsage.shared.isWorking, "预览解压已登记为进行中")
-            let during = model.clearCaches()
-            expect(during.blocked, "预览解压期间清理被拒绝")
-            expect(during.freedBytes == 0, "被拒绝时没有删除任何东西")
-
-            guard waitUntil(20, { payload != nil }) else {
-                expect(false, "预览文件没有产出")
-                return
-            }
-            let url = payload!
-            expect(FileManager.default.fileExists(atPath: url.path), "预览文件还在")
-            let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-            expect(text.contains("hello"), "预览文件内容完整", text)
-
-            expect(waitUntil(5, { !ScratchUsage.shared.isWorking }), "任务结束后登记被释放")
-            ScratchUsage.shared.reset()
+        let model = ArchiveModel()
+        let zip = fixtures.appendingPathComponent("basic.zip")
+        model.open(url: zip)
+        guard waitUntil(15, { model.current != nil }) else {
+            expect(false, "归档没打开，后续无从验证")
+            return
         }
-    } catch {
-        expect(false, "清理缓存·预览交错 抛出异常", "\(error)")
+        guard let entry = model.current?.entries.first(where: { $0.path == "说明.txt" }) else {
+            expect(false, "样例包里找不到 说明.txt")
+            return
+        }
+
+        var payload: URL?
+        model.payloadURL(for: entry) { payload = $0 }
+
+        // 关键交错：payloadURL 刚派发、解压还在跑，这时候点「清理缓存」。
+        // 旧实现只判 job != nil，会把这个临时目录整个删掉
+        expect(ScratchUsage.shared.isWorking, "预览解压已登记为进行中")
+        let during = model.clearCaches()
+        expect(during.blocked, "预览解压期间清理被拒绝")
+        expect(during.freedBytes == 0, "被拒绝时没有删除任何东西")
+
+        guard waitUntil(20, { payload != nil }) else {
+            expect(false, "预览文件没有产出")
+            return
+        }
+        let url = payload!
+        expect(FileManager.default.fileExists(atPath: url.path), "预览文件还在")
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        expect(text.contains("hello"), "预览文件内容完整", text)
+
+        expect(waitUntil(5, { !ScratchUsage.shared.isWorking }), "任务结束后登记被释放")
+        ScratchUsage.shared.reset()
     }
 }
 
@@ -454,7 +446,7 @@ func testCacheWhilePreviewVisible() {
         let next = folderB.appendingPathComponent("带 空格.txt")
         expect(fm.fileExists(atPath: next.path), "新条目的副本已解出")
         ScratchUsage.shared.hold(next)
-        let third = CacheMaintenance.purge([root], busy: false)
+        _ = CacheMaintenance.purge([root], busy: false)
         expect(!fm.fileExists(atPath: shown.path), "切走之后旧副本可以清掉")
         expect(fm.fileExists(atPath: next.path), "新条目的副本保留")
 
