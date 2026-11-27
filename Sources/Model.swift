@@ -154,7 +154,8 @@ final class ArchiveModel: ObservableObject {
     var isCompactMode: Bool { workspaceMode == .compact }
     /// 每次重新点同一行就自增，强制预览刷新
     @Published private(set) var previewToken: Int = 0
-    @Published var isLoading = false
+    @Published private(set) var isLoading = false
+    func setArchiveEditing(_ editing: Bool) { isLoading = editing }
     @Published var status: String = "拖入一个压缩包，或按 ⌘O 打开"
     @Published var errorMessage: String?
     /// 一次性浮条提示：不打断操作，3 秒后自动消失。
@@ -883,7 +884,7 @@ final class ArchiveModel: ObservableObject {
                 }
             }
         } onCancel: { [weak self] in
-            Task { @MainActor in self?.cancelPasswordPrompt(request.id) }
+            Task { @MainActor [weak self] in self?.cancelPasswordPrompt(request.id) }
         }
     }
 

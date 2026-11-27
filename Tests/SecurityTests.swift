@@ -74,13 +74,15 @@ private func testUniquePathCompoundExtension() {
 }
 
 private func testFinderServiceCompressMergedEmptyArraySafe() {
-    print("健壮性 · FinderService.compressMerged 空数组不崩溃")
-    let task = FinderService.compressMerged([])
-    var result: FinderCompressResult?
-    Task { result = await task.value }
-    expect(waitUntil(5, { result != nil }), "空数组合并压缩应立即返回结果")
-    expect(result?.failure != nil, "空数组合并压缩应返回失败原因而非越界崩溃")
-    expect(FormalWriteLedger.shared.count == 0, "空数组不应泄漏 FormalWriteLedger 计数")
+    MainActor.assumeIsolated {
+        print("健壮性 · FinderService.compressMerged 空数组不崩溃")
+        let task = FinderService.compressMerged([])
+        var result: FinderCompressResult?
+        Task { result = await task.value }
+        expect(waitUntil(5, { result != nil }), "空数组合并压缩应立即返回结果")
+        expect(result?.failure != nil, "空数组合并压缩应返回失败原因而非越界崩溃")
+        expect(FormalWriteLedger.shared.count == 0, "空数组不应泄漏 FormalWriteLedger 计数")
+    }
 }
 
 @MainActor

@@ -248,6 +248,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var mainWindow: NSWindow?
     fileprivate static weak var settingsWindow: NSWindow?
 
+    private static let finderTaskWorker = FinderTaskWorker(
+        askPassword: { url, wrong in
+            guard let model = AppDelegate.model else { return nil }
+            NSApp.activate(ignoringOtherApps: true)
+            AppDelegate.restoreMainWindow(in: NSApp)
+            return await model.askPassword(for: url, wrong: wrong)
+        },
+        feedback: { receipt, outcome, operation in
+            if receipt.state == .running {
+                AppDelegate.model?.notice = "访达\(operation.verb) · \(receipt.completedCount)/\(receipt.totalCount) 项"
+            } else if let message = receipt.message {
+                AppDelegate.model?.notice = message
+            }
+            if receipt.state == .succeeded || receipt.state == .failed {
+                FinderNotifier.report(outcome, verb: operation.verb,
+                                      reveal: operation == .extractHere ? nil : outcome.outputs.first)
+            }
+        },
+        onError: { error in AppDelegate.model?.notice = "访达任务队列：\(error.localizedDescription)" }
+    )
+
+    private static func scanFinderTasks() {
+        guard model != nil else { return }
+        finderTaskWorker.start()
+    }
+
     /// 冷启动时收到的文件。此时窗口还没建好、`model` 仍是 nil，
     /// 直接调 `.open` 会被可选链吞掉——表现就是「右键用 rrzip 打开，毫无反应」。
     /// 先存下来，等 ContentView 上屏后由 `attach` 取走。
@@ -259,6 +285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Self.model = model
         // 退出协调要能问队列里还有多少活、能取消、能在排空时收到回调
         TerminationCoordinator.shared.host = model
+        scanFinderTasks()
         // 访达那边转交过来的结果（跳过 N 个、解压失败），启动时补一句
         if let notice = PendingNotice.take() {
             model.notice = "\(notice.title) · \(notice.message)"
@@ -313,6 +340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSUpdateDynamicServices()
         requestNotificationPermissionIfNeeded()
         wireTermination()
+        Self.scanFinderTasks()
     }
 
     /// 退出协调的界面部分：状态机在 TerminationCoordinator，这里只提供
@@ -373,13 +401,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// - 有任务：先挂住（terminateLater），弹窗问完、队列收尾后再 reply。
     ///   连续按 ⌘Q 只会走到状态机里已有的那一次，不会重复弹窗。
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        TerminationCoordinator.shared.requestTermination() == .terminateNow
-            ? .terminateNow : .terminateLater
+        guard TerminationCoordinator.shared.requestTermination() == .terminateNow else { return .terminateLater }
+        FormalWriteLedger.shared.setGate(.terminating)
+        return .terminateNow
     }
 
-    /// 访达那边做完任务后只是「唤起 app」，不带文件参数，
-    /// `application(_:open:)` 不会触发。激活时才取结果最稳。
+    func applicationWillTerminate(_ notification: Notification) {
+        Self.finderTaskWorker.stopWatching()
+    }
+
+    /// 激活时补扫队列，也取旧版扩展可能留下的通知。
     func applicationDidBecomeActive(_ notification: Notification) {
+        Self.scanFinderTasks()
         Task { @MainActor in
             guard let notice = PendingNotice.take(), let model = AppDelegate.model else { return }
             model.notice = "\(notice.title) · \(notice.message)"

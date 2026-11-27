@@ -186,7 +186,6 @@ struct ContentView: View {
     var passwordPrompt: some View {
         let request = model.passwordRequest
         return Color.clear
-            .id(request?.id)
             .alert(request?.isRetry == true ? "密码不正确" : "该压缩包已加密",
                    isPresented: Binding(
                     get: { request != nil && model.passwordRequest?.id == request?.id },
@@ -207,6 +206,7 @@ struct ContentView: View {
             } message: { item in
                 Text("\(item.archive.lastPathComponent)\n输入密码后即可浏览与解压。")
             }
+            .id(request?.id)
             .onChange(of: request?.id) { _, _ in passwordInput = "" }
     }
 

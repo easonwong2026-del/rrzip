@@ -223,7 +223,7 @@ xcrun swiftc \
     -target arm64-apple-macos${MIN_MACOS} \
     -module-name ArchiveFinder \
     -DARCHIVE_EXTENSION \
-    -framework Cocoa -framework FinderSync -framework UserNotifications -larchive \
+    -framework Cocoa -framework FinderSync -larchive \
     -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$FSXPATH/Contents/MacOS/ArchiveFinder" \
     "${ARCHIVE_CORE[@]}" "${SHARED_STATE[@]}" "${FINDER_CORE[@]}" \

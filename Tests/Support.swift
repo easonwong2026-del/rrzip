@@ -6,17 +6,28 @@
 
 import Foundation
 
-var failures = 0
-var checks = 0
+private final class TestCounts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var checks = 0
+    private var failures = 0
+
+    func record(_ passed: Bool) {
+        lock.withLock {
+            checks += 1
+            if !passed { failures += 1 }
+        }
+    }
+
+    var total: (checks: Int, failures: Int) {
+        lock.withLock { (checks, failures) }
+    }
+}
+
+private let testCounts = TestCounts()
 
 func expect(_ condition: Bool, _ name: String, _ detail: @autoclosure () -> String = "") {
-    checks += 1
-    if condition {
-        print("  ✓ \(name)")
-    } else {
-        failures += 1
-        print("  ✗ \(name) \(detail())")
-    }
+    testCounts.record(condition)
+    print(condition ? "  ✓ \(name)" : "  ✗ \(name) \(detail())")
 }
 
 let fixtures = URL(fileURLWithPath: CommandLine.arguments[1])
@@ -43,6 +54,7 @@ func stashTempDirs() -> Set<String> {
 }
 
 func finish() {
+    let (checks, failures) = testCounts.total
     print("")
     print(failures == 0 ? "全部通过（\(checks) 项）" : "失败 \(failures)/\(checks)")
     exit(failures == 0 ? 0 : 1)

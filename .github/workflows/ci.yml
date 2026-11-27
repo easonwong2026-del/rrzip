@@ -38,11 +38,11 @@ jobs:
             done
             exit "$status"
           fi
-          # Sprint 5 完整套件（含 7zz）：961 项断言，原基线 941 项。
+          # Sprint 6 完整套件（含 7zz）：1032 项断言，原基线 961 项。
           count=$(grep -o '全部通过（[0-9]* 项）' /tmp/test.log | grep -o '[0-9]*' | head -1)
           echo "测试通过 $count 项"
-          if [ "${count:-0}" -lt 961 ]; then
-            echo "::error::测试数 $count 低于 Sprint 5 基线 961"
+          if [ "${count:-0}" -lt 1032 ]; then
+            echo "::error::测试数 $count 低于 Sprint 6 基线 1032"
             exit 1
           fi
 

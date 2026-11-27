@@ -94,7 +94,7 @@ final class PreviewProvider: NSViewController, QLPreviewingController {
     /// 结果回主线程再刷表格。
     nonisolated func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
         let completion = PreviewCompletion(handler: handler)
-        Task { @MainActor [weak self] in
+        DispatchQueue.main.async { [weak self] in
             guard let self else { return completion.finish() }
             self.prepare(url, completion: completion)
         }
@@ -110,14 +110,18 @@ final class PreviewProvider: NSViewController, QLPreviewingController {
         subtitleLabel?.stringValue = "正在读取…"
 
         Task { [weak self] in
-            let outcome = await Task.detached(priority: .userInitiated) {
-                Result {
-                    // 扩展内存上限严苛：仅实例化前 300 项，超出只计数。
-                    try InProcessArchive.listSummary(
-                        url, passphrase: nil, limit: 300, isCancelled: { flag.isCancelled }
-                    )
+            let outcome: Result<(entries: [ArchiveEntry], totalCount: Int), Error> =
+                await withCheckedContinuation { continuation in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        let result = Result {
+                            // 扩展内存上限严苛：仅实例化前 300 项，超出只计数。
+                            try InProcessArchive.listSummary(
+                                url, passphrase: nil, limit: 300, isCancelled: { flag.isCancelled }
+                            )
+                        }
+                        continuation.resume(returning: result)
+                    }
                 }
-            }.value
             if !flag.isCancelled { self?.render(outcome) }
             completion.finish()
         }
