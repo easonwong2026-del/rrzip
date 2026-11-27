@@ -2,6 +2,7 @@
 // Copyright (C) 2026 rrzip contributors
 //
 import AppKit
+import Observation
 import AVFoundation
 import ImageIO
 import PDFKit
@@ -9,7 +10,8 @@ import SwiftUI
 
 /// 条目缩略图：按需解压 → 降采样（图片走 ImageIO，PDF 渲染首页）→ 内存缓存。
 @MainActor
-final class ThumbnailStore: ObservableObject {
+@Observable
+final class ThumbnailStore {
     static let shared = ThumbnailStore()
 
     /// 条数与字节上限。设置页要照着这两个数说话，别再各写一遍
@@ -37,14 +39,14 @@ final class ThumbnailStore: ObservableObject {
         version &+= 1
     }
     /// 同 key 并发请求合并：正在渲染时后来的调用者（如悬停卡片）挂入等待列表，不再误返 nil
-    private var inFlight: [String: [(CGImage?) -> Void]] = [:]
-    private var activeRenders = 0
+    @ObservationIgnored private var inFlight: [String: [(CGImage?) -> Void]] = [:]
+    @ObservationIgnored private var activeRenders = 0
     private let maxConcurrentRenders = 4
-    private var pendingRenders: [() -> Void] = []
+    @ObservationIgnored private var pendingRenders: [() -> Void] = []
     /// 渲染失败的键：避免滚动回来时反复解压同一个坏文件
-    private var failed = Set<String>()
+    @ObservationIgnored private var failed = Set<String>()
     /// 只在清理缓存时广播失效。单张结果仅交给等待同一个键的调用者。
-    @Published private(set) var version = 0
+    private(set) var version = 0
 
     private static let imageExts: Set<String> = [
         "png", "jpg", "jpeg", "heic", "heif", "gif", "webp", "tiff", "bmp"
@@ -284,8 +286,8 @@ final class ThumbnailStore: ObservableObject {
 /// 单元格只保存已就绪的请求键，位图由共享缓存管理。
 struct EntryThumbnail: View {
     let entry: ArchiveEntry
-    @ObservedObject var model: ArchiveModel
-    @ObservedObject private var store = ThumbnailStore.shared
+    var model: ArchiveModel
+    private let store = ThumbnailStore.shared
     @State private var readyRequest: String?
     var side: CGFloat = 20
     var corner: CGFloat = 3

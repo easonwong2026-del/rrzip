@@ -13,7 +13,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct HomeView: View {
-    @ObservedObject var model: ArchiveModel
+    var model: ArchiveModel
 
     @State private var quickTargeted = false
     @State private var quickResult: String?

@@ -28,57 +28,26 @@ jobs:
       - name: 下载 7-Zip 引擎
         run: ./scripts/fetch-7zz.sh
 
-      - name: 单元测试
+      - name: 单元测试与断言基线
+        run: ./scripts/check-tests.sh
+
+      - name: 检查视图接线与严格并发
+        run: ./scripts/check-targets.sh 2>&1 | tee /tmp/check.log
+        shell: bash
+
+      - name: 构建 app
         run: |
-          ./scripts/test.sh 2>&1 | tee /tmp/test.log
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            tail -40 /tmp/test.log | while IFS= read -r line; do
+          ./build.sh > /tmp/build.log 2>&1 || {
+            echo "::error::build.sh 失败，以下为最后 25 行"
+            tail -25 /tmp/build.log | while IFS= read -r line; do
               echo "::error::$line"
             done
-            exit "$status"
-          fi
-          # Sprint 6 完整套件（含 7zz）：1042 项断言，原基线 961 项。
-          count=$(grep -o '全部通过（[0-9]* 项）' /tmp/test.log | grep -o '[0-9]*' | head -1)
-          echo "测试通过 $count 项"
-          if [ "${count:-0}" -lt 1042 ]; then
-            echo "::error::测试数 $count 低于 Sprint 6 基线 1042"
             exit 1
-          fi
-
-      # CreateArchiveSheet 曾经定义了两个月却从没挂到界面上，
-      # pendingCreate 设了没人看——编译器不会报，只能靠这条拦住
-      - name: 检查视图接线
-        run: |
-          for v in CreateArchiveSheet BatchSheet TaskCard; do
-            n=$(grep -rn "$v(" Sources/ --include=*.swift | grep -v "struct $v" | wc -l | tr -d ' ')
-            if [ "$n" -lt 1 ]; then
-              echo "::error::$v 定义了但没有调用点，功能是断的"
-              exit 1
-            fi
-            echo "$v 调用点 $n"
-          done
-
-      - name: 并发严格检查
-        run: |
-          source scripts/sources.sh
-          flags=(-typecheck -swift-version 5 -strict-concurrency=complete -warnings-as-errors
-                 -target arm64-apple-macos14.0)
-          check() {
-            echo "==> $1"
-            shift
-            xcrun swiftc "${flags[@]}" "$@"
           }
-          if ! (
-            check rrzip Sources/*.swift &&
-            check ArchivePreview -DARCHIVE_EXTENSION "${ARCHIVE_CORE[@]}" "${QUICKLOOK_CORE[@]}" &&
-            check ArchiveFinder -DARCHIVE_EXTENSION "${ARCHIVE_CORE[@]}" "${SHARED_STATE[@]}" "${FINDER_CORE[@]}" FinderSync/FinderSync.swift
-          ) > /tmp/check.log 2>&1; then
-            tail -80 /tmp/check.log | while IFS= read -r line; do
-              echo "::error::$line"
-            done
-            exit 1
-          fi
+          tail -5 /tmp/build.log
+
+      - name: 校验产物与当前版本发布说明
+        run: ./scripts/verify-bundle.sh
 
       # 失败日志只看得到「exit code 1」，靠这个把尾部贴到 PR 上
       - name: 失败时贴日志
@@ -95,49 +64,6 @@ jobs:
             } > /tmp/ci-body.md
             gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/ci-body.md || true
           done
-
-      - name: 构建 app
-        run: |
-          ./build.sh > /tmp/build.log 2>&1 || {
-            echo "::error::build.sh 失败，以下为最后 25 行"
-            tail -25 /tmp/build.log | while IFS= read -r line; do
-              echo "::error::$line"
-            done
-            exit 1
-          }
-          tail -5 /tmp/build.log
-
-      - name: 校验产物
-        run: |
-          set -e
-          APP=build/rrzip.app
-          test -x "$APP/Contents/MacOS/rrzip"
-          test -x "$APP/Contents/Resources/7zz"
-          test -d "$APP/Contents/PlugIns/ArchivePreview.appex"
-          # 访达扩展必须一起验：v2.10.0 只验了快速查看，扩展构建坏了 CI 也不会红
-          test -d "$APP/Contents/PlugIns/ArchiveFinder.appex"
-          test -x "$APP/Contents/PlugIns/ArchiveFinder.appex/Contents/MacOS/ArchiveFinder"
-          plutil -lint "$APP/Contents/Info.plist"
-          plutil -lint "$APP/Contents/PlugIns/ArchivePreview.appex/Contents/Info.plist"
-          plutil -lint "$APP/Contents/PlugIns/ArchiveFinder.appex/Contents/Info.plist"
-          # 扩展版本号必须跟着主 app 走
-          for key in CFBundleShortVersionString CFBundleVersion; do
-            mainValue=$(/usr/libexec/PlistBuddy -c "Print :$key" "$APP/Contents/Info.plist")
-            for extension in ArchivePreview ArchiveFinder; do
-              extensionValue=$(/usr/libexec/PlistBuddy -c "Print :$key" "$APP/Contents/PlugIns/$extension.appex/Contents/Info.plist")
-              [ "$mainValue" = "$extensionValue" ] || {
-                echo "::error::$extension 的 $key ($extensionValue) 与主 app ($mainValue) 不一致"
-                exit 1
-              }
-            done
-          done
-          main=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
-          codesign --verify --deep --strict "$APP"
-          # dmg 必须是按 app 版本命名的那一份，别拿任意一个 *.dmg 顶数
-          DMG="build/rrzip-${main}.dmg"
-          [ -f "$DMG" ] || { echo "::error::没有产出 $DMG"; exit 1; }
-          hdiutil imageinfo "$DMG" >/dev/null || { echo "::error::$DMG 不是可用的磁盘镜像"; exit 1; }
-          echo "dmg 就绪：$DMG"
 
       - name: 上传 app
         uses: actions/upload-artifact@v4

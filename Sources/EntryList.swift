@@ -678,8 +678,8 @@ func takeKeyboardFocus() {
 
 struct EntryRow: View {
     let entry: ArchiveEntry
-    @ObservedObject var model: ArchiveModel
-    @ObservedObject var hover: HoverCoordinator
+    var model: ArchiveModel
+    var hover: HoverCoordinator
     let selected: Bool
     let showPath: Bool
 
@@ -784,6 +784,12 @@ struct EntryRow: View {
             .foregroundStyle(.red)
             .disabled(model.isNested)
         }
+        .archiveEntryAccessibility(entry, selected: selected)
+        .accessibilityAction { model.activate(entry) }
+        .accessibilityAction(named: Text("选中")) {
+            model.select(entry)
+            takeKeyboardFocus()
+        }
         .help(entry.path)
     }
 }
@@ -792,8 +798,8 @@ struct EntryRow: View {
 
 struct ColumnRow: View {
     let entry: ArchiveEntry
-    @ObservedObject var model: ArchiveModel
-    @ObservedObject var hover: HoverCoordinator
+    var model: ArchiveModel
+    var hover: HoverCoordinator
     let selected: Bool
 
     @State var hovering = false
@@ -848,6 +854,15 @@ struct ColumnRow: View {
             hovering = inside
             if inside { hover.begin(entry, model: model) } else { hover.end() }
         }
+        .archiveEntryAccessibility(entry, selected: selected)
+        .accessibilityAction {
+            if entry.isDirectory { model.jump(to: entry.path) } else { model.activate(entry) }
+            takeKeyboardFocus()
+        }
+        .accessibilityAction(named: Text("选中")) {
+            model.select(entry)
+            takeKeyboardFocus()
+        }
         .help(entry.path)
     }
 }
@@ -856,8 +871,8 @@ struct ColumnRow: View {
 
 struct IconTile: View {
     let entry: ArchiveEntry
-    @ObservedObject var model: ArchiveModel
-    @ObservedObject var hover: HoverCoordinator
+    var model: ArchiveModel
+    var hover: HoverCoordinator
     let selected: Bool
 
     @State var hovering = false
@@ -902,6 +917,12 @@ struct IconTile: View {
         .onHover { inside in
             hovering = inside
             if inside { hover.begin(entry, model: model) } else { hover.end() }
+        }
+        .archiveEntryAccessibility(entry, selected: selected)
+        .accessibilityAction { model.activate(entry) }
+        .accessibilityAction(named: Text("选中")) {
+            model.select(entry)
+            takeKeyboardFocus()
         }
         .help(entry.path)
     }

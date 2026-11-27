@@ -11,8 +11,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
-    @ObservedObject var model: ArchiveModel
-    @StateObject var hover = HoverCoordinator()
+    var model: ArchiveModel
+    @State var hover = HoverCoordinator()
     @FocusState var listFocused: Bool
     @FocusState var searchFocused: Bool
     @State var stashTargeted = false
@@ -41,12 +41,12 @@ struct ContentView: View {
     @State var gridWidth: Double = 0
 
     var body: some View {
-        shell
+        @Bindable var model = model
+        return shell
             .background(Palette.window)
             .overlay { dropOverlay }
             .overlay(alignment: .bottom) { noticeBar }
-            .overlay(alignment: .bottom) { taskOverlay }
-            .animation(.easeOut(duration: 0.18), value: model.job?.title)
+            .overlay(alignment: .bottom) { TaskOverlay(model: model, bottomInset: bottomOverlayInset) }
             .animation(.easeOut(duration: 0.18), value: model.notice)
             .onChange(of: model.notice) { _, newValue in scheduleNoticeClear(newValue) }
             .background(widthReader)
@@ -150,17 +150,6 @@ struct ContentView: View {
 
             Hairline()
             statusBar
-        }
-    }
-
-    @ViewBuilder
-    var taskOverlay: some View {
-        if model.jobVisible, let job = model.job {
-            TaskCard(job: job) { model.cancelJob() }
-                // 选中操作条压在内容区底部，进度卡要整体上移让开它，
-                // 否则「取消任务」按钮正好盖住「删除…」
-                .padding(.bottom, bottomOverlayInset)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
 

@@ -161,15 +161,44 @@ enum FinderJobRunner {
         }
     }
 
+    /// 先在同卷临时目录解压，完成前不写入目标。取消时只删除本次的暂存区。
+    static func extract(_ plan: PlannedExtraction, password: String?, intoNewFolder: Bool,
+                        jobID: UUID?, onProgress: (@Sendable (Double) -> Void)?) throws
+        -> (destination: URL, skipped: Int) {
+        try TaskRegistry.checkCancellation(jobID)
+        let parent = intoNewFolder ? plan.destination.deletingLastPathComponent() : plan.destination
+        let staged = parent.appendingPathComponent(".rrzip-\(UUID().uuidString)", isDirectory: true)
+        guard mkdir(staged.path, intoNewFolder ? 0o777 : 0o700) == 0 else { throw fileError(errno) }
+        defer { try? FileManager.default.removeItem(at: staged) }
+        try ArchiveService.extract(plan.archive, entries: [], to: staged, password: password,
+                                   onConflict: plan.onConflict, jobID: jobID, onProgress: onProgress)
+        try TaskRegistry.checkCancellation(jobID)
+
+        if intoNewFolder {
+            return (try publish(staged, as: plan.destination, directory: true), 0)
+        }
+        let directory = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else { throw fileError(errno) }
+        defer { close(directory) }
+        return (parent, try publishContents(of: staged, into: directory))
+    }
+
     /// 压缩。`each` 为真时每个项目各生成一个包。
     static func compress(_ urls: [URL], format: CompressionFormat, each: Bool) -> JobOutcome {
+        // 无任务 ID 的调用没有取消信号。
+        (try? compress(urls, format: format, each: each, jobID: nil, onProgress: nil)) ?? JobOutcome()
+    }
+
+    static func compress(_ urls: [URL], format: CompressionFormat, each: Bool, jobID: UUID?,
+                         onProgress: (@Sendable (Double) -> Void)?) throws -> JobOutcome {
         var outcome = JobOutcome()
         guard let first = urls.first else { return outcome }
 
         if each {
             for url in urls {
                 let hint = url.deletingPathExtension().lastPathComponent
-                append(compressGroup([url], format: format, nameHint: hint), to: &outcome)
+                append(try compressGroup([url], format: format, nameHint: hint,
+                                         jobID: jobID, onProgress: onProgress), to: &outcome)
             }
         } else {
             let hint: String
@@ -178,7 +207,8 @@ enum FinderJobRunner {
             } else {
                 hint = first.deletingLastPathComponent().lastPathComponent
             }
-            append(compressGroup(urls, format: format, nameHint: hint), to: &outcome)
+            append(try compressGroup(urls, format: format, nameHint: hint,
+                                     jobID: jobID, onProgress: onProgress), to: &outcome)
         }
         return outcome
     }
@@ -193,7 +223,9 @@ enum FinderJobRunner {
     // MARK: 内部
 
     private static func compressGroup(_ urls: [URL], format: CompressionFormat,
-                                      nameHint: String) -> JobOutcome {
+                                      nameHint: String, jobID: UUID?,
+                                      onProgress: (@Sendable (Double) -> Void)?) throws -> JobOutcome {
+        try TaskRegistry.checkCancellation(jobID)
         var outcome = JobOutcome()
         guard let first = urls.first else { return outcome }
 
@@ -207,11 +239,14 @@ enum FinderJobRunner {
         do {
             try ArchiveWriter.writeArchive(at: staged, from: urls,
                                            format: format == .zip ? .zip : .sevenZip,
-                                           password: "", volume: nil)
+                                           password: "", volume: nil, jobID: jobID, onProgress: onProgress)
+            try TaskRegistry.checkCancellation(jobID)
             let output = try publish(staged, as: requested)
             outcome.succeeded = urls.count == 1 ? [first.lastPathComponent] : [output.lastPathComponent]
             outcome.destination = folder
             outcome.outputs = [output]
+        } catch ArchiveError.cancelled {
+            throw ArchiveError.cancelled
         } catch {
             outcome.failed.append(.init(name: requested.lastPathComponent,
                                         reason: error.localizedDescription))
@@ -229,16 +264,46 @@ enum FinderJobRunner {
     }
 
     /// 与临时文件同目录，原子发布；并行任务抢先占名时再选一次。
-    static func publish(_ staged: URL, as requested: URL) throws -> URL {
+    static func publish(_ staged: URL, as requested: URL, directory: Bool = false) throws -> URL {
         for _ in 0..<10 {
-            let output = UniquePath.file(requested)
+            let output = directory ? UniquePath.directory(requested) : UniquePath.file(requested)
             if renamex_np(staged.path, output.path, UInt32(RENAME_EXCL)) == 0 { return output }
             let code = errno
             guard code == EEXIST else {
-                throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+                throw fileError(code)
             }
         }
-        throw ArchiveError.tool("无法为压缩包选定未占用的文件名")
+        throw ArchiveError.tool("无法选定未占用的归档产物名称")
+    }
+
+    private static func fileError(_ code: Int32) -> POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+    }
+
+    /// 只合并真实目录。用已打开的目录描述符发布，避免既有软链或重名改变写入位置。
+    private static func publishContents(of staged: URL, into destination: Int32?) throws -> Int {
+        var skipped = 0
+        for child in try FileManager.default.contentsOfDirectory(at: staged, includingPropertiesForKeys: nil) {
+            let name = child.lastPathComponent
+            if let destination {
+                if renameatx_np(AT_FDCWD, child.path, destination, name, UInt32(RENAME_EXCL)) == 0 { continue }
+                let code = errno
+                guard code == EEXIST else { throw fileError(code) }
+            }
+            var info = stat()
+            guard lstat(child.path, &info) == 0 else { throw fileError(errno) }
+            if (info.st_mode & S_IFMT) == S_IFDIR {
+                let next = destination.map { openat($0, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) } ?? -1
+                defer { if next >= 0 { close(next) } }
+                if destination != nil, next < 0, errno != ENOTDIR, errno != ELOOP, errno != ENOENT {
+                    throw fileError(errno)
+                }
+                skipped += try publishContents(of: child, into: next >= 0 ? next : nil)
+            } else {
+                skipped += 1
+            }
+        }
+        return skipped
     }
 
     /// 目标目录里已存在多少个包内同名文件（只数文件，不数目录，且过滤越界路径）

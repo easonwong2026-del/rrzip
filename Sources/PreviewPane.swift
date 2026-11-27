@@ -12,7 +12,7 @@ private struct LoadedPDF: @unchecked Sendable {
 }
 
 struct PreviewPane: View {
-    @ObservedObject var model: ArchiveModel
+    var model: ArchiveModel
 
     @State private var payload: URL?
     @State private var image: NSImage?
@@ -66,7 +66,8 @@ struct PreviewPane: View {
                 if !entry.isDirectory {
                     ToolButton(symbol: "arrow.up.right.square",
                                help: "用默认程序打开（临时副本，修改不会写回）",
-                               inactive: payload == nil) {
+                               inactive: payload == nil,
+                               accessibilityLabel: "用默认程序打开") {
                         if let payload { NSWorkspace.shared.open(payload) }
                     }
                     ToolButton(symbol: "square.and.arrow.down", help: "另存为…") {
@@ -194,6 +195,7 @@ struct PreviewPane: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("缩小预览")
 
             Button { zoom = 0 } label: {
                 Text(zoom == 0 ? "适应" : "\(Int(zoom * 100))%")
@@ -202,6 +204,8 @@ struct PreviewPane: View {
                     .frame(minWidth: 30)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("适应面板")
+            .accessibilityValue(zoom == 0 ? "适应" : "\(Int(zoom * 100))%")
             .help("回到适应面板")
 
             Button { zoom = min(4, (zoom == 0 ? 1 : zoom) + 0.25) } label: {
@@ -211,6 +215,7 @@ struct PreviewPane: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("放大预览")
 
             Rectangle()
                 .fill(Color.primary.opacity(0.12))
@@ -222,6 +227,7 @@ struct PreviewPane: View {
                     .frame(minWidth: 22)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(zoom == 0 ? "按实际像素查看" : "适应面板大小")
             .help(zoom == 0 ? "按实际像素查看" : "适应面板大小")
         }
         .padding(.horizontal, 8)

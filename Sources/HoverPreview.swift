@@ -2,6 +2,7 @@
 // Copyright (C) 2026 rrzip contributors
 //
 import AppKit
+import Observation
 import SwiftUI
 import PDFKit
 
@@ -10,10 +11,11 @@ import PDFKit
 /// 窗口刚打开、鼠标恰好停在列表上时不弹：必须先观察到鼠标真的移动过，
 /// 否则每次开包都会有一张卡片直接盖在内容上。
 @MainActor
-final class HoverCoordinator: ObservableObject {
-    private var pending: Task<Void, Never>?
-    private var lastPoint: NSPoint?
-    private var sawMovement = false
+@Observable
+final class HoverCoordinator {
+    @ObservationIgnored private var pending: Task<Void, Never>?
+    @ObservationIgnored private var lastPoint: NSPoint?
+    @ObservationIgnored private var sawMovement = false
 
     func begin(_ entry: ArchiveEntry, model: ArchiveModel, at point: NSPoint? = nil) {
         pending?.cancel()
@@ -52,7 +54,7 @@ final class HoverCoordinator: ObservableObject {
 /// 内容卡片本体
 struct HoverCard: View {
     let entry: ArchiveEntry
-    @ObservedObject var model: ArchiveModel
+    var model: ArchiveModel
 
     @State private var image: CGImage?
     @State private var text: String?
@@ -100,7 +102,7 @@ struct HoverCard: View {
     }
 
     @ViewBuilder
-    private var content: some View {
+    @ObservationIgnored private var content: some View {
         if let image {
             Image(decorative: image, scale: 1)
                 .resizable()
@@ -136,7 +138,7 @@ struct HoverCard: View {
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
-    private var symbolicName: String {
+    @ObservationIgnored private var symbolicName: String {
         switch entry.ext {
         case "pdf": return "doc.richtext"
         case "mp4", "mov", "mkv", "avi": return "film"
@@ -182,8 +184,8 @@ struct HoverCard: View {
 @MainActor
 final class HoverPreviewPanel {
     static let shared = HoverPreviewPanel()
-    private var panel: NSPanel?
-    private var resignObserver: NSObjectProtocol?
+    @ObservationIgnored private var panel: NSPanel?
+    @ObservationIgnored private var resignObserver: NSObjectProtocol?
 
     private init() {
         // 切到别的 App 时鼠标不再给列表发事件，卡片会留在别人窗口上面

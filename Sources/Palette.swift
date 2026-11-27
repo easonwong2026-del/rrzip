@@ -292,6 +292,7 @@ struct ToolButton: View {
     var help: String = ""
     var inactive: Bool = false
     var active: Bool = false
+    var accessibilityLabel: String?
     let action: () -> Void
     @State private var hovering = false
 
@@ -311,6 +312,8 @@ struct ToolButton: View {
         .onHover { hovering = $0 }
         .disabled(inactive)
         .opacity(inactive ? 0.32 : 1)
+        .accessibilityLabel(accessibilityLabel ?? help)
+        .accessibilityAddTraits(active ? .isSelected : [])
         .help(help)
     }
 }
@@ -326,6 +329,13 @@ struct Hairline: View {
 }
 
 extension View {
+    func archiveEntryAccessibility(_ entry: ArchiveEntry, selected: Bool) -> some View {
+        accessibilityElement(children: .ignore)
+            .accessibilityLabel(entry.name)
+            .accessibilityValue(entry.accessibilityDescription)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
     /// 分组卡片：浅底色 + 细描边，替代一层层 Divider
     func cardSurface(radius: CGFloat = Metrics.radiusCard) -> some View {
         background(
@@ -336,5 +346,11 @@ extension View {
             RoundedRectangle(cornerRadius: radius, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
         )
+    }
+}
+
+extension ArchiveEntry {
+    var accessibilityDescription: String {
+        isDirectory ? "文件夹" : "文件，\(displaySize)"
     }
 }

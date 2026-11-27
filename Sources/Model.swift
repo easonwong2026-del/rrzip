@@ -2,7 +2,7 @@
 // Copyright (C) 2026 rrzip contributors
 //
 import AppKit
-import Combine
+import Observation
 import Foundation
 import SwiftUI
 
@@ -78,7 +78,8 @@ struct RecentArchive: Identifiable, Codable, Hashable {
 }
 
 @MainActor
-final class ArchiveModel: ObservableObject {
+@Observable
+final class ArchiveModel {
 
     struct Frame: Identifiable {
         let id = UUID()
@@ -102,11 +103,11 @@ final class ArchiveModel: ObservableObject {
         }
     }
 
-    @Published private(set) var trail: [Frame] = []
-    @Published var selection: Set<ArchiveEntry.ID> = [] {
+    private(set) var trail: [Frame] = []
+    var selection: Set<ArchiveEntry.ID> = [] {
         didSet { archiveIndex.invalidateSelection() }
     }
-    @Published var searchText: String = "" {
+    var searchText: String = "" {
         didSet {
             guard searchText != oldValue else { return }
             // 关键词一变，列表内容整批换掉：留着已经看不见的选中项，
@@ -116,34 +117,34 @@ final class ArchiveModel: ObservableObject {
     }
     /// 键盘导航计数。视图只在它变化时才把选中行滚进视口；
     /// 单击 / ⌘ 多选 / ⇧ 连选 / ⌘A 一律不动滚动位置。
-    @Published private(set) var keyboardScrollTick: Int = 0
+    private(set) var keyboardScrollTick: Int = 0
     /// 布局切换计数（视图形态 / 简化模式）。视图换了主体就重建了，
     /// 新滚动容器的「首次同步」不能当作滚动信号，得等布局落地后再补一次定位。
-    @Published private(set) var layoutTick: Int = 0
-    @Published var viewMode: ArchiveViewMode = .list {
+    private(set) var layoutTick: Int = 0
+    var viewMode: ArchiveViewMode = .list {
         didSet {
             UserDefaults.standard.set(viewMode.rawValue, forKey: "rrzip.viewMode")
             if viewMode != oldValue { layoutTick &+= 1 }
         }
     }
     /// 列表排序：点表头切换列，再点一次换方向
-    @Published var sortKey: SortKey = .name {
+    var sortKey: SortKey = .name {
         didSet {
             UserDefaults.standard.set(sortKey.rawValue, forKey: "rrzip.sortKey")
             archiveIndex.invalidateOrder()
         }
     }
-    @Published var sortAscending = true {
+    var sortAscending = true {
         didSet {
             UserDefaults.standard.set(sortAscending, forKey: "rrzip.sortAscending")
             archiveIndex.invalidateOrder()
         }
     }
-    @Published var appearance: AppearanceMode = .system {
+    var appearance: AppearanceMode = .system {
         didSet { UserDefaults.standard.set(appearance.rawValue, forKey: "rrzip.appearance") }
     }
     /// 简化 / 完整模式。放在 model 里而不是视图里，切换模式不会重建状态机
-    @Published var workspaceMode: WorkspaceMode = .compact {
+    var workspaceMode: WorkspaceMode = .compact {
         didSet {
             UserDefaults.standard.set(workspaceMode.rawValue, forKey: "rrzip.workspaceMode")
             if workspaceMode != oldValue { layoutTick &+= 1 }
@@ -153,29 +154,29 @@ final class ArchiveModel: ObservableObject {
     private(set) var modePinnedAt: Date = .distantPast
     var isCompactMode: Bool { workspaceMode == .compact }
     /// 每次重新点同一行就自增，强制预览刷新
-    @Published private(set) var previewToken: Int = 0
-    @Published private(set) var isLoading = false
+    private(set) var previewToken: Int = 0
+    private(set) var isLoading = false
     func setArchiveEditing(_ editing: Bool) { isLoading = editing }
-    @Published var status: String = "拖入一个压缩包，或按 ⌘O 打开"
-    @Published var errorMessage: String?
+    var status: String = "拖入一个压缩包，或按 ⌘O 打开"
+    var errorMessage: String?
     /// 一次性浮条提示：不打断操作，3 秒后自动消失。
     /// 用于「另有 N 个压缩包未打开」这类需要告知但不需要弹窗的情况。
-    @Published var notice: String?
-    @Published private(set) var unlocked: Set<String> = []
+    var notice: String?
+    private(set) var unlocked: Set<String> = []
     /// 非空时弹出批量面板
-    @Published var batchRequest: BatchRequest?
+    var batchRequest: BatchRequest?
 
     /// 暂存区：跨层、跨包攒起来，最后一次性导出
-    @Published private(set) var stash: [StashItem] = []
+    private(set) var stash: [StashItem] = []
     func updateStash(_ change: (inout [StashItem]) -> Void) { change(&stash) }
-    @Published var isStashVisible = false
+    var isStashVisible = false
     /// 暂存导出的落盘方式
-    @Published var stashLayout: StashLayout = .perArchive {
+    var stashLayout: StashLayout = .perArchive {
         didSet { UserDefaults.standard.set(stashLayout.rawValue, forKey: "rrzip.stashLayout") }
     }
 
     /// 首页「最近打开」，最多 8 条
-    @Published private(set) var recentArchives: [RecentArchive] = []
+    private(set) var recentArchives: [RecentArchive] = []
 
     var current: Frame? { trail.last }
     /// 当前层是不是嵌套包里的临时副本
@@ -719,9 +720,9 @@ final class ArchiveModel: ObservableObject {
         let isRetry: Bool
     }
 
-    @Published var passwordRequest: PasswordRequest?
+    var passwordRequest: PasswordRequest?
     /// 非 nil 时主界面弹「创建压缩包」sheet
-    @Published var pendingCreate: PendingCreate?
+    var pendingCreate: PendingCreate?
 
     // MARK: 任务队列
     //
@@ -730,16 +731,18 @@ final class ArchiveModel: ObservableObject {
     // 压缩、解压的具体逻辑仍留在各自方法里，不搬动。
 
     /// 当前正在跑的任务
-    @Published private(set) var job: TaskJob?
+    private(set) var job: TaskJob?
+    var finderJob: TaskJob?
+    @ObservationIgnored var cancelFinderTask: (() -> Void)?
     /// 排在自己后面的任务数
-    @Published private(set) var queuedCount = 0
+    private(set) var queuedCount = 0
     /// 卡片要不要露出来。任务立刻开始，但只有超过 0.8 秒才显示——
     /// 压一个小文件闪一下进度条，比没有进度更烦。
-    @Published private(set) var jobVisible = false
+    private(set) var jobVisible = false
 
     /// 退出流程已经接管：等待收尾或正在取消时，不再接受新的后台任务。
     /// 用户选了「继续使用」会复位（见 resumeAfterAbortedTermination）。
-    @Published private(set) var isTerminating = false
+    private(set) var isTerminating = false
     /// 队列排空时回调一次，退出协调用它决定什么时候真正退出
     var onWorkDrained: (() -> Void)?
 
@@ -1154,6 +1157,7 @@ extension ArchiveModel: TerminationHost {
         if passwordRequest != nil || activePasswordPrompt != nil || !passwordPromptQueue.isEmpty {
             cancelAllPasswordPrompts()
         }
+        cancelFinderTask?()
 
         // 3. 正在跑的交给 TaskRegistry 终止子进程。这里不能直接退进程：
         //    压缩正在写临时文件、暂存打包正在写 staging 目录，

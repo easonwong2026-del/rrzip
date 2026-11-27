@@ -2,12 +2,14 @@
 // Copyright (C) 2026 rrzip contributors
 //
 import AppKit
+import Observation
 import SwiftUI
 
 /// 一次处理多个压缩包：批量解压或批量校验。
 /// 串行执行，避免同时开一堆 7zz 抢磁盘。
 @MainActor
-final class BatchRunner: ObservableObject {
+@Observable
+final class BatchRunner {
     enum Mode: Sendable {
         case extract
         case verify
@@ -32,14 +34,14 @@ final class BatchRunner: ObservableObject {
         var detail: String = ""
     }
 
-    @Published private(set) var mode: Mode
-    @Published private(set) var jobs: [Job]
-    @Published private(set) var running = false
-    @Published private(set) var cancelled = false
-    @Published var destination: URL?
+    private(set) var mode: Mode
+    private(set) var jobs: [Job]
+    private(set) var running = false
+    private(set) var cancelled = false
+    var destination: URL?
 
-    private var task: Task<Void, Never>?
-    private var activeJobID: UUID?
+    @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var activeJobID: UUID?
 
     init(urls: [URL], mode: Mode) {
         self.mode = mode
@@ -176,11 +178,11 @@ final class BatchRunner: ObservableObject {
 
 /// 批量面板
 struct BatchSheet: View {
-    @StateObject private var runner: BatchRunner
+    @State private var runner: BatchRunner
     @Environment(\.dismiss) private var dismiss
 
     init(urls: [URL], mode: BatchRunner.Mode) {
-        _runner = StateObject(wrappedValue: BatchRunner(urls: urls, mode: mode))
+        _runner = State(wrappedValue: BatchRunner(urls: urls, mode: mode))
     }
 
     var body: some View {

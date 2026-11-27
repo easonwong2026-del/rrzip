@@ -16,7 +16,7 @@ import UniformTypeIdentifiers
 @main
 struct RrzipApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @StateObject var model = AppDelegate.primaryModel
+    @State var model = AppDelegate.primaryModel
 
     init() {
         // 有命令行参数就按 CLI 跑完退出，否则进入正常界面
@@ -253,6 +253,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let finderTaskWorker = makeFinderTaskWorker()
 
     private static func askFinderPassword(for url: URL, wrong: Bool) async -> String? {
+        guard !Task.isCancelled else { return nil }
         NSApp.activate(ignoringOtherApps: true)
         if !AppDelegate.restoreMainWindow(in: NSApp) {
             if let openPrimaryWindow = AppDelegate.openPrimaryWindow {
@@ -269,7 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         let gate = FormalWriteLedger.shared.currentGate
-        guard gate != .cancelling && gate != .terminating else { return nil }
+        guard !Task.isCancelled, gate != .cancelling, gate != .terminating else { return nil }
         return await AppDelegate.primaryModel.askPassword(for: url, wrong: wrong)
     }
 
@@ -280,9 +281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ledger: FormalWriteLedger.shared,
             askPassword: askFinderPassword,
             feedback: { receipt, outcome, operation in
-                if receipt.state == .running {
-                    AppDelegate.model?.notice = "访达\(operation.verb) · \(receipt.completedCount)/\(receipt.totalCount) 项"
-                } else if let message = receipt.message {
+                if receipt.state != .running, let message = receipt.message {
                     AppDelegate.model?.notice = message
                 }
                 if receipt.state == .succeeded || receipt.state == .failed {
@@ -290,6 +289,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                           reveal: operation == .extractHere ? nil : outcome.outputs.first)
                 }
             },
+            activity: { job in AppDelegate.primaryModel.finderJob = job },
             onError: { error in AppDelegate.model?.notice = "访达任务队列：\(error.localizedDescription)" },
             log: { FinderJobLog.append($0) }
         )
@@ -368,6 +368,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         requestNotificationPermissionIfNeeded()
         wireTermination()
         Self.model = Self.primaryModel
+        Self.primaryModel.cancelFinderTask = { AppDelegate.finderTaskWorker.cancelCurrent() }
         TerminationCoordinator.shared.host = Self.primaryModel
         Self.scanFinderTasks()
     }

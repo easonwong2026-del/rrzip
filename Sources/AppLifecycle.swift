@@ -168,7 +168,7 @@ final class TerminationCoordinator {
             }
             if finderServices > 0 {
                 lines.append("其中 \(finderServices) 项是访达服务或右键任务的压缩 / 解压，"
-                             + "产物直接写到用户目录，会等它们完成后再退出，不会留下不完整的压缩包。")
+                             + "退出会等待写入收尾。取消时会停止可取消的右键任务，并清理未发布的产物。")
             }
             if batchExtracts > 0 {
                 lines.append("有 \(batchExtracts) 批解压正在进行。取消时会终止解压并尝试清理当前未完成的目录。")
