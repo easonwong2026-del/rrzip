@@ -90,6 +90,7 @@ struct FinderTaskQueue: Sendable {
         self.root = root
     }
 
+    var parent: URL { root.deletingLastPathComponent() }
     var inbox: URL { root.appendingPathComponent("inbox", isDirectory: true) }
     var claimed: URL { root.appendingPathComponent("claimed", isDirectory: true) }
     var status: URL { root.appendingPathComponent("status", isDirectory: true) }
@@ -200,22 +201,44 @@ struct FinderTaskQueue: Sendable {
 
     func acquireWorker() throws -> FileHandle? {
         try prepareDirectories()
-        let file = try openLock(named: ".worker")
+        // 放在队列的上一级，重建队列目录时仍是同一把执行者锁。
+        let path = parent.appendingPathComponent(".\(root.lastPathComponent).worker")
+        let file = try openLock(at: path)
         if flock(file.fileDescriptor, LOCK_EX | LOCK_NB) == 0 { return file }
         if errno == EWOULDBLOCK { return nil }
         throw posixError()
     }
 
+    func openWatchDirectory(_ url: URL) throws -> Int32 {
+        try prepareDirectories()
+        let fd = open(url.path, O_EVTONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw posixError() }
+        var info = stat()
+        guard fstat(fd, &info) == 0, ownedDirectory(info) else {
+            close(fd)
+            throw FinderTaskQueueError.unsafeLocation
+        }
+        return fd
+    }
+
+    func inboxIsCurrent(_ fd: Int32) -> Bool {
+        var connected = stat()
+        var current = stat()
+        return fstat(fd, &connected) == 0 && lstat(inbox.path, &current) == 0 &&
+            ownedDirectory(current) && connected.st_dev == current.st_dev && connected.st_ino == current.st_ino
+    }
+
     private func withLock<T>(_ work: () throws -> T) throws -> T {
         try prepareDirectories()
-        let lock = try openLock(named: ".lock")
+        let lock = try openLock(at: root.appendingPathComponent(".lock"))
         defer { try? lock.close() }
         guard flock(lock.fileDescriptor, LOCK_EX) == 0 else { throw posixError() }
         return try work()
     }
 
     private func prepareDirectories() throws {
-        try ensureDirectory(root, parents: true)
+        try ensureDirectory(parent, parents: true)
+        try ensureDirectory(root, parents: false)
         for directory in [inbox, claimed, status] { try ensureDirectory(directory, parents: false) }
     }
 
@@ -229,14 +252,15 @@ struct FinderTaskQueue: Sendable {
                 // 另一个合作进程先建好了，下面仍然核验类型及属主。
             }
         }
-        guard lstat(url.path, &info) == 0, info.st_uid == getuid(),
-              info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
-              info.st_mode & 0o022 == 0 else { throw FinderTaskQueueError.unsafeLocation }
+        guard lstat(url.path, &info) == 0, ownedDirectory(info) else { throw FinderTaskQueueError.unsafeLocation }
     }
 
-    private func openLock(named name: String) throws -> FileHandle {
-        let path = root.appendingPathComponent(name).path
-        let fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, mode_t(0o600))
+    private func ownedDirectory(_ info: stat) -> Bool {
+        info.st_uid == getuid() && info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) && info.st_mode & 0o022 == 0
+    }
+
+    private func openLock(at url: URL) throws -> FileHandle {
+        let fd = open(url.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, mode_t(0o600))
         guard fd >= 0 else { throw posixError() }
         let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         _ = try regularInfo(fd)

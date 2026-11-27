@@ -118,18 +118,25 @@ final class FinderSync: FIFinderSync {
         guard !urls.isEmpty else { return }
         let application = appURL
         DispatchQueue.global(qos: .userInitiated).async {
+            let needsAttention: Bool
             do {
                 let sources = urls.map { url in
                     FinderFileRef(url: url, bookmarkData: try? url.bookmarkData())
                 }
                 try FinderTaskQueue().enqueue(FinderTaskRequest(operation: operation, sources: sources))
+                needsAttention = false
             } catch {
+                needsAttention = true
                 PendingNotice.write(title: "访达\(operation.verb)请求未提交", message: error.localizedDescription)
             }
             DispatchQueue.main.async {
                 let config = NSWorkspace.OpenConfiguration()
-                config.activates = false
-                NSWorkspace.shared.openApplication(at: application, configuration: config)
+                config.activates = needsAttention
+                NSWorkspace.shared.openApplication(at: application, configuration: config) { _, error in
+                    if let error {
+                        PendingNotice.write(title: "无法唤起 rrzip", message: error.localizedDescription)
+                    }
+                }
             }
         }
     }

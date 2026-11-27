@@ -18,6 +18,7 @@ final class FinderTaskWorker {
     private let log: @Sendable (JobRecord) -> Void
     private var lease: FileHandle?
     private var watcher: (any DispatchSourceFileSystemObject)?
+    private var parentWatcher: (any DispatchSourceFileSystemObject)?
     private(set) var isScanning = false
     private var needsScan = false
 
@@ -41,34 +42,55 @@ final class FinderTaskWorker {
                 try queue.recover()
                 lease = acquired
             }
-            if watcher == nil {
-                let fd = open(queue.inbox.path, O_EVTONLY | O_NOFOLLOW | O_CLOEXEC)
-                guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-                let source = DispatchSource.makeFileSystemObjectSource(
-                    fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: .main)
-                source.setEventHandler { [weak self] in
-                    MainActor.assumeIsolated { self?.directoryChanged() }
-                }
-                source.setCancelHandler { close(fd) }
-                watcher = source
-                source.resume()
+            if parentWatcher == nil {
+                parentWatcher = try watch(queue.parent) { [weak self] in self?.ensureInboxWatch() }
             }
+            try connectInboxWatch()
             requestScan()
         } catch {
             onError(error)
         }
     }
 
+    private func watch(_ directory: URL, handler: @escaping @MainActor @Sendable () -> Void)
+        throws -> any DispatchSourceFileSystemObject {
+        let fd = try queue.openWatchDirectory(directory)
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd, eventMask: [.write, .rename, .delete, .revoke], queue: .main)
+        source.setEventHandler { MainActor.assumeIsolated { handler() } }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        return source
+    }
+
     func stopWatching() {
         watcher?.cancel()
         watcher = nil
+        parentWatcher?.cancel()
+        parentWatcher = nil
     }
 
-    private func directoryChanged() {
+    private func connectInboxWatch() throws {
+        if let watcher, queue.inboxIsCurrent(Int32(watcher.handle)) { return }
+        watcher?.cancel()
+        watcher = nil
+        watcher = try watch(queue.inbox) { [weak self] in self?.inboxChanged() }
+    }
+
+    private func ensureInboxWatch() {
+        if let watcher, queue.inboxIsCurrent(Int32(watcher.handle)) { return }
+        do {
+            try connectInboxWatch()
+            requestScan()
+        } catch {
+            onError(error)
+        }
+    }
+
+    private func inboxChanged() {
         guard let watcher else { return }
-        if !watcher.data.intersection([.rename, .delete]).isEmpty {
-            stopWatching()
-            start()
+        if !watcher.data.intersection([.rename, .delete, .revoke]).isEmpty {
+            ensureInboxWatch()
         } else {
             requestScan()
         }
@@ -145,8 +167,9 @@ final class FinderTaskWorker {
                 let groups = op == .compressEach ? urls.map { [$0] } : [urls]
                 let format: FinderJobRunner.CompressionFormat = op == .compressSevenZip ? .sevenZip : .zip
                 for files in groups {
-                    let result = await Task.detached(priority: .utility) {
-                        FinderJobRunner.compress(files, format: format, each: false)
+                    let result = try await Task.detached(priority: .utility) { [ledger] in
+                        try Self.checkContinuation(ledger)
+                        return FinderJobRunner.compress(files, format: format, each: false)
                     }.value
                     FinderJobRunner.append(result, to: &outcome)
                     await advance(&receipt, by: files.count, outcome: outcome, operation: op)
@@ -185,25 +208,30 @@ final class FinderTaskWorker {
         while true {
             do {
                 let attempt = password
-                return try await Task.detached(priority: .utility) {
-                    try FinderJobRunner.extract(plan, password: attempt)
+                return try await Task.detached(priority: .utility) { [ledger] in
+                    try Self.checkContinuation(ledger)
+                    return try FinderJobRunner.extract(plan, password: attempt)
                 }.value
             } catch ArchiveError.needsPassword {
-                let gate = ledger.currentGate
-                guard gate != .cancelling && gate != .terminating else { throw ArchiveError.cancelled }
+                try Self.checkContinuation(ledger)
                 var waiting = receipt
                 waiting.state = .needsPassword
                 waiting.message = "\(plan.archive.lastPathComponent) 需要密码"
                 await report(waiting, outcome: JobOutcome(), operation: request.operation)
-                let gateAfterReport = ledger.currentGate
-                guard gateAfterReport != .cancelling && gateAfterReport != .terminating,
-                      let typed = await askPassword(plan.archive, password != nil) else {
+                try Self.checkContinuation(ledger)
+                guard let typed = await askPassword(plan.archive, password != nil) else {
                     throw ArchiveError.cancelled
                 }
+                try Self.checkContinuation(ledger)
                 password = typed
                 await report(receipt, outcome: JobOutcome(), operation: request.operation)
             }
         }
+    }
+
+    private nonisolated static func checkContinuation(_ ledger: FormalWriteLedger) throws {
+        let gate = ledger.currentGate
+        if gate == .cancelling || gate == .terminating { throw ArchiveError.cancelled }
     }
 
     private func advance(_ receipt: inout FinderTaskReceipt, by count: Int, outcome: JobOutcome,

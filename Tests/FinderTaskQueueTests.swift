@@ -25,6 +25,7 @@ func runFinderTaskQueueTests() {
     testWorkerRunsOperations()
     testWorkerWakesForNewQueueFiles()
     testWorkerPasswordAndQuit()
+    testWorkerStopsStartingFilesOnCancelQuit()
 }
 
 private func testQueuePublishAndClaim() {
@@ -314,11 +315,11 @@ private func testWorkerWakesForNewQueueFiles() {
         let request = makeFinderRequest(.compressZip, urls: [source])
         MainActor.assumeIsolated {
             let ledger = FormalWriteLedger()
-            var done = false
+            var completed = Set<UUID>()
             var errors: [String] = []
             let worker = FinderTaskWorker(queue: queue, ledger: ledger, askPassword: { _, _ in nil },
                                           feedback: { receipt, _, _ in
-                if receipt.id == request.id, receipt.state == .succeeded { done = true }
+                if receipt.state == .succeeded { completed.insert(receipt.id) }
             }, onError: { errors.append($0.localizedDescription) }, log: { _ in })
             worker.start()
             defer { worker.stopWatching() }
@@ -332,9 +333,79 @@ private func testWorkerWakesForNewQueueFiles() {
                 expect(false, "投递文件事件夹具", "\(error)")
                 return
             }
-            expect(waitUntil(8, { done }), "空闲时通过目录写入事件自动执行新请求")
-            expect(errors.isEmpty, "目录监听没有报错")
+            expect(waitUntil(8, { completed.contains(request.id) }), "空闲时通过目录写入事件自动执行新请求")
             expect((try? queue.receipt(for: request.id)?.state) == .succeeded, "监听执行的终态已落盘")
+            for directory in [queue.inbox, queue.root] {
+                guard waitUntil(8, { !worker.isScanning }) else {
+                    expect(false, "执行器完成前不替换测试队列")
+                    return
+                }
+                do {
+                    let backup = directory.deletingLastPathComponent().appendingPathComponent("old-\(UUID().uuidString)")
+                    try FileManager.default.moveItem(at: directory, to: backup)
+                    let next = makeFinderRequest(.compressZip, urls: [source])
+                    try queue.enqueue(next)
+                    expect(try queue.acquireWorker() == nil, "目录替换后执行者仍保持排他锁")
+                    expect(waitUntil(8, { completed.contains(next.id) }), "重建 \(directory.lastPathComponent) 后仍能自动接管")
+                } catch {
+                    expect(false, "重建目录并投递", "\(error)")
+                }
+            }
+            expect(errors.isEmpty, "目录监听没有报错")
         }
     } catch { expect(false, "监听测试准备", "\(error)") }
+}
+
+private func testWorkerStopsStartingFilesOnCancelQuit() {
+    print("访达队列 · 退出取消与竞态")
+    let queue = newFinderQueue()
+    let folder = fixtures.appendingPathComponent("finder-queue-cancel-boundary", isDirectory: true)
+    let fm = FileManager.default
+    MainActor.assumeIsolated {
+        do {
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            let first = folder.appendingPathComponent("first.txt")
+            let second = folder.appendingPathComponent("second.txt")
+            try Data("first".utf8).write(to: first)
+            try Data("second".utf8).write(to: second)
+            let batch = makeFinderRequest(.compressEach, urls: [first, second])
+            try queue.enqueue(batch)
+            let ledger = FormalWriteLedger()
+            let worker = FinderTaskWorker(queue: queue, ledger: ledger, askPassword: { _, _ in nil },
+                                          feedback: { receipt, _, _ in
+                if receipt.state == .running, receipt.completedCount == 1 { ledger.setGate(.cancelling) }
+            }, log: { _ in })
+            var drained = false
+            Task {
+                await worker.drain()
+                drained = true
+            }
+            expect(waitUntil(8, { drained }), "取消退出后批量请求收尾")
+            let result = try queue.receipt(for: batch.id)
+            expect(result?.state == .cancelled && result?.completedCount == 1, "取消发生在两个文件之间时保留进度")
+            expect(fm.fileExists(atPath: folder.appendingPathComponent("first.zip").path) &&
+                   !fm.fileExists(atPath: folder.appendingPathComponent("second.zip").path),
+                   "已完成的压缩保留，取消后不启动下一项")
+
+            guard SevenZip.isAvailable else { return }
+            let locked = folder.appendingPathComponent("unlock-race.7z")
+            try fm.copyItem(at: fixtures.appendingPathComponent("secret.7z"), to: locked)
+            let request = makeFinderRequest(.extractToFolder, urls: [locked])
+            try queue.enqueue(request)
+            ledger.setGate(.idle)
+            let passwordWorker = FinderTaskWorker(queue: queue, ledger: ledger, askPassword: { _, _ in
+                ledger.setGate(.cancelling)
+                return "pw123"
+            }, feedback: { _, _, _ in }, log: { _ in })
+            drained = false
+            Task {
+                await passwordWorker.drain()
+                drained = true
+            }
+            expect(waitUntil(8, { drained }), "返回密码与退出信号同时发生时能收尾")
+            expect(try queue.receipt(for: request.id)?.state == .cancelled, "退出接管后不采用刚返回的正确密码")
+            expect(ledger.isEmpty && !fm.fileExists(atPath: folder.appendingPathComponent("unlock-race").path),
+                   "取消后的密码流程不写目标目录并释放账本")
+        } catch { expect(false, "取消边界测试", "\(error)") }
+    }
 }

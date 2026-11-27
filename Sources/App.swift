@@ -16,7 +16,7 @@ import UniformTypeIdentifiers
 @main
 struct RrzipApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @StateObject var model = ArchiveModel()
+    @StateObject var model = AppDelegate.primaryModel
 
     init() {
         // 有命令行参数就按 CLI 跑完退出，否则进入正常界面
@@ -244,16 +244,25 @@ struct RrzipApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static let primaryModel = ArchiveModel()
     static weak var model: ArchiveModel?
     static weak var mainWindow: NSWindow?
     fileprivate static weak var settingsWindow: NSWindow?
 
     private static let finderTaskWorker = FinderTaskWorker(
         askPassword: { url, wrong in
-            guard let model = AppDelegate.model else { return nil }
             NSApp.activate(ignoringOtherApps: true)
-            AppDelegate.restoreMainWindow(in: NSApp)
-            return await model.askPassword(for: url, wrong: wrong)
+            if !AppDelegate.restoreMainWindow(in: NSApp) {
+                let config = NSWorkspace.OpenConfiguration()
+                config.activates = true
+                do {
+                    _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config)
+                } catch {
+                    AppDelegate.primaryModel.notice = "无法打开窗口输入访达任务密码"
+                    return nil
+                }
+            }
+            return await AppDelegate.primaryModel.askPassword(for: url, wrong: wrong)
         },
         feedback: { receipt, outcome, operation in
             if receipt.state == .running {
@@ -270,7 +279,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
 
     private static func scanFinderTasks() {
-        guard model != nil else { return }
         finderTaskWorker.start()
     }
 
@@ -321,18 +329,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    static func restoreMainWindow(in app: NSApplication) {
+    @discardableResult
+    static func restoreMainWindow(in app: NSApplication) -> Bool {
         let windows = app.windows.filter { !($0 is NSPanel) }
         let candidates = windows.map {
             MainWindowRecovery.Candidate(identifier: $0.identifier?.rawValue,
                                          canBecomeMain: $0.canBecomeMain, isSettings: $0 === settingsWindow)
         }
         let registered = mainWindow.flatMap { windows.firstIndex(of: $0) }
-        guard let index = MainWindowRecovery.choose(registered: registered, candidates: candidates) else { return }
+        guard let index = MainWindowRecovery.choose(registered: registered, candidates: candidates) else { return false }
         let main = windows[index]
         mainWindow = main
         if main.isMiniaturized { main.deminiaturize(nil) }
         main.makeKeyAndOrderFront(nil)
+        return true
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -340,6 +350,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSUpdateDynamicServices()
         requestNotificationPermissionIfNeeded()
         wireTermination()
+        Self.model = Self.primaryModel
+        TerminationCoordinator.shared.host = Self.primaryModel
         Self.scanFinderTasks()
     }
 
@@ -414,7 +426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         Self.scanFinderTasks()
         Task { @MainActor in
-            guard let notice = PendingNotice.take(), let model = AppDelegate.model else { return }
+            guard let model = AppDelegate.model, let notice = PendingNotice.take() else { return }
             model.notice = "\(notice.title) · \(notice.message)"
         }
     }
