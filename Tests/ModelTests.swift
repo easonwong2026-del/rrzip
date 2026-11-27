@@ -1057,6 +1057,7 @@ func testStashExportCancelMidWrite() {
 }
 
 func runModelTests() {
+    testModifiedDateSort()
     testBatchDestination()
     testOpenGate()
     testJobQueue()
@@ -1079,4 +1080,29 @@ func runModelTests() {
     testHome()
     testArchiveService()
     testSortAndStaging()
+}
+
+private func testModifiedDateSort() {
+    print("排序 · 跨月、跨年、同日及缺失时间")
+    MainActor.assumeIsolated {
+        let model = ArchiveModel()
+        let oldSort = model.sortKey
+        let oldDirection = model.sortAscending
+        defer { model.sortKey = oldSort; model.sortAscending = oldDirection }
+        let rows = [
+            Tar.parse("-rw-r--r-- 0 0 0 1 Jan  5  2025 jan")!,
+            Tar.parse("-rw-r--r-- 0 0 0 1 Dec 30  2024 dec")!,
+            Tar.parse("-rw-r--r-- 0 0 0 1 Oct 12  2025 zebra")!,
+            Tar.parse("-rw-r--r-- 0 0 0 1 Oct 12  2025 apple")!,
+            ArchiveEntry(path: "unknown-b", size: 1, modified: "Aug 01", mode: "-rw-r--r--"),
+            ArchiveEntry(path: "unknown-a", size: 1, modified: "", mode: "-rw-r--r--")
+        ]
+        model.sortKey = .modified
+        model.sortAscending = true
+        expect(model.sortEntries(rows).map(\.path) == ["dec", "jan", "apple", "zebra", "unknown-a", "unknown-b"],
+               "升序按实际时间，缺失项和并列项按名称")
+        model.sortAscending = false
+        expect(model.sortEntries(rows).map(\.path) == ["apple", "zebra", "jan", "dec", "unknown-a", "unknown-b"],
+               "降序仍把缺失项放在末尾，并列项名称顺序稳定")
+    }
 }

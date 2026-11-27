@@ -38,11 +38,11 @@ jobs:
             done
             exit "$status"
           fi
-          # 防「测试被悄悄删掉」：只增不减，数量掉了就红
+          # Sprint 3/4 完整套件（含 7zz）：916 项断言，原基线 782 项。
           count=$(grep -o '全部通过（[0-9]* 项）' /tmp/test.log | grep -o '[0-9]*' | head -1)
           echo "测试通过 $count 项"
-          if [ "${count:-0}" -lt 750 ]; then
-            echo "::error::测试数 $count 低于基线 750（v2.15.0 应为 760）"
+          if [ "${count:-0}" -lt 916 ]; then
+            echo "::error::测试数 $count 低于 Sprint 3/4 基线 916"
             exit 1
           fi
 
@@ -111,9 +111,17 @@ jobs:
           plutil -lint "$APP/Contents/PlugIns/ArchivePreview.appex/Contents/Info.plist"
           plutil -lint "$APP/Contents/PlugIns/ArchiveFinder.appex/Contents/Info.plist"
           # 扩展版本号必须跟着主 app 走
+          for key in CFBundleShortVersionString CFBundleVersion; do
+            mainValue=$(/usr/libexec/PlistBuddy -c "Print :$key" "$APP/Contents/Info.plist")
+            for extension in ArchivePreview ArchiveFinder; do
+              extensionValue=$(/usr/libexec/PlistBuddy -c "Print :$key" "$APP/Contents/PlugIns/$extension.appex/Contents/Info.plist")
+              [ "$mainValue" = "$extensionValue" ] || {
+                echo "::error::$extension 的 $key ($extensionValue) 与主 app ($mainValue) 不一致"
+                exit 1
+              }
+            done
+          done
           main=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
-          finder=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/PlugIns/ArchiveFinder.appex/Contents/Info.plist")
-          [ "$main" = "$finder" ] || { echo "::error::访达扩展版本 $finder 与主 app $main 不一致"; exit 1; }
           codesign --verify --deep --strict "$APP"
           # dmg 必须是按 app 版本命名的那一份，别拿任意一个 *.dmg 顶数
           DMG="build/rrzip-${main}.dmg"

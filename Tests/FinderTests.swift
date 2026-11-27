@@ -252,4 +252,61 @@ func runFinderTests() {
     testFinderPlanning()
     testFinderExecution()
     testPendingHandoff()
+    testFinderMagicVolumePolicy()
+    testFinderAtomicCompression()
+}
+
+private func testFinderMagicVolumePolicy() {
+    print("访达 · 魔数探测只读取本地现有内容")
+    expect(FinderSelection.allowsMagic(volumeIsLocal: true, downloadingStatus: nil), "普通本地文件可读魔数")
+    expect(FinderSelection.allowsMagic(volumeIsLocal: true, downloadingStatus: .current), "已下载的 iCloud 文件可读魔数")
+    expect(!FinderSelection.allowsMagic(volumeIsLocal: false, downloadingStatus: nil), "网络卷跳过魔数")
+    expect(!FinderSelection.allowsMagic(volumeIsLocal: true, downloadingStatus: .notDownloaded), "iCloud 占位文件跳过魔数")
+    expect(!FinderSelection.allowsMagic(volumeIsLocal: nil, downloadingStatus: nil), "卷类型无法确认时跳过魔数")
+
+    let unknown = fixtures.appendingPathComponent("renamed.bin")
+    let known = fixtures.appendingPathComponent("basic.zip")
+    var checked: [URL] = []
+    let selection = FinderSelection.inspect([unknown, known]) { url in checked.append(url); return false }
+    expect(selection.plain == [unknown], "禁止读魔数时把未知后缀当普通文件")
+    expect(selection.archives == [known], "已知后缀无须读取魔数")
+    expect(checked == [unknown], "只有未知后缀进入本地内容检查")
+}
+
+private func testFinderAtomicCompression() {
+    print("访达 · 原子发布、重名和失败清理")
+    let fm = FileManager.default
+    let folder = fixtures.appendingPathComponent("finder-atomic", isDirectory: true)
+    do {
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let source = folder.appendingPathComponent("report.txt")
+        let original = folder.appendingPathComponent("report.zip")
+        let bytes = Data("用户已有的文件".utf8)
+        try Data("新内容".utf8).write(to: source)
+        try bytes.write(to: original)
+        let result = FinderJobRunner.compress([source], format: .zip, each: false)
+        expect(result.succeeded == ["report.txt"] && result.failed.isEmpty, "成功压缩后才报告发布完成")
+        let oldBytes = try Data(contentsOf: original)
+        expect(oldBytes == bytes, "已有同名文件逐字节保留")
+        let generated = folder.appendingPathComponent("report 2.zip")
+        expect((try? InProcessArchive.list(generated).contains { $0.path == "report.txt" }) == true,
+               "重名走 UniquePath 并产出完整 ZIP")
+
+        let missing = folder.appendingPathComponent("missing.txt")
+        let failure = FinderJobRunner.compress([missing], format: .zip, each: false)
+        expect(failure.succeeded.isEmpty && failure.failed.count == 1, "压缩失败报告真实错误")
+        let names = try fm.contentsOfDirectory(atPath: folder.path)
+        expect(!names.contains("missing.zip") && !names.contains { $0.hasPrefix(".rrzip-") },
+               "失败和成功都不留下隐藏暂存文件，失败不发布残包")
+
+        let staged = folder.appendingPathComponent(".staged")
+        try Data("ready".utf8).write(to: staged)
+        let published = try FinderJobRunner.publish(staged, as: original)
+        expect(published.lastPathComponent == "report 3.zip", "发布阶段重新检查被占用的名称")
+        expect(!fm.fileExists(atPath: staged.path), "原子移动后暂存路径消失")
+        let dangling = folder.appendingPathComponent("report 4.zip")
+        try fm.createSymbolicLink(atPath: dangling.path, withDestinationPath: "nothing")
+        expect(UniquePath.file(original).lastPathComponent == "report 5.zip", "断开的软链名称也视为占用")
+        expect(FinderJobRunner.compress([], format: .zip, each: false).succeeded.isEmpty, "空选择安全返回")
+    } catch { expect(false, "原子发布测试", "\(error)") }
 }

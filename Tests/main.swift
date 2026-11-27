@@ -6,6 +6,12 @@
 
 import Foundation
 
+if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--tar-locale" {
+    let archive = URL(fileURLWithPath: CommandLine.arguments[2]).appendingPathComponent("basic.zip")
+    let entries = try? Tar.list(archive)
+    exit(entries?.contains { $0.path == "说明.txt" && $0.modifiedDate != nil } == true ? 0 : 1)
+}
+
 runArchiveTests()
 runModelTests()
 runNavigationTests()

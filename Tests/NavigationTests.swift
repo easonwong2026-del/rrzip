@@ -25,6 +25,7 @@ func runNavigationTests() {
     testLayoutSwitchKeepsSelectionAndAsksForReveal()
     testSearchResetsWhenSwitchingArchive()
     testSelectionPrunedWhenListChanges()
+    testFirstSelectedIndexTracksVisibleOrder()
 }
 
 /// 视图新建时的时序：首次同步只记基线，不能当成「刚发生的变化」
@@ -364,5 +365,41 @@ func testSelectionPrunedWhenListChanges() {
 
         model.searchText = ""
         expect(model.selection.isEmpty, "清空关键词也不会把旧选择捡回来")
+    }
+}
+
+private func testFirstSelectedIndexTracksVisibleOrder() {
+    print("导航 · 定位索引随选区与显示顺序更新")
+    MainActor.assumeIsolated {
+        let (model, _) = openBasic()
+        let oldMode = model.viewMode
+        let oldWorkspace = model.workspaceMode
+        let oldSort = model.sortKey
+        let oldDirection = model.sortAscending
+        defer {
+            model.viewMode = oldMode
+            model.workspaceMode = oldWorkspace
+            model.sortKey = oldSort
+            model.sortAscending = oldDirection
+        }
+        model.workspaceMode = .full
+        model.viewMode = .list
+        model.sortKey = .name
+        model.sortAscending = true
+        let items = model.displayEntries
+        guard items.count >= 3 else { expect(false, "测试目录的条目不足"); return }
+
+        expect(model.firstSelectedIndex == nil, "未选中时没有定位行")
+        model.selection = [items[1].id, items[2].id]
+        expect(model.firstSelectedIndex == 1, "多选定位到显示顺序中的第一项")
+        expect(model.firstSelectedIndex == 1, "顺序和选区不变时可重复读取")
+        model.selection = [items[2].id]
+        expect(model.firstSelectedIndex == 2, "换选区后重新计算")
+        model.sortAscending = false
+        expect(model.firstSelectedIndex == 1, "列表倒序后重新计算")
+        model.viewMode = .columns
+        expect(model.firstSelectedIndex == 2, "分栏使用实际列顺序")
+        model.searchText = items[2].name
+        expect(model.firstSelectedIndex == 0, "搜索时索引指向筛选结果")
     }
 }

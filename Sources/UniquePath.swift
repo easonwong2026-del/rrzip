@@ -9,6 +9,7 @@
 //  以前两边各写了一份，改规则时要记得改两处。
 //
 
+import Darwin
 import Foundation
 
 enum UniquePath {
@@ -36,19 +37,23 @@ enum UniquePath {
 
     /// 文件版：`a.zip` → `a 2.zip`，`backup.tar.gz` → `backup 2.tar.gz`
     static func file(_ url: URL) -> URL {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return url }
+        guard fileExists(url) else { return url }
         let folder = url.deletingLastPathComponent()
         let (base, ext) = splitNameAndExtension(url.lastPathComponent)
         for index in 2...(maxAttempts + 1) {
             let name = ext.isEmpty ? "\(base) \(index)" : "\(base) \(index).\(ext)"
             let candidate = folder.appendingPathComponent(name)
-            if !fm.fileExists(atPath: candidate.path) { return candidate }
+            if !fileExists(candidate) { return candidate }
         }
         let fallback = ext.isEmpty
             ? "\(base) \(UUID().uuidString.prefix(8))"
             : "\(base) \(UUID().uuidString.prefix(8)).\(ext)"
         return folder.appendingPathComponent(fallback)
+    }
+
+    private static func fileExists(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0
     }
 
     /// 目录版：`a` → `a 2`。

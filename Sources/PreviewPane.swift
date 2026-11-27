@@ -321,11 +321,10 @@ struct PreviewPane: View {
         let token = entry.id
         reset()
 
-        // 大小判断放在解压之前：音视频要整份落到临时目录才能播，
-        // 超过上限的条目解了也是白写几百 MB 再删掉。
+        // 先按声明大小判断，超过内联上限的条目交给系统快速查看。
         if InlinePreviewLimits.skipsExtraction(entry) {
             loading = false
-            note = "文件较大（\(entry.displaySize)），不在面板内加载"
+            note = "文件较大（\(entry.displaySize)），按空格快速查看"
             return
         }
 
@@ -335,14 +334,12 @@ struct PreviewPane: View {
         // 选中项已经换了就丢弃这次结果，避免显示上一个文件
         guard !Task.isCancelled, selectedEntry?.id == token else { return }
 
-        // 元数据里没写大小的条目判不了，只能解压后按实际大小复核：
-        // 真超了就丢掉这份临时副本，不留着占磁盘
-        if let url, InlinePreviewLimits.isMedia(entry.ext) {
+        if let url {
             let onDisk = diskSize(url)
-            if onDisk > InlinePreviewLimits.media {
+            if InlinePreviewLimits.exceedsLimit(onDisk, for: entry.ext) {
                 model.discardPayload(url)
                 loading = false
-                note = "文件较大（\(ByteFormatter.string(onDisk))），不在面板内加载"
+                note = "文件较大（\(ByteFormatter.string(onDisk))），按空格快速查看"
                 return
             }
         }
@@ -360,19 +357,22 @@ struct PreviewPane: View {
             return
         }
 
+        if InlinePreviewLimits.imageExts.contains(ext) {
+            ScratchUsage.shared.beginWork(on: url.path)
+            let decoded = await Task.detached(priority: .userInitiated) {
+                defer { ScratchUsage.shared.endWork(on: url.path) }
+                return ThumbnailStore.downsample(url: url, maxPixel: InlinePreviewLimits.imageMaxPixel,
+                                                 maxSourcePixels: InlinePreviewLimits.imageMaxSourcePixels)
+            }.value
+            guard !Task.isCancelled else { return }
+            image = decoded.map { NSImage(cgImage: $0, size: .zero) }
+            if decoded == nil { note = "无法在面板中预览，按空格快速查看" }
+            return
+        }
+
         switch ext {
-        case "png", "jpg", "jpeg", "heic", "gif", "webp", "tiff", "bmp":
-            let raw = await Task.detached(priority: .userInitiated) {
-                try? Data(contentsOf: url, options: .mappedIfSafe)
-            }.value
-            guard !Task.isCancelled else { return }
-            image = raw.flatMap { NSImage(data: $0) }
         case "pdf":
-            let raw = await Task.detached(priority: .userInitiated) {
-                try? Data(contentsOf: url, options: .mappedIfSafe)
-            }.value
-            guard !Task.isCancelled else { return }
-            pdf = raw.flatMap { PDFDocument(data: $0) }
+            pdf = PDFDocument(url: url)
         case "txt", "md", "json", "swift", "js", "ts", "py", "sh", "html", "css", "xml", "yml", "yaml", "log", "csv":
             let loadedText = await Task.detached(priority: .userInitiated) { () -> String? in
                 guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }

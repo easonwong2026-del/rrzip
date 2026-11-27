@@ -97,9 +97,9 @@ sit / sitx / lz4 / lzx 只能识别、不能打开（本机引擎不支持，会
 open build/rrzip.app
 ```
 
-`Assets/7zz` 是第三方二进制，不入库；`scripts/fetch-7zz.sh` 会从官方 release 拉取（直连失败自动走镜像）。
+`Assets/7zz` 是第三方二进制，不入库；`scripts/fetch-7zz.sh` 默认直连官方发布地址，校验下载包和解包后二进制的 SHA256。只有显式设置 `ALLOW_MIRROR=1` 且直连失败时才回退到镜像，镜像也强制校验。
 
-依赖：macOS 14+、Xcode Command Line Tools（`swiftc` 6.x）。
+当前只构建 Apple Silicon（`arm64`）。需要 macOS 14+ 与 Xcode Command Line Tools（`swiftc` 6.x，使用 Swift 5 语言模式）。
 
 产物：
 - `build/rrzip.app` —— 主程序
@@ -198,7 +198,7 @@ rrzip/
 ./scripts/test.sh
 ```
 
-自动生成带中文名、含空格、嵌套目录、加密 7z、改名为 `.bin` 的样例包，断言 **142 项**：八进制转义还原、zip/tgz 列表、目录折叠、加密包识别与 7-Zip 回退、后缀与魔数识别、原地增删、子项索引一致性与 10 万条目性能、访达菜单矩阵、解压不覆盖（真的解压两次比对文件内容）、设置原子写、压缩进度回调、7zz 的 `-mx` 映射、扩展与主程序之间的两条转交记录。
+装好 7-Zip 引擎后，完整套件运行 **916 项断言**。用例覆盖进程取消与退出协调、加密包与中文路径、修改时间排序、软链与解压膨胀预检、缩略图与预览保护、访达菜单和原子写入，以及归档编辑、冲突策略和设置回归。
 
 ## 许可
 
@@ -220,4 +220,4 @@ GNU GPL-3.0（见 [LICENSE](LICENSE)）。因为使用了 MacPacker 的格式目
 - 文本预览只读前 120 KB
 - 快速查看扩展只列条目，不预览条目内容
 - **访达扩展带全盘读写例外**：ad-hoc 签名下扩展拿不到「用户已选择文件」的沙盒授权，只能用 `temporary-exception.files.absolute-path.read-write` 兜底。这意味着该扩展进程能读写整块磁盘。拿到 Developer ID 后要复验能否删掉这条（脚本 `scripts/poc-sandbox.sh`）
-- 打开加密包时密码通过命令行参数传给 tar / 7zz，**同机其他用户理论上能在 `ps` 里看到**。单人使用的机器没问题，多用户共享机器上不要用它开加密包（libarchive 与 7-Zip 都不支持从标准输入读密码）
+- 使用系统 libarchive 列目录时，密码通过进程内 API 传递，子进程参数中没有密码。7z 加密头仍由 7-Zip 列目录。调用 `tar` 或 `7zz` 执行需要密码的操作时，密码仍可能出现在进程参数中。

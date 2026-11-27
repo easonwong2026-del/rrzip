@@ -8,7 +8,7 @@ import SwiftUI
 /// 串行执行，避免同时开一堆 7zz 抢磁盘。
 @MainActor
 final class BatchRunner: ObservableObject {
-    enum Mode {
+    enum Mode: Sendable {
         case extract
         case verify
 
@@ -39,6 +39,7 @@ final class BatchRunner: ObservableObject {
     @Published var destination: URL?
 
     private var task: Task<Void, Never>?
+    private var activeJobID: UUID?
 
     init(urls: [URL], mode: Mode) {
         self.mode = mode
@@ -61,84 +62,93 @@ final class BatchRunner: ObservableObject {
     var skippedCount: Int { jobs.filter { $0.state == .skipped }.count }
 
     var canStart: Bool {
-        guard !running, !jobs.isEmpty else { return false }
+        guard !running, !jobs.isEmpty,
+              FormalWriteLedger.shared.currentGate.acceptsWrites else { return false }
         if mode == .extract { return destination != nil }
         return true
     }
 
     func start() {
         guard canStart else { return }
+        let ledger = FormalWriteLedger.shared
+        let kind: FormalWrite.Kind = mode == .extract ? .batchExtract : .batchVerify
+        guard let batchID = ledger.begin(kind, label: "\(jobs.count) 个压缩包", onCancel: { [weak self] in
+            self?.cancel()
+        }) else { return }
+
         running = true
         cancelled = false
         let mode = self.mode
         let destination = self.destination
 
-        task = Task { [weak self] in
-            guard let self else { return }
-            for job in self.jobs {
+        task = Task {
+            defer {
+                cancelled = Task.isCancelled
+                running = false
+                task = nil
+                ledger.end(batchID)
+            }
+            for index in jobs.indices {
                 if Task.isCancelled { break }
-                await MainActor.run {
-                    if let index = self.jobs.firstIndex(where: { $0.id == job.id }) {
-                        self.jobs[index].state = .running
-                        self.jobs[index].detail = ""
-                    }
-                }
-
+                let id = jobs[index].id
+                let archive = jobs[index].url
                 do {
-                    switch mode {
-                    case .extract:
-                        guard let root = destination else { break }
-                        let folder = Self.uniqueFolder(for: job.url, in: root)
-                        try await Task.detached(priority: .userInitiated) {
-                            try ArchiveService.extract(job.url, entries: [], to: folder, password: nil)
-                        }.value
-                        await MainActor.run {
-                            if let index = self.jobs.firstIndex(where: { $0.id == job.id }) {
-                                self.jobs[index].state = .done
-                                self.jobs[index].detail = folder.lastPathComponent
-                            }
-                        }
-                    case .verify:
-                        try await Task.detached(priority: .userInitiated) {
-                            try ArchiveService.verify(job.url)
-                        }.value
-                        await MainActor.run {
-                            if let index = self.jobs.firstIndex(where: { $0.id == job.id }) {
-                                self.jobs[index].state = .done
-                                self.jobs[index].detail = "完整"
-                            }
-                        }
+                    try TaskRegistry.claim(id)
+                    activeJobID = id
+                    defer {
+                        activeJobID = nil
+                        TaskRegistry.release(id)
                     }
+                    jobs[index].state = .running
+                    jobs[index].detail = ""
+
+                    let detail = try await Task.detached(priority: .userInitiated) {
+                        try TaskRegistry.checkCancellation(id)
+                        switch mode {
+                        case .extract:
+                            guard let destination else { throw ArchiveError.tool("缺少批量解压目标目录") }
+                            return try Self.extract(archive, into: destination, jobID: id)
+                        case .verify:
+                            try ArchiveService.verify(archive, jobID: id)
+                            return "完整"
+                        }
+                    }.value
+                    jobs[index].state = .done
+                    jobs[index].detail = detail
+                } catch ArchiveError.cancelled {
+                    jobs[index].state = .skipped
+                    jobs[index].detail = "已取消"
+                    break
                 } catch ArchiveError.needsPassword {
-                    await MainActor.run {
-                        if let index = self.jobs.firstIndex(where: { $0.id == job.id }) {
-                            self.jobs[index].state = .skipped
-                            self.jobs[index].detail = "已加密，需要密码"
-                        }
-                    }
+                    jobs[index].state = .skipped
+                    jobs[index].detail = "已加密，需要密码"
                 } catch {
                     let message = error.localizedDescription
-                    let encrypted = Tar.looksEncrypted(message)
-                    await MainActor.run {
-                        if let index = self.jobs.firstIndex(where: { $0.id == job.id }) {
-                            self.jobs[index].state = encrypted ? .skipped : .failed
-                            self.jobs[index].detail = encrypted
-                                ? "已加密，需要密码"
-                                : message.split(separator: "\n").last.map(String.init) ?? message
-                        }
-                    }
+                    jobs[index].state = .failed
+                    jobs[index].detail = message.split(separator: "\n").last.map(String.init) ?? message
                 }
-            }
-
-            await MainActor.run {
-                self.running = false
-                self.cancelled = Task.isCancelled
             }
         }
     }
 
     func cancel() {
         task?.cancel()
+        if let activeJobID { TaskRegistry.cancel(activeJobID) }
+    }
+
+    nonisolated private static func extract(_ archive: URL, into root: URL, jobID: UUID) throws -> String {
+        let fm = FileManager.default
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let folder = uniqueFolder(for: archive, in: root)
+        // 只有这次亲手建成的目录才能清理，重名竞争时保留对方的文件。
+        try fm.createDirectory(at: folder, withIntermediateDirectories: false)
+        do {
+            try ArchiveService.extract(archive, entries: [], to: folder, password: nil, jobID: jobID)
+        } catch {
+            try fm.removeItem(at: folder)
+            throw error
+        }
+        return folder.lastPathComponent
     }
 
     /// 切换解压 / 校验：只重置状态，不动文件列表

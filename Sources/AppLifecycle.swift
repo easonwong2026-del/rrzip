@@ -119,15 +119,17 @@ final class TerminationCoordinator {
         var inPlaceEdits = 0
         /// 访达服务：压缩 / 解压到用户目录
         var finderServices = 0
+        var batchExtracts = 0
+        var batchVerifications = 0
         /// 可丢弃的预览缓存写入
         var previewWrites = false
 
-        /// 正式写入总数：这两类都没有宽限期
-        var formalWrites: Int { inPlaceEdits + finderServices }
+        var formalWrites: Int { inPlaceEdits + finderServices + batchExtracts }
+        var hasTasks: Bool { jobs > 0 || formalWrites > 0 || batchVerifications > 0 }
 
-        var isEmpty: Bool { jobs == 0 && formalWrites == 0 && !previewWrites }
-        /// 只有预览缓存在写：可以不等，宽限期一到就走
-        var isPreviewOnly: Bool { jobs == 0 && formalWrites == 0 && previewWrites }
+        var isEmpty: Bool { !hasTasks && !previewWrites }
+        /// 只有预览缓存在写：宽限期一到就走
+        var isPreviewOnly: Bool { !hasTasks && previewWrites }
 
         /// 退出确认框里的说明。必须和实际行为一致：
         /// 正式写入说「等它完成」，预览缓存才提 5 秒上限。
@@ -141,9 +143,14 @@ final class TerminationCoordinator {
                 lines.append("其中 \(finderServices) 项是访达服务的压缩 / 解压，"
                              + "产物直接写到用户目录，会等它们完成后再退出，不会留下不完整的压缩包。")
             }
+            if batchExtracts > 0 {
+                lines.append("有 \(batchExtracts) 批解压正在进行。取消时会终止解压并清理当前未完成的目录。")
+            }
+            if batchVerifications > 0 {
+                lines.append("有 \(batchVerifications) 批校验正在进行，可以等待完成或取消。")
+            }
             if jobs > 0 {
-                lines.append("「取消任务并退出」只会取消队列里的压缩 / 解压，"
-                             + "正在写入用户文件的操作仍会等待完成。")
+                lines.append("「取消任务并退出」会取消队列里的压缩 / 解压，并等待它们收尾。")
             }
             if isPreviewOnly {
                 lines.append("当前只有预览缓存在写入：最多再等 5 秒，超时直接退出，"
@@ -161,6 +168,8 @@ final class TerminationCoordinator {
         return Workload(jobs: host?.pendingJobCount ?? 0,
                         inPlaceEdits: formal.inPlaceEdits,
                         finderServices: formal.finderServices,
+                        batchExtracts: formal.batchExtracts,
+                        batchVerifications: formal.batchVerifications,
                         previewWrites: host?.isWritingScratch ?? false)
     }
 
@@ -227,6 +236,7 @@ final class TerminationCoordinator {
             FormalWriteLedger.shared.setGate(.cancelling)
             // 清队列 + 取消当前任务；返回后立刻判一次，可能本来就没有活
             host?.cancelWorkForTermination()
+            FormalWriteLedger.shared.cancelBatches()
             armDrainCallback()
             checkDrained()
         }
@@ -244,15 +254,8 @@ final class TerminationCoordinator {
 
         let workload = self.workload
 
-        if workload.jobs > 0 {
-            // 队列任务的收尾有明确回调；轮询只是兜住「回调丢了」这一种情况
-            schedulePoll(after: jobPollInterval)
-            return
-        }
-
-        if workload.formalWrites > 0 {
-            // 原地编辑 / 访达服务：没有宽限期。宁可多等，也不能把正在写的
-            // 用户文件丢下——这里不参考 scratchGrace。
+        if workload.hasTasks {
+            // 等队列、正式写入和批量任务收尾，预览宽限期从那之后开始。
             schedulePoll(after: jobPollInterval)
             return
         }

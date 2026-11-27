@@ -5,6 +5,7 @@
 //  资源层：缩略图缓存成本、预览解压去重、临时副本字节预算、大文件预览策略
 
 import CoreGraphics
+import ImageIO
 import Foundation
 
 /// 缩略图缓存按位图字节计费
@@ -217,7 +218,17 @@ func testInlinePreviewLimit() {    print("内嵌预览 · 大小判断")
     expect(!InlinePreviewLimits.skipsExtraction(unknown), "大小未知时不预先拦截")
 
     let image = ArchiveEntry(path: "big.png", size: 900 * 1024 * 1024, modified: "-", mode: "-rw-r--r--")
-    expect(!InlinePreviewLimits.skipsExtraction(image), "图片不受音视频上限约束")
+    expect(!InlinePreviewLimits.isMedia(image.ext), "图片与音视频使用各自的上限")
+    expect(InlinePreviewLimits.skipsExtraction(image), "超过图片大小上限时跳过内联解压")
+    for (ext, limit) in [("png", InlinePreviewLimits.image), ("tiff", InlinePreviewLimits.image),
+                         ("pdf", InlinePreviewLimits.pdf)] {
+        for (size, skips) in [(limit, false), (limit + 1, true), (-1, false)] {
+            let entry = ArchiveEntry(path: "preview.\(ext)", size: size, modified: "", mode: "-rw-r--r--")
+            expect(InlinePreviewLimits.skipsExtraction(entry) == skips,
+                   "\(ext) 在 \(size) 字节时按对应上限判断")
+        }
+        expect(InlinePreviewLimits.exceedsLimit(limit + 1, for: ext), "\(ext) 实际大小复核也执行同一上限")
+    }
 }
 
 /// keep 传进来的是文件路径，回收候选是顶层目录：必须归一再比，不能精确相等
@@ -785,4 +796,31 @@ func runResourceTests() {
     testConsumersRegisterByPath()
     testSaveAsHandoffKeepsSourceAlive()
     testInlinePreviewLimit()
+    testInlineImageDownsample()
+}
+
+private func testInlineImageDownsample() {
+    print("内联预览 · 大 TIFF 降采样")
+    let url = fixtures.appendingPathComponent("preview-wide.tiff")
+    guard let context = CGContext(data: nil, width: 6000, height: 1000, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+          let source = context.makeImage(),
+          let writer = CGImageDestinationCreateWithURL(url as CFURL, "public.tiff" as CFString, 1, nil) else {
+        expect(false, "生成测试 TIFF")
+        return
+    }
+    CGImageDestinationAddImage(writer, source, nil)
+    guard CGImageDestinationFinalize(writer),
+          let image = ThumbnailStore.downsample(url: url, maxPixel: InlinePreviewLimits.imageMaxPixel,
+                                                maxSourcePixels: 6_000_000) else {
+        expect(false, "预览能解码宽幅 TIFF")
+        return
+    }
+    expect(image.width == Int(InlinePreviewLimits.imageMaxPixel), "降采样限制长边像素")
+    expect(abs(image.height - 683) <= 1, "降采样保持图像比例")
+    expect(ThumbnailStore.downsample(url: url, maxPixel: 160, maxSourcePixels: 5_999_999) == nil,
+           "源图超过像素预算时，在解码之前跳过")
+    expect(ThumbnailStore.downsample(url: url.appendingPathExtension("missing"), maxPixel: 160) == nil,
+           "无法读取的图片返回空结果")
 }
