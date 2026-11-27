@@ -172,6 +172,22 @@ private func testSymlinkPreflight() {
     ])) == nil, "目标解析穿过其他软链后仍检查解压根目录")
     expect((try? ArchivePathGuard.validateSymlink("../../outside", at: "a\\b/link")) == nil,
            "反斜杠作为普通字符时也不会把包外路径误算成包内")
+    expect((try? ArchivePathGuard.validateSymlinks([
+        ("dir/alias", ".."), ("dir/alias/nested", "file")
+    ])) == nil, "拒绝把另一个软链写到链式父目录下")
+    expect((try? ArchivePathGuard.validateSymlinks([
+        ("dir/alias", "..")
+    ], entryPaths: ["dir/alias/report.txt"])) == nil, "拒绝通过软链父目录落盘普通条目")
+    expect((try? ArchivePathGuard.validateSymlinks([
+        ("a", "b"), ("b", "a")
+    ])) == nil, "超过软链解析上限时阻断预检")
+    let unknown = ArchiveEntry(path: "link", size: 1, modified: "", mode: "lrwxrwxrwx")
+    do {
+        try ArchiveService.validateExtraction(entries: [unknown], compressedSize: 50)
+        expect(false, "整包解压应拒绝无法确认目标的软链")
+    } catch ArchiveError.unsafePath(let path) {
+        expect(path == "link", "无法确认目标的软链报出具体条目")
+    } catch { expect(false, "缺失软链目标诊断类型", "\(error)") }
     let fm = FileManager.default
     let root = fixtures.appendingPathComponent("symlink-preflight", isDirectory: true)
     do {

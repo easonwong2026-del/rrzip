@@ -6,6 +6,11 @@ import AVKit
 import PDFKit
 import SwiftUI
 
+// 后台创建的 PDFDocument 移交给主线程后，只在主线程使用。
+private struct LoadedPDF: @unchecked Sendable {
+    let document: PDFDocument?
+}
+
 struct PreviewPane: View {
     @ObservedObject var model: ArchiveModel
 
@@ -372,7 +377,13 @@ struct PreviewPane: View {
 
         switch ext {
         case "pdf":
-            pdf = PDFDocument(url: url)
+            ScratchUsage.shared.beginWork(on: url.path)
+            let document = await Task.detached(priority: .userInitiated) {
+                defer { ScratchUsage.shared.endWork(on: url.path) }
+                return LoadedPDF(document: PDFDocument(url: url))
+            }.value
+            guard !Task.isCancelled else { return }
+            pdf = document.document
         case "txt", "md", "json", "swift", "js", "ts", "py", "sh", "html", "css", "xml", "yml", "yaml", "log", "csv":
             let loadedText = await Task.detached(priority: .userInitiated) { () -> String? in
                 guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }

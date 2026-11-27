@@ -103,10 +103,7 @@ enum InProcessArchive {
 
             let opened = url.path.withCString { C.openFilename(handle, $0, 64 * 1024) }
             guard opened >= warn else {
-                let message = C.errorString(handle).map { String(cString: $0) }
-                // 打不开文件时诊断会回显路径，文件名里的“encrypted”等不是密码提示。
-                if let message, message.hasPrefix("Failed to open") { throw ArchiveError.tool(message) }
-                throw Self.mapError(handle, fallback: "无法读取归档")
+                throw Self.mapError(handle, fallback: "无法读取归档", ignoringPath: url.path)
             }
 
             let formatter = DateFormatter()
@@ -116,6 +113,7 @@ enum InProcessArchive {
             var entries: [ArchiveEntry] = []
             if let limit { entries.reserveCapacity(max(0, min(limit, 512))) }
             var totalCount = 0
+            var verifiedPassword = false
 
             while true {
                 if isCancelled?() == true { throw ArchiveError.cancelled }
@@ -129,14 +127,14 @@ enum InProcessArchive {
                 guard let entry = raw, let pathPointer = C.pathname(entry) else { continue }
                 guard pathPointer.pointee != 0 else { continue }
 
-                // ZIP 等格式的文件名可在未解密时读取。读一个字节触发密码检查，
-                // 避免把「目录可读」当成「密码正确」，也无需为列目录解压整份文件。
-                if C.isEncrypted(entry) != 0 {
+                // ZIP 的文件名不需解密。用首个能读到数据的加密条目触发密码检查，
+                // 后续条目交给完整性校验或解压验证，避免每个条目都派生密钥。
+                if !verifiedPassword, C.isEncrypted(entry) != 0 {
                     guard let passphrase, !passphrase.isEmpty else { throw ArchiveError.needsPassword }
                     var byte: UInt8 = 0
-                    if C.readData(handle, &byte, 1) < 0 {
-                        throw Self.mapError(handle, fallback: "无法读取加密条目")
-                    }
+                    let count = C.readData(handle, &byte, 1)
+                    if count < 0 { throw Self.mapError(handle, fallback: "无法读取加密条目") }
+                    verifiedPassword = count > 0
                 }
                 totalCount += 1
                 if let limit, entries.count >= limit { continue }
@@ -159,9 +157,11 @@ enum InProcessArchive {
 
         /// libarchive 的错误字符串只在这一层有意义；加密要单独认出来，
         /// 否则调用方只能看到一句泛泛的失败
-        private static func mapError(_ handle: OpaquePointer, fallback: String) -> ArchiveError {
+        private static func mapError(_ handle: OpaquePointer, fallback: String,
+                                     ignoringPath path: String? = nil) -> ArchiveError {
             let message = C.errorString(handle).map { String(cString: $0) } ?? fallback
-            if Tar.looksEncrypted(message) { return .needsPassword }
+            let diagnostic = path.map { message.replacingOccurrences(of: $0, with: "") } ?? message
+            if Tar.looksEncrypted(diagnostic) { return .needsPassword }
             // 最常见的一条翻成人话，其余保持 libarchive 原文（比一句笼统的
             // 「请重新构建应用」有用得多）
             if message.lowercased().contains("unrecognized archive format") {

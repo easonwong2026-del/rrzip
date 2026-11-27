@@ -207,7 +207,8 @@ final class ThumbnailStore: ObservableObject {
     nonisolated private static func render(url: URL, ext: String, maxPixel: CGFloat) -> CGImage? {
         if ext == "pdf" { return pdfFirstPage(url: url, maxPixel: maxPixel) }
         if videoExts.contains(ext) { return videoFirstFrame(url: url, maxPixel: maxPixel) }
-        return downsample(url: url, maxPixel: maxPixel)
+        return downsample(url: url, maxPixel: maxPixel,
+                          maxSourcePixels: InlinePreviewLimits.imageMaxSourcePixels)
     }
 
     /// 取视频首帧：优先 1 秒处（纯黑开场也能拿到画面），短片则取开头
@@ -295,8 +296,10 @@ struct EntryThumbnail: View {
     var body: some View {
         let key = store.cacheKey(for: entry, model: model, maxPixel: pixel)
         let request = "\(key)|\(store.version)"
+        let ready = readyRequest == request
+        let cached = store.cached(forKey: key)
         Group {
-            if readyRequest == request, let image = store.cached(forKey: key) {
+            if let image = cached {
                 Image(decorative: image, scale: 1)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -311,6 +314,7 @@ struct EntryThumbnail: View {
             }
         }
         .task(id: request) {
+            guard cached == nil, !ready else { return }
             await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
                 store.thumbnail(for: entry, model: model, maxPixel: pixel) { _ in done.resume() }
             }

@@ -1058,6 +1058,7 @@ func testStashExportCancelMidWrite() {
 
 func runModelTests() {
     testModifiedDateSort()
+    testAbandonedPasswordPromptDoesNotOverwriteNewFrame()
     testBatchDestination()
     testOpenGate()
     testJobQueue()
@@ -1104,5 +1105,32 @@ private func testModifiedDateSort() {
         model.sortAscending = false
         expect(model.sortEntries(rows).map(\.path) == ["apple", "zebra", "jan", "dec", "unknown-a", "unknown-b"],
                "降序仍把缺失项放在末尾，并列项名称顺序稳定")
+        let nested = ArchiveEntry(path: "folder/file", size: 1, modified: rows[0].modified,
+                                  mode: rows[0].mode, modifiedDate: rows[0].modifiedDate)
+        expect(ArchiveModel.buildChildIndex([nested])[""]?.first?.modifiedDate == nested.modifiedDate,
+               "合成的父目录保留子条目时间元数据")
+    }
+}
+
+private func testAbandonedPasswordPromptDoesNotOverwriteNewFrame() {
+    print("打开归档 · 旧密码回调不覆盖新归档")
+    guard SevenZip.isAvailable else { return }
+    MainActor.assumeIsolated {
+        let model = ArchiveModel()
+        let locked = fixtures.appendingPathComponent("secret.7z")
+        let plain = fixtures.appendingPathComponent("basic.zip")
+        model.open(url: locked)
+        guard waitUntil(10, { model.passwordRequest?.archive == locked }) else {
+            expect(false, "旧归档未进入密码提示")
+            return
+        }
+        model.open(url: plain)
+        let switched = waitUntil(10, { model.current?.archive == plain && !model.isLoading })
+        expect(switched, "在旧密码提示等待时可以打开另一归档")
+        let expected = model.status
+        model.submitPassword(nil)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        expect(model.status == expected && model.current?.archive == plain,
+               "旧密码弹窗结果不更改新归档状态")
     }
 }

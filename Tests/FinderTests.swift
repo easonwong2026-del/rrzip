@@ -307,6 +307,9 @@ private func testFinderAtomicCompression() {
         let dangling = folder.appendingPathComponent("report 4.zip")
         try fm.createSymbolicLink(atPath: dangling.path, withDestinationPath: "nothing")
         expect(UniquePath.file(original).lastPathComponent == "report 5.zip", "断开的软链名称也视为占用")
+        let dir = folder.appendingPathComponent("extract")
+        try fm.createSymbolicLink(atPath: dir.path, withDestinationPath: "missing-folder")
+        expect(UniquePath.directory(dir).lastPathComponent == "extract 2", "目录名也避让断开的软链")
         expect(FinderJobRunner.compress([], format: .zip, each: false).succeeded.isEmpty, "空选择安全返回")
     } catch { expect(false, "原子发布测试", "\(error)") }
 }

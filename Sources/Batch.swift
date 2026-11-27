@@ -113,6 +113,7 @@ final class BatchRunner: ObservableObject {
                             return "完整"
                         }
                     }.value
+                    if mode == .verify, Task.isCancelled { throw ArchiveError.cancelled }
                     jobs[index].state = .done
                     jobs[index].detail = detail
                 } catch ArchiveError.cancelled {
@@ -145,7 +146,7 @@ final class BatchRunner: ObservableObject {
         do {
             try ArchiveService.extract(archive, entries: [], to: folder, password: nil, jobID: jobID)
         } catch {
-            try fm.removeItem(at: folder)
+            try? fm.removeItem(at: folder)
             throw error
         }
         return folder.lastPathComponent

@@ -144,7 +144,7 @@ final class TerminationCoordinator {
                              + "产物直接写到用户目录，会等它们完成后再退出，不会留下不完整的压缩包。")
             }
             if batchExtracts > 0 {
-                lines.append("有 \(batchExtracts) 批解压正在进行。取消时会终止解压并清理当前未完成的目录。")
+                lines.append("有 \(batchExtracts) 批解压正在进行。取消时会终止解压并尝试清理当前未完成的目录。")
             }
             if batchVerifications > 0 {
                 lines.append("有 \(batchVerifications) 批校验正在进行，可以等待完成或取消。")

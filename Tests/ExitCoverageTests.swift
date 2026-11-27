@@ -534,7 +534,11 @@ private func testBatchCancelsRealProcesses() {
             other.waitUntilExit()
 
             guard SevenZip.isAvailable else { return }
-            let verify = BatchRunner(urls: [archive, archive], mode: .verify)
+            // TAR 没有文件内容 CRC，7zz 可能跳读。ZIP 必须完整读并校验载荷。
+            let zip = folder.appendingPathComponent("large.zip")
+            try SevenZip.create(at: zip, from: [source], format: "zip",
+                                password: nil, volume: nil, level: 1)
+            let verify = BatchRunner(urls: [zip, zip], mode: .verify)
             verify.start()
             let verifyID = verify.jobs[0].id
             expect(waitUntil(5, interval: 0.001, { TaskRegistry.hasProcess(for: verifyID) }),

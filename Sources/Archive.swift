@@ -28,6 +28,7 @@ struct ArchiveEntry: Identifiable, Hashable {
     var name: String { (path as NSString).lastPathComponent.isEmpty ? path : (path as NSString).lastPathComponent }
     var ext: String { (path as NSString).pathExtension.lowercased() }
     var isDirectory: Bool { mode.hasPrefix("d") || path.hasSuffix("/") }
+    var isSymlink: Bool { mode.hasPrefix("l") || symlinkTarget != nil }
     var isArchive: Bool { ArchiveKind.isArchive(ext: ext) }
 
     var displaySize: String { ByteFormatter.string(size) }
@@ -109,7 +110,7 @@ enum ArchivePathGuard {
         try validateSymlinks([(path, target)])
     }
 
-    static func validateSymlinks(_ links: [(path: String, target: String)]) throws {
+    static func validateSymlinks(_ links: [(path: String, target: String)], entryPaths: [String] = []) throws {
         guard !links.isEmpty else { return }
         for link in links {
             try validateRelative(link.path)
@@ -119,14 +120,16 @@ enum ArchivePathGuard {
         }
 
         // 两个引擎/格式对反斜杠的处理可能不同，两种路径解释都必须留在根目录内。
-        try validateSymlinks(links, splitting: { $0 == "/" })
-        if links.contains(where: { $0.path.contains("\\") || $0.target.contains("\\") }) {
-            try validateSymlinks(links, splitting: { $0 == "/" || $0 == "\\" })
+        try validateSymlinks(links, entryPaths: entryPaths, splitting: { $0 == "/" })
+        if links.contains(where: { $0.path.contains("\\") || $0.target.contains("\\") }) ||
+            entryPaths.contains(where: { $0.contains("\\") }) {
+            try validateSymlinks(links, entryPaths: entryPaths, splitting: { $0 == "/" || $0 == "\\" })
         }
     }
 
     private static func validateSymlinks(
-        _ links: [(path: String, target: String)], splitting isSeparator: (Character) -> Bool
+        _ links: [(path: String, target: String)], entryPaths: [String],
+        splitting isSeparator: (Character) -> Bool
     ) throws {
         var targets: [String: [Substring]] = [:]
         for (path, target) in links {
@@ -135,6 +138,15 @@ enum ArchivePathGuard {
             let parts = target.split(whereSeparator: isSeparator)
             if let prior = targets.updateValue(parts, forKey: key), prior != parts {
                 throw ArchiveError.unsafePath(path)
+            }
+        }
+        // 归档可以包含指向目录的软链。其他归档条目不得借这些软链改变落点。
+        for path in entryPaths + links.map(\.path) {
+            var parent = ""
+            for component in path.split(whereSeparator: isSeparator).filter({ $0 != "." }).dropLast() {
+                if !parent.isEmpty { parent += "/" }
+                parent += component.lowercased()
+                if targets[parent] != nil { throw ArchiveError.unsafePath(path) }
             }
         }
         for (path, target) in links {
@@ -150,14 +162,12 @@ enum ArchivePathGuard {
                     resolved.append(component)
                     let key = resolved.joined(separator: "/").lowercased()
                     if let nested = targets[key] {
-                        // 系统也会拒绝超过符号链接解析上限的路径；这里无需展开环。
                         hops += 1
-                        if hops > 40 { break }
+                        guard hops <= 40 else { throw ArchiveError.unsafePath(path) }
                         resolved.removeLast()
                         pending.append(contentsOf: nested.reversed())
                     }
                 }
-                if hops > 40 { break }
             }
         }
     }
@@ -716,11 +726,19 @@ enum SevenZip {
     private static func looksEncrypted(_ message: String, archive: URL) -> Bool {
         let archivePrefix = "ERROR: \(archive.path) : "
         return message.split(whereSeparator: \.isNewline).contains { line in
-            let diagnostic = line.hasPrefix(archivePrefix) ? line.dropFirst(archivePrefix.count) : line
+            let diagnostic: Substring
+            if line.hasPrefix(archivePrefix) {
+                diagnostic = line.dropFirst(archivePrefix.count)
+            } else if line.hasPrefix("ERROR: ") {
+                diagnostic = line.dropFirst("ERROR: ".count)
+            } else {
+                diagnostic = line
+            }
             let text = diagnostic.trimmingCharacters(in: .whitespaces).lowercased()
             return text.hasPrefix("wrong password") || text.hasPrefix("can not open encrypted archive")
                 || text.hasPrefix("cannot open encrypted archive") || text.hasPrefix("enter password")
                 || text.hasPrefix("password is required") || text.hasPrefix("encrypted archive")
+                || text.hasPrefix("data error in encrypted file") || text.hasPrefix("crc failed in encrypted file")
         }
     }
 
@@ -735,14 +753,18 @@ enum SevenZip {
         func flush() {
             defer { current = [:] }
             guard let path = current["Path"], !path.isEmpty else { return }
-            let isFolder = (current["Folder"] ?? "-") == "+"
+            let attributes = current["Attributes"]
+            let posixMode = attributes?.split(whereSeparator: \.isWhitespace).last
+                .flatMap { $0.count == 10 ? String($0) : nil }
+            let mode = current["Mode"].flatMap { $0.isEmpty ? nil : $0 } ?? posixMode
+            let isFolder = current["Folder"] == "+" || mode?.hasPrefix("d") == true
             let size = Int64(current["Size"] ?? "0") ?? 0
             let modified = current["Modified"] ?? ""
             entries.append(ArchiveEntry(
                 path: path + (isFolder ? "/" : ""),
                 size: isFolder ? 0 : size,
                 modified: String(modified.prefix(16)),
-                mode: current["Mode"] ?? (isFolder ? "drwxr-xr-x" : current["Attributes"] ?? "-rw-r--r--"),
+                mode: mode ?? (isFolder ? "drwxr-xr-x" : attributes ?? "-rw-r--r--"),
                 modifiedDate: formatter.date(from: String(modified.prefix(19))),
                 symlinkTarget: (current["Symbolic Link"].flatMap { $0.isEmpty ? nil : $0 }
                     ?? current["Target"]).flatMap { $0.isEmpty ? nil : $0 }

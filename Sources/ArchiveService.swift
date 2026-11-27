@@ -83,11 +83,15 @@ enum ArchiveService {
         var links: [(path: String, target: String)] = []
         for entry in entries {
             try ArchivePathGuard.validateRelative(entry.path)
-            if let target = entry.symlinkTarget {
+            if entry.isSymlink {
+                // 某些 7-Zip 格式只列出链接模式。目标无法核查时拒绝整包解压。
+                guard let target = entry.symlinkTarget else { throw ArchiveError.unsafePath(entry.path) }
                 links.append((entry.path, target))
             }
         }
-        try ArchivePathGuard.validateSymlinks(links)
+        if !links.isEmpty {
+            try ArchivePathGuard.validateSymlinks(links, entryPaths: entries.map(\.path))
+        }
         try validateExpansion(entries: entries, compressedSize: compressedSize)
     }
 
@@ -127,6 +131,7 @@ enum ArchiveService {
                 let inspected = try list(url, using: candidate, password: password, jobID: jobID)
                 try validateExtraction(entries: inspected, compressedSize: compressedSize)
             }
+            try TaskRegistry.checkCancellation(jobID)
             do {
                 switch candidate {
                 case .libarchive:

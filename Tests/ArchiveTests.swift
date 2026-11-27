@@ -303,6 +303,7 @@ func runArchiveTests() {
     testTgzListing()
     testTarVerboseMetadata()
     testSevenZipListingDiagnostics()
+    testSevenZipVerifyPasswordDiagnostics()
     testEncrypted7z()
     testFormatDetection()
     testInPlaceEditing()
@@ -384,4 +385,35 @@ private func testSevenZipListingDiagnostics() {
         from: DateComponents(year: 2025, month: 1, day: 5, hour: 13, minute: 24, second: 19))
     expect(listing.first?.modifiedDate == date, "7-Zip 时间保留秒")
     expect(listing.last?.modifiedDate == nil, "没有时间的条目保持无日期")
+}
+
+private func testSevenZipVerifyPasswordDiagnostics() {
+    print("7-Zip 校验 · 条目密码诊断与批量跳过")
+    guard SevenZip.isAvailable else { return }
+    let input = fixtures.appendingPathComponent("src/说明.txt")
+    let zip = fixtures.appendingPathComponent("verify-locked.zip")
+    let seven = fixtures.appendingPathComponent("verify-locked.7z")
+    do {
+        try SevenZip.create(at: zip, from: [input], format: "zip", password: "pw123", volume: nil)
+        try SevenZip.run(["a", "-t7z", "-y", "-ppw123", "-mhe=off", seven.path, "--", input.path],
+                         captureOutput: false)
+        for url in [zip, seven] {
+            for password in [nil, "incorrect"] {
+                do {
+                    try SevenZip.verify(url, password: password)
+                    expect(false, "加密载荷校验应要求密码")
+                } catch ArchiveError.needsPassword {
+                    expect(true, "正确识别 \(url.pathExtension) 载荷的密码诊断")
+                }
+            }
+            try SevenZip.verify(url, password: "pw123")
+            expect(true, "正确密码通过 \(url.pathExtension) 的实际完整性校验")
+        }
+        MainActor.assumeIsolated {
+            let batch = BatchRunner(urls: [zip, seven], mode: .verify)
+            batch.start()
+            expect(waitUntil(10, { !batch.running }), "校验加密归档的批次会正常收尾")
+            expect(batch.jobs.allSatisfy { $0.state == .skipped }, "批量校验把两种数据加密归档标记为跳过")
+        }
+    } catch { expect(false, "条目级密码诊断", "\(error)") }
 }

@@ -218,7 +218,6 @@ enum FinderJobRunner {
         let folder = first.deletingLastPathComponent()
         let base = nameHint.isEmpty ? "归档" : nameHint
         let requested = folder.appendingPathComponent(base).appendingPathExtension(format.rawValue)
-        var output = UniquePath.file(requested)
         let staged = folder.appendingPathComponent(".rrzip-\(UUID().uuidString)")
             .appendingPathExtension(format.rawValue)
         defer { try? FileManager.default.removeItem(at: staged) }
@@ -240,11 +239,11 @@ enum FinderJobRunner {
             } else {
                 throw ArchiveError.tool("右键只能压 ZIP；7Z 请在 rrzip 里新建")
             }
-            output = try publish(staged, as: requested)
+            let output = try publish(staged, as: requested)
             outcome.succeeded = urls.count == 1 ? [first.lastPathComponent] : [output.lastPathComponent]
             outcome.destination = folder
         } catch {
-            outcome.failed.append(.init(name: output.lastPathComponent,
+            outcome.failed.append(.init(name: requested.lastPathComponent,
                                         reason: error.localizedDescription))
         }
         return outcome

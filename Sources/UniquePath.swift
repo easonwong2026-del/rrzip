@@ -59,17 +59,16 @@ enum UniquePath {
     /// 目录版：`a` → `a 2`。
     /// `reserved` 用于同一批多选：两个包都叫 a，不能都解到 a/
     static func directory(_ url: URL, avoiding reserved: Set<String> = []) -> URL {
-        let fm = FileManager.default
         let parent = url.deletingLastPathComponent()
         let base = url.lastPathComponent
         var candidate = url
         var index = 2
-        while (fm.fileExists(atPath: candidate.path) || reserved.contains(candidate.path))
+        while (fileExists(candidate) || reserved.contains(candidate.path))
                 && index <= maxAttempts + 1 {
             candidate = parent.appendingPathComponent("\(base) \(index)", isDirectory: true)
             index += 1
         }
-        if fm.fileExists(atPath: candidate.path) || reserved.contains(candidate.path) {
+        if fileExists(candidate) || reserved.contains(candidate.path) {
             return parent.appendingPathComponent("\(base) \(UUID().uuidString.prefix(8))", isDirectory: true)
         }
         return candidate

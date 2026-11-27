@@ -444,24 +444,25 @@ final class ArchiveModel: ObservableObject {
         var index: [String: [ArchiveEntry]] = [:]
         var dirs: [String: ArchiveEntry] = [:]
 
-        func noteDirectory(_ dirPath: String, modified: String) {
+        func noteDirectory(_ dirPath: String, modified: String, modifiedDate: Date?) {
             guard !dirPath.isEmpty, dirs[dirPath] == nil else { return }
-            dirs[dirPath] = ArchiveEntry(path: dirPath, size: 0, modified: modified, mode: "drwxr-xr-x")
+            dirs[dirPath] = ArchiveEntry(path: dirPath, size: 0, modified: modified, mode: "drwxr-xr-x",
+                                         modifiedDate: modifiedDate)
             let trimmed = String(dirPath.dropLast())
             if let slash = trimmed.lastIndex(of: "/") {
-                noteDirectory(String(trimmed[trimmed.startIndex...slash]), modified: modified)
+                noteDirectory(String(trimmed[trimmed.startIndex...slash]), modified: modified, modifiedDate: modifiedDate)
             }
         }
 
         for entry in entries {
             if entry.isDirectory {
                 let dir = entry.path.hasSuffix("/") ? entry.path : entry.path + "/"
-                noteDirectory(dir, modified: entry.modified)
+                noteDirectory(dir, modified: entry.modified, modifiedDate: entry.modifiedDate)
                 dirs[dir] = ArchiveEntry(path: dir, size: 0, modified: entry.modified, mode: entry.mode,
                                          modifiedDate: entry.modifiedDate, symlinkTarget: entry.symlinkTarget)
             } else if let slash = entry.path.lastIndex(of: "/") {
                 let parent = String(entry.path[entry.path.startIndex...slash])
-                noteDirectory(parent, modified: entry.modified)
+                noteDirectory(parent, modified: entry.modified, modifiedDate: entry.modifiedDate)
                 index[parent, default: []].append(entry)
             } else {
                 index["", default: []].append(entry)
@@ -1132,7 +1133,9 @@ final class ArchiveModel: ObservableObject {
                     errorMessage = "密码不正确"
                     return finishLocked()
                 }
-                guard let typed = await askPassword(for: url, wrong: passphrase != nil) else { return finishLocked() }
+                let typed = await askPassword(for: url, wrong: passphrase != nil)
+                guard generation == loadGeneration, !Task.isCancelled else { return }
+                guard let typed else { return finishLocked() }
                 passphrase = typed
             } catch {
                 guard generation == loadGeneration, !Task.isCancelled else { return }
