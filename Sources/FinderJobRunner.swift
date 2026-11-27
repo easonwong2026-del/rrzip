@@ -1,20 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 rrzip contributors
 //
-//  JobRunner.swift
-//  ArchiveFinder
+//  主程序里的访达归档执行、日志与通知。
 //
-//  访达右键任务的执行层：按计划解压/压缩、写任务日志、投递通知。
-//  计划本身在 JobKit.swift（纯逻辑），这里只做「真的动文件」和「把结果说出去」。
-//
-//  ⚠️ 范围说明（v2.15.0）：这个执行体跑在**独立的沙盒扩展进程**里，
-//  不属于主程序的退出协调。主程序 ⌘Q 不会终止它，`FormalWriteLedger` 也
-//  管不到另一个进程——在那里再建一个 shared 账本只是各记各的。
-//  本轮纳入退出保护的是主程序里的「服务」入口（AppDelegate + FinderService），
-//  与这里的访达右键菜单是两条不同的路径。
-//  要把这里也纳入统一管理，需要主程序 ↔ 扩展的 IPC 任务协调，另行排期。
-//
-
 import AppKit
 import Darwin
 import Foundation
@@ -122,7 +110,7 @@ enum FinderNotifier {
     /// 同一批多选会调多次，1 秒内只跳一次，别把访达刷屏（仅在主线程访问，消除跨线程竞态）
     @MainActor private static var lastReveal = Date.distantPast
 
-    /// 在访达里选中产物。沙盒扩展调用它只是给 Finder 发个事件，不需要文件权限。
+    /// 在访达里选中已发布的产物。
     private static func revealInFinder(_ url: URL?) {
         guard let url else { return }
         Task { @MainActor in
@@ -144,39 +132,33 @@ enum FinderJobRunner {
 
         for plan in FinderJobPlanner.planExtraction(of: archives, mode: mode) {
             let name = plan.archive.lastPathComponent
-            let existed = FileManager.default.fileExists(atPath: plan.destination.path)
-
-            // 先探一次：需要密码就别解了，免得留下空目录再删；同时复用结果计算冲突数，避免重复列目录
-            var listedEntries: [ArchiveEntry]?
             do {
-                listedEntries = try ArchiveService.list(plan.archive, password: nil)
-            } catch ArchiveError.needsPassword {
-                outcome.needsPassword.append(name)
-                continue
-            } catch {
-                // 列目录失败不一定是解压失败（引擎差异），继续交给 extract 判
-            }
-
-            // 只有「解到已有目录」才可能撞名；新建目录里不会有同名文件
-            let clashes = (existed && plan.onConflict == .skip)
-                ? conflictCount(entries: listedEntries, destination: plan.destination)
-                : 0
-
-            do {
-                try ArchiveService.extract(plan.archive, entries: [], to: plan.destination,
-                                           password: nil, onConflict: plan.onConflict)
+                outcome.skippedFiles += try extract(plan, password: nil)
                 outcome.succeeded.append(name)
                 outcome.destination = plan.destination
-                outcome.skippedFiles += clashes
+                if mode == .newFolder { outcome.outputs.append(plan.destination) }
             } catch ArchiveError.needsPassword {
                 outcome.needsPassword.append(name)
-                removeIfNewlyCreated(plan.destination, existedBefore: existed)
             } catch {
                 outcome.failed.append(.init(name: name, reason: error.localizedDescription))
-                removeIfNewlyCreated(plan.destination, existedBefore: existed)
             }
         }
         return outcome
+    }
+
+    static func extract(_ plan: PlannedExtraction, password: String?) throws -> Int {
+        let existed = FileManager.default.fileExists(atPath: plan.destination.path)
+        let entries = try ArchiveService.list(plan.archive, password: password)
+        let clashes = (existed && plan.onConflict == .skip)
+            ? conflictCount(entries: entries, destination: plan.destination) : 0
+        do {
+            try ArchiveService.extract(plan.archive, entries: [], to: plan.destination,
+                                       password: password, onConflict: plan.onConflict)
+            return clashes
+        } catch {
+            removeIfNewlyCreated(plan.destination, existedBefore: existed)
+            throw error
+        }
     }
 
     /// 压缩。`each` 为真时每个项目各生成一个包。
@@ -223,25 +205,13 @@ enum FinderJobRunner {
         defer { try? FileManager.default.removeItem(at: staged) }
 
         do {
-            // 沙盒扩展里没有 7zz（spawn 不了），ZIP 退回系统 libarchive；
-            // 7Z 只能由主程序创建，这里给一句明确提示而不是静默失败
-            if SevenZip.isAvailable {
-                try SevenZip.create(at: staged, from: urls, format: format.rawValue,
-                                    password: nil, volume: nil)
-            } else if format == .zip {
-                // 单个源走 ditto：deflate 压缩 + 包内只保留源文件名。
-                // 多个源退回 tar 合并（只 store，但不丢内容）。
-                if urls.count == 1, let single = urls.first {
-                    try Tar.createZip(at: staged, from: single)
-                } else {
-                    try Tar.create(at: staged, from: urls, format: "zip")
-                }
-            } else {
-                throw ArchiveError.tool("右键只能压 ZIP；7Z 请在 rrzip 里新建")
-            }
+            try ArchiveWriter.writeArchive(at: staged, from: urls,
+                                           format: format == .zip ? .zip : .sevenZip,
+                                           password: "", volume: nil)
             let output = try publish(staged, as: requested)
             outcome.succeeded = urls.count == 1 ? [first.lastPathComponent] : [output.lastPathComponent]
             outcome.destination = folder
+            outcome.outputs = [output]
         } catch {
             outcome.failed.append(.init(name: requested.lastPathComponent,
                                         reason: error.localizedDescription))
@@ -249,11 +219,12 @@ enum FinderJobRunner {
         return outcome
     }
 
-    private static func append(_ part: JobOutcome, to outcome: inout JobOutcome) {
+    static func append(_ part: JobOutcome, to outcome: inout JobOutcome) {
         outcome.succeeded += part.succeeded
         outcome.failed += part.failed
         outcome.needsPassword += part.needsPassword
         outcome.skippedFiles += part.skippedFiles
+        outcome.outputs += part.outputs
         if outcome.destination == nil { outcome.destination = part.destination }
     }
 

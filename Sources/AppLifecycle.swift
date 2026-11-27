@@ -167,7 +167,7 @@ final class TerminationCoordinator {
                              + "中途终止只会毁掉这个包。")
             }
             if finderServices > 0 {
-                lines.append("其中 \(finderServices) 项是访达服务的压缩 / 解压，"
+                lines.append("其中 \(finderServices) 项是访达服务或右键任务的压缩 / 解压，"
                              + "产物直接写到用户目录，会等它们完成后再退出，不会留下不完整的压缩包。")
             }
             if batchExtracts > 0 {

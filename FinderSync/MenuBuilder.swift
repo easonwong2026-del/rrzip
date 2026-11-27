@@ -74,8 +74,7 @@ enum FinderMenuBuilder {
     /// 选择 → 该出现的动作，顺序固定（解压在前，压缩在后）。
     /// 单个普通文件不出现「分别压缩」——那个动作只在多选时才有意义。
     ///
-    /// `canCreate7z`：沙盒扩展里没有 7zz，压不了 7Z。传 false 就把这一项去掉，
-    /// 不要摆一个点了必然报错的菜单项。
+    /// `canCreate7z` 表示执行请求的主程序是否提供 7-Zip。
     static func actions(for selection: FinderSelection, canCreate7z: Bool = true) -> [FinderAction] {
         let hasArchive = !selection.archives.isEmpty
         let hasPlain = !selection.plain.isEmpty

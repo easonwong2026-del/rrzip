@@ -18,6 +18,7 @@ ARCHIVE_CORE=(
 # 扩展与主程序之间的跨进程协作：设置、待解压、待提示、唯一命名
 SHARED_STATE=(
     Sources/JobCenter.swift
+    Sources/FinderTaskQueue.swift
     Sources/FinderSettings.swift
     Sources/PendingExtraction.swift
     Sources/PendingNotice.swift
@@ -38,15 +39,16 @@ APP_ONLY=(
     Sources/FormalWriteLedger.swift
     # 访达服务执行体：测试直接调，验证它进账本、走原子写
     Sources/FinderService.swift
+    Sources/FinderJobKit.swift
+    Sources/FinderJobRunner.swift
+    Sources/FinderTaskWorker.swift
     # 键盘导航的滚动决策是纯几何，测试直接验「已可见就不动 / 只补差值」
     Sources/EntryScroll.swift
 )
 
-# 访达扩展的菜单判定与任务执行
+# 访达扩展的菜单判定
 FINDER_CORE=(
     FinderSync/MenuBuilder.swift
-    FinderSync/JobKit.swift
-    FinderSync/JobRunner.swift
 )
 
 # 扩展入口也编入测试，用真实控制器验证 Quick Look 完成回调。

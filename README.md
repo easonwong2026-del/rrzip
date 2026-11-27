@@ -146,13 +146,15 @@ rrzip/
 │   ├── HomeView.swift         # 首页：打开 / 新建 / 最近打开 / 快速压缩
 │   ├── WelcomeView.swift      # 首次启动一屏说明
 │   ├── FinderSettings.swift   # 访达右键配置（主程序写、扩展读）
+│   ├── FinderTaskQueue.swift  # 与访达扩展共用的文件队列
+│   ├── FinderTaskWorker.swift # 主程序认领与执行访达任务
+│   ├── FinderJobKit.swift     # 目标目录、冲突策略、通知文案
+│   ├── FinderJobRunner.swift  # 压缩、解压与任务日志
 │   ├── PendingExtraction.swift# 加密包解锁后接着解压的意图记录
 │   └── PendingNotice.swift    # 扩展转交主程序的一句话结果
 ├── FinderSync/
-│   ├── FinderSync.swift       # 菜单构建与动作分发
-│   ├── MenuBuilder.swift      # 菜单判定：按选择类型给动作（纯逻辑，可单测）
-│   ├── JobKit.swift           # 目标目录、冲突策略、通知文案
-│   └── JobRunner.swift        # 解压 / 压缩执行、任务日志
+│   ├── FinderSync.swift       # 菜单、提交请求和唤起主程序
+│   └── MenuBuilder.swift      # 按选择类型给动作
 ├── QuickLook/
 │   └── PreviewProvider.swift  # 快速查看扩展（QLPreviewingController）
 ├── Tests/
@@ -190,13 +192,15 @@ rrzip/
 
 - 格式识别和主程序共用一套（后缀 + 魔数），改名为 `.bin` 的 zip 也认得出
 - 解压**不会覆盖**已有文件：解到「包名」文件夹，重名自动变「包名 2」；解到当前目录时同名文件跳过，完成通知里报跳过几个
-- 完成后在访达里选中产物；跳过同名文件、解压失败会把原因转交主程序显示（访达扩展本身发不出系统通知，这是 appex 的权限边界）；每次任务都写 `~/Library/Application Support/rrzip/finder-jobs.log`
+- 右键支持压缩为 7Z，也能解压加密 7z、DMG、ISO 等可读归档。需要密码时由主程序接管，输入正确后继续原请求。
+- 压缩和解压经文件队列转交主程序。退出时会等待已经开始的写入，退出接管后新任务会被拒绝，选择取消退出会停在当前文件收尾后。应用意外退出后会标记中断任务，方便检查已写出的文件。
+- 主程序报告进度项数、同名跳过和失败原因。完成后可在访达中选中产物，解压到此处不跳转。任务记录位于 `~/Library/Application Support/rrzip/finder-jobs.log`
 
 首次使用要在 **系统设置 → 通用 → 登录项与扩展 → 访达扩展** 勾选 rrzip，然后重启访达（设置页里有「重新启动访达」按钮）。
 
 旧版兼容：应用同时注册了 4 个「服务」菜单项（用 rrzip 压缩 / 打开 / 解压到此处 / 分别压缩），扩展不可用时可以兜底。找不到服务项时去「系统设置 → 键盘 → 键盘快捷键 → 服务 → 文件与文件夹」勾选一次。
 
-FinderSync 任务转交的后续设计见 [FinderSync IPC 方案](Docs/finder-ipc-design.md)。
+FinderSync 任务转交和后续权限收敛设计见 [FinderSync IPC 方案](Docs/finder-ipc-design.md)。
 
 ## 测试
 
@@ -204,7 +208,7 @@ FinderSync 任务转交的后续设计见 [FinderSync IPC 方案](Docs/finder-ip
 ./scripts/test.sh
 ```
 
-装好 7-Zip 引擎后，完整套件运行 **961 项断言**。用例覆盖进程取消与退出协调、加密包与中文路径、修改时间排序、软链与解压膨胀预检、缩略图与预览保护、访达菜单和原子写入，以及归档编辑、冲突策略和设置回归。
+装好 7-Zip 引擎后，完整套件运行 **1042 项断言**。用例覆盖进程取消与退出协调、加密包与中文路径、修改时间排序、软链与解压膨胀预检、缩略图与预览保护、访达菜单和文件队列、原子写入，以及归档编辑、冲突策略和设置回归。
 
 ## 许可
 

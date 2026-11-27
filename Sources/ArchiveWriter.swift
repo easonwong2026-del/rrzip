@@ -496,7 +496,7 @@ extension ArchiveModel {
             notice = "正在退出，不再接受新的写入操作"
             return Task {}
         }
-        isLoading = true
+        setArchiveEditing(true)
         status = "正在加入 \(items.count) 项…"
 
         return Task { @MainActor in
@@ -511,11 +511,11 @@ extension ArchiveModel {
                 if self.current?.archive.path == archive.path {
                     self.loadFrame(url: archive, resetTrail: true, restorePrefix: prefix)
                 } else {
-                    self.isLoading = false
+                    self.setArchiveEditing(false)
                     self.status = "已加入 \(items.count) 项"
                 }
             } catch {
-                self.isLoading = false
+                self.setArchiveEditing(false)
                 self.status = "加入失败"
                 self.errorMessage = error.localizedDescription
             }
@@ -559,7 +559,7 @@ extension ArchiveModel {
             notice = "正在退出，不再接受新的写入操作"
             return Task {}
         }
-        isLoading = true
+        setArchiveEditing(true)
         status = "正在删除 \(paths.count) 项…"
 
         return Task { @MainActor in
@@ -574,11 +574,11 @@ extension ArchiveModel {
                 if self.current?.archive.path == archive.path {
                     self.loadFrame(url: archive, resetTrail: true, restorePrefix: prefix)
                 } else {
-                    self.isLoading = false
+                    self.setArchiveEditing(false)
                     self.status = "已删除 \(paths.count) 项"
                 }
             } catch {
-                self.isLoading = false
+                self.setArchiveEditing(false)
                 self.status = "删除失败"
                 self.errorMessage = error.localizedDescription
             }

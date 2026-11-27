@@ -28,7 +28,7 @@ fi
 
 echo "==> 编译测试"
 mkdir -p build
-xcrun swiftc -O -swift-version 5 -warnings-as-errors \
+xcrun swiftc -O -swift-version 5 -strict-concurrency=complete -warnings-as-errors \
     -target arm64-apple-macos14.0 \
     -framework UserNotifications -framework QuickLookUI -larchive \
     -o build/rrzip-tests \

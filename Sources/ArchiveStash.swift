@@ -121,7 +121,6 @@ enum ArchiveStash {
         return StashExport(url: target, skipped: false)
     }
 
-    /// 把暂存项打包成一个新的 zip
 }
 
 extension ArchiveModel {
@@ -257,6 +256,7 @@ extension ArchiveModel {
                                          password: password, jobID: jobID)
     }
 
+    /// 把暂存项打包成一个新的 zip
     func compressStash() {
         guard !stash.isEmpty else { return }
         let panel = NSSavePanel()

@@ -16,7 +16,7 @@ import UniformTypeIdentifiers
 @main
 struct RrzipApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @StateObject var model = ArchiveModel()
+    @StateObject var model = AppDelegate.primaryModel
 
     init() {
         // 有命令行参数就按 CLI 跑完退出，否则进入正常界面
@@ -244,9 +244,60 @@ struct RrzipApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static let primaryModel = ArchiveModel()
     static weak var model: ArchiveModel?
     static weak var mainWindow: NSWindow?
     fileprivate static weak var settingsWindow: NSWindow?
+    fileprivate static var openPrimaryWindow: (() -> Void)?
+
+    private static let finderTaskWorker = makeFinderTaskWorker()
+
+    private static func askFinderPassword(for url: URL, wrong: Bool) async -> String? {
+        NSApp.activate(ignoringOtherApps: true)
+        if !AppDelegate.restoreMainWindow(in: NSApp) {
+            if let openPrimaryWindow = AppDelegate.openPrimaryWindow {
+                openPrimaryWindow()
+            } else {
+                let config = NSWorkspace.OpenConfiguration()
+                config.activates = true
+                do {
+                    _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config)
+                } catch {
+                    AppDelegate.primaryModel.notice = "无法打开窗口输入访达任务密码"
+                    return nil
+                }
+            }
+        }
+        let gate = FormalWriteLedger.shared.currentGate
+        guard gate != .cancelling && gate != .terminating else { return nil }
+        return await AppDelegate.primaryModel.askPassword(for: url, wrong: wrong)
+    }
+
+    private static func makeFinderTaskWorker() -> FinderTaskWorker {
+        let root = SharedPaths.support.appendingPathComponent("finder-queue", isDirectory: true)
+        return FinderTaskWorker(
+            queue: FinderTaskQueue(root: root),
+            ledger: FormalWriteLedger.shared,
+            askPassword: askFinderPassword,
+            feedback: { receipt, outcome, operation in
+                if receipt.state == .running {
+                    AppDelegate.model?.notice = "访达\(operation.verb) · \(receipt.completedCount)/\(receipt.totalCount) 项"
+                } else if let message = receipt.message {
+                    AppDelegate.model?.notice = message
+                }
+                if receipt.state == .succeeded || receipt.state == .failed {
+                    FinderNotifier.report(outcome, verb: operation.verb,
+                                          reveal: operation == .extractHere ? nil : outcome.outputs.first)
+                }
+            },
+            onError: { error in AppDelegate.model?.notice = "访达任务队列：\(error.localizedDescription)" },
+            log: { FinderJobLog.append($0) }
+        )
+    }
+
+    private static func scanFinderTasks() {
+        finderTaskWorker.start()
+    }
 
     /// 冷启动时收到的文件。此时窗口还没建好、`model` 仍是 nil，
     /// 直接调 `.open` 会被可选链吞掉——表现就是「右键用 rrzip 打开，毫无反应」。
@@ -259,6 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Self.model = model
         // 退出协调要能问队列里还有多少活、能取消、能在排空时收到回调
         TerminationCoordinator.shared.host = model
+        scanFinderTasks()
         // 访达那边转交过来的结果（跳过 N 个、解压失败），启动时补一句
         if let notice = PendingNotice.take() {
             model.notice = "\(notice.title) · \(notice.message)"
@@ -294,18 +346,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    static func restoreMainWindow(in app: NSApplication) {
+    @discardableResult
+    static func restoreMainWindow(in app: NSApplication) -> Bool {
         let windows = app.windows.filter { !($0 is NSPanel) }
         let candidates = windows.map {
             MainWindowRecovery.Candidate(identifier: $0.identifier?.rawValue,
                                          canBecomeMain: $0.canBecomeMain, isSettings: $0 === settingsWindow)
         }
         let registered = mainWindow.flatMap { windows.firstIndex(of: $0) }
-        guard let index = MainWindowRecovery.choose(registered: registered, candidates: candidates) else { return }
+        guard let index = MainWindowRecovery.choose(registered: registered, candidates: candidates) else { return false }
         let main = windows[index]
         mainWindow = main
         if main.isMiniaturized { main.deminiaturize(nil) }
         main.makeKeyAndOrderFront(nil)
+        return true
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -313,6 +367,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSUpdateDynamicServices()
         requestNotificationPermissionIfNeeded()
         wireTermination()
+        Self.model = Self.primaryModel
+        TerminationCoordinator.shared.host = Self.primaryModel
+        Self.scanFinderTasks()
     }
 
     /// 退出协调的界面部分：状态机在 TerminationCoordinator，这里只提供
@@ -373,15 +430,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// - 有任务：先挂住（terminateLater），弹窗问完、队列收尾后再 reply。
     ///   连续按 ⌘Q 只会走到状态机里已有的那一次，不会重复弹窗。
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        TerminationCoordinator.shared.requestTermination() == .terminateNow
-            ? .terminateNow : .terminateLater
+        guard TerminationCoordinator.shared.requestTermination() == .terminateNow else { return .terminateLater }
+        FormalWriteLedger.shared.setGate(.terminating)
+        return .terminateNow
     }
 
-    /// 访达那边做完任务后只是「唤起 app」，不带文件参数，
-    /// `application(_:open:)` 不会触发。激活时才取结果最稳。
+    func applicationWillTerminate(_ notification: Notification) {
+        Self.finderTaskWorker.stopWatching()
+    }
+
+    /// 激活时补扫队列，也取旧版扩展可能留下的通知。
     func applicationDidBecomeActive(_ notification: Notification) {
+        Self.scanFinderTasks()
         Task { @MainActor in
-            guard let notice = PendingNotice.take(), let model = AppDelegate.model else { return }
+            guard let model = AppDelegate.model, let notice = PendingNotice.take() else { return }
             model.notice = "\(notice.title) · \(notice.message)"
         }
     }
@@ -524,6 +586,7 @@ extension Notification.Name {
 
 // 通过两种 scene 的内容标记窗口，保留 SwiftUI 已分配的 identifier。
 private struct WindowRegistration: NSViewRepresentable {
+    @Environment(\.openWindow) private var openWindow
     let isMain: Bool
 
     final class WindowView: NSView {
@@ -545,6 +608,9 @@ private struct WindowRegistration: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> WindowView {
+        // 只剩设置窗口时，Launch Services 可能只激活它。由 scene 显式重新打开主窗口。
+        let open = openWindow
+        AppDelegate.openPrimaryWindow = { open(id: MainWindowRecovery.sceneID) }
         let view = WindowView()
         view.isMain = isMain
         return view

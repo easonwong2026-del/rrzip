@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 rrzip contributors
 //
-//  JobKit.swift
-//  ArchiveFinder
+//  FinderJobKit.swift
+//  rrzip
 //
 //  访达右键任务的「计划层」：算目标目录、定冲突策略、拼通知文案。
 //  不执行、不写盘、不碰 AppKit，全部分支都能在单元测试里跑到。
-//  设置结构在 Sources/FinderSettings.swift（主程序也要读写），真正干活的在 JobRunner.swift。
+//  设置结构在 Sources/FinderSettings.swift（主程序也要读写），真正干活的在 FinderJobRunner.swift。
 //
 
 import Foundation
@@ -75,6 +75,7 @@ struct JobOutcome: Equatable, Sendable {
     var needsPassword: [String] = []
     var failed: [Failure] = []
     var destination: URL?
+    var outputs: [URL] = []
 
     var isClean: Bool { skippedFiles == 0 && needsPassword.isEmpty && failed.isEmpty }
 }
