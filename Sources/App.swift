@@ -250,40 +250,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     fileprivate static weak var settingsWindow: NSWindow?
     fileprivate static var openPrimaryWindow: (() -> Void)?
 
-    private static let finderTaskWorker = FinderTaskWorker(
-        askPassword: { url, wrong in
-            NSApp.activate(ignoringOtherApps: true)
-            if !AppDelegate.restoreMainWindow(in: NSApp) {
-                if let openPrimaryWindow = AppDelegate.openPrimaryWindow {
-                    openPrimaryWindow()
-                } else {
-                    let config = NSWorkspace.OpenConfiguration()
-                    config.activates = true
-                    do {
-                        _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config)
-                    } catch {
-                        AppDelegate.primaryModel.notice = "无法打开窗口输入访达任务密码"
-                        return nil
-                    }
+    private static let finderTaskWorker = makeFinderTaskWorker()
+
+    private static func askFinderPassword(for url: URL, wrong: Bool) async -> String? {
+        NSApp.activate(ignoringOtherApps: true)
+        if !AppDelegate.restoreMainWindow(in: NSApp) {
+            if let openPrimaryWindow = AppDelegate.openPrimaryWindow {
+                openPrimaryWindow()
+            } else {
+                let config = NSWorkspace.OpenConfiguration()
+                config.activates = true
+                do {
+                    _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config)
+                } catch {
+                    AppDelegate.primaryModel.notice = "无法打开窗口输入访达任务密码"
+                    return nil
                 }
             }
-            let gate = FormalWriteLedger.shared.currentGate
-            guard gate != .cancelling && gate != .terminating else { return nil }
-            return await AppDelegate.primaryModel.askPassword(for: url, wrong: wrong)
-        },
-        feedback: { receipt, outcome, operation in
-            if receipt.state == .running {
-                AppDelegate.model?.notice = "访达\(operation.verb) · \(receipt.completedCount)/\(receipt.totalCount) 项"
-            } else if let message = receipt.message {
-                AppDelegate.model?.notice = message
-            }
-            if receipt.state == .succeeded || receipt.state == .failed {
-                FinderNotifier.report(outcome, verb: operation.verb,
-                                      reveal: operation == .extractHere ? nil : outcome.outputs.first)
-            }
-        },
-        onError: { error in AppDelegate.model?.notice = "访达任务队列：\(error.localizedDescription)" }
-    )
+        }
+        let gate = FormalWriteLedger.shared.currentGate
+        guard gate != .cancelling && gate != .terminating else { return nil }
+        return await AppDelegate.primaryModel.askPassword(for: url, wrong: wrong)
+    }
+
+    private static func makeFinderTaskWorker() -> FinderTaskWorker {
+        let root = SharedPaths.support.appendingPathComponent("finder-queue", isDirectory: true)
+        return FinderTaskWorker(
+            queue: FinderTaskQueue(root: root),
+            ledger: FormalWriteLedger.shared,
+            askPassword: askFinderPassword,
+            feedback: { receipt, outcome, operation in
+                if receipt.state == .running {
+                    AppDelegate.model?.notice = "访达\(operation.verb) · \(receipt.completedCount)/\(receipt.totalCount) 项"
+                } else if let message = receipt.message {
+                    AppDelegate.model?.notice = message
+                }
+                if receipt.state == .succeeded || receipt.state == .failed {
+                    FinderNotifier.report(outcome, verb: operation.verb,
+                                          reveal: operation == .extractHere ? nil : outcome.outputs.first)
+                }
+            },
+            onError: { error in AppDelegate.model?.notice = "访达任务队列：\(error.localizedDescription)" },
+            log: { FinderJobLog.append($0) }
+        )
+    }
 
     private static func scanFinderTasks() {
         finderTaskWorker.start()
