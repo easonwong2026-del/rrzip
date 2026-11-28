@@ -2,6 +2,7 @@
 // Copyright (C) 2026 rrzip contributors
 //
 import Foundation
+import Carbon
 
 func runWindowSessionTests() {
     testWindowRoutingAndSharedStash()
@@ -10,6 +11,24 @@ func runWindowSessionTests() {
     testClosingWindowIsolatedCancellation()
     testEncryptedStashAcrossWindows()
     testPackSameNamedArchivesAcrossWindows()
+    testOpenDocumentEvent()
+}
+
+private func testOpenDocumentEvent() {
+    let event = NSAppleEventDescriptor(eventClass: AEEventClass(kCoreEventClass),
+                                       eventID: AEEventID(kAEOpenDocuments), targetDescriptor: nil,
+                                       returnID: AEReturnID(kAutoGenerateReturnID),
+                                       transactionID: AETransactionID(kAnyTransactionID))
+    let first = fixtures.appendingPathComponent("basic.zip")
+    let second = fixtures.appendingPathComponent("bundle.tgz")
+    let files = NSAppleEventDescriptor.list()
+    files.insert(NSAppleEventDescriptor(fileURL: first), at: 1)
+    files.insert(NSAppleEventDescriptor(int32: 1), at: 2)
+    files.insert(NSAppleEventDescriptor(fileURL: second), at: 3)
+    event.setParam(files, forKeyword: AEKeyword(keyDirectObject))
+    let paths = openDocumentURLs(event).map { ScratchUsage.canonical($0.path) }
+    expect(paths == [first, second].map { ScratchUsage.canonical($0.path) },
+           "系统打开文档事件按顺序转交每个有效文件 URL")
 }
 
 private func testPackSameNamedArchivesAcrossWindows() {
@@ -75,8 +94,6 @@ private func testWindowRoutingAndSharedStash() {
             registry.register(b)
             expect(registry.route(zip, preferred: b.sessionID) == .reuse(b.sessionID), "优先复用来源首页")
             expect(registry.route(zip) == .reuse(a.sessionID), "没有来源时复用活跃首页")
-            expect(registry.route(zip, newlyCreated: [a.sessionID]) == .reuse(b.sessionID),
-                   "系统为这次文件事件预建的窗排在现有首页之后")
             a.openInSession(zip)
             expect(registry.route(alias) == .focus(a.sessionID), "加载期间同一规范路径也只聚焦一次")
             expect(registry.route(tar) == .reuse(b.sessionID), "当前窗口正在加载时复用另一首页")

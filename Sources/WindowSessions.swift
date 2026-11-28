@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 rrzip contributors
 //
+import Carbon
 import Foundation
 import Observation
+
+func openDocumentURLs(_ event: NSAppleEventDescriptor) -> [URL] {
+    guard let files = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject)),
+          files.numberOfItems > 0 else { return [] }
+    return (1...files.numberOfItems).compactMap { files.atIndex($0)?.fileURLValue }.filter(\.isFileURL)
+}
 
 /// Tracks archive sessions without owning AppKit windows. A session's root is reserved while it loads.
 @MainActor
@@ -63,7 +70,7 @@ final class WindowSessionRegistry: TerminationHost {
         onWorkDrained?()
     }
 
-    func route(_ archive: URL, preferred: UUID? = nil, newlyCreated: Set<UUID> = []) -> Route {
+    func route(_ archive: URL, preferred: UUID? = nil) -> Route {
         let key = ScratchUsage.canonical(archive.path)
         if let match = focusOrder.first(where: {
             sessions[$0]?.rootArchive.map { ScratchUsage.canonical($0.path) } == key
@@ -71,9 +78,7 @@ final class WindowSessionRegistry: TerminationHost {
             return .focus(match)
         }
         if let preferred, sessions[preferred]?.canReuseWindow == true { return .reuse(preferred) }
-        let idle = focusOrder.filter { sessions[$0]?.canReuseWindow == true }
-        if let existing = idle.first(where: { !newlyCreated.contains($0) }) { return .reuse(existing) }
-        if let first = idle.first { return .reuse(first) }
+        if let idle = focusOrder.first(where: { sessions[$0]?.canReuseWindow == true }) { return .reuse(idle) }
         return .newWindow
     }
 
