@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 
 ./scripts/test.sh 2>&1 | tee /tmp/test.log
 # CI 与发版共用完整套件的断言基线（含 7zz）。
-minimum=1212
+minimum=1243
 count=$(sed -n 's/^全部通过（\([0-9][0-9]*\) 项）$/\1/p' /tmp/test.log)
 case "$count" in
     ''|*[!0-9]*) echo "::error::未找到唯一的测试总数"; exit 1 ;;

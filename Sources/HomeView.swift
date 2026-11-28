@@ -278,6 +278,8 @@ struct HomeView: View {
         Task { @MainActor in
             var urls: [URL] = []
             for provider in providers {
+                // 列表里拖出来的条目不算外部文件：别拿临时副本去压一层
+                if EntryDrag.isInternal(provider) { continue }
                 let url: URL? = await withCheckedContinuation { continuation in
                     _ = provider.loadObject(ofClass: URL.self) { value, _ in
                         continuation.resume(returning: value)

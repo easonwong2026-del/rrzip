@@ -47,6 +47,8 @@ APP_ONLY=(
     Sources/FinderTaskWorker.swift
     # 键盘导航的滚动决策是纯几何，测试直接验「已可见就不动 / 只补差值」
     Sources/EntryScroll.swift
+    # 拖拽载荷的类型注册（访达只认 public.file-url）——测试直接验 provider
+    Sources/EntryDrag.swift
 )
 
 # 访达扩展的菜单判定

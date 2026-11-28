@@ -230,6 +230,8 @@ struct ContentView: View {
         Task { @MainActor in
             var urls: [URL] = []
             for provider in providers {
+                // 从列表往自己窗口里拖条目：这是应用内拖拽，别当成外部文件去打开
+                if EntryDrag.isInternal(provider) { continue }
                 let url: URL? = await withCheckedContinuation { continuation in
                     _ = provider.loadObject(ofClass: URL.self) { value, _ in
                         continuation.resume(returning: value)
