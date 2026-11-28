@@ -110,7 +110,42 @@ func runInProcessArchiveTests() {
     testInProcessEncryptedZip()
     testInProcessMetadata()
     testZipAndSevenZipLinkMetadata()
+    testStreamingSummary()
     testPreviewProviderCompletion()
+}
+
+private func testStreamingSummary() {
+    print("快速查看 · 流式总大小、条目限额和副标题")
+    let fm = FileManager.default
+    let source = fixtures.appendingPathComponent("preview-summary")
+    let archive = fixtures.appendingPathComponent("preview-summary.tar")
+    do {
+        try fm.createDirectory(at: source, withIntermediateDirectories: false)
+        let count = 303
+        let bytes = Data(repeating: 25, count: 17)
+        for index in 0..<count { try bytes.write(to: source.appendingPathComponent("\(index).txt")) }
+        try Tar.create(at: archive, from: [source], format: "tar")
+        let summary = try InProcessArchive.listSummary(archive)
+        expect(summary.entries.count == 300, "预览只分配前 300 条")
+        expect(summary.totalCount == count + 1, "总数包含第 300 项之后的条目和目录")
+        expect(summary.totalBytes == Int64(count * bytes.count), "总大小统计截断范围之外的文件且不计目录")
+        let zero = try InProcessArchive.listSummary(archive, limit: 0)
+        expect(zero.entries.isEmpty && zero.totalCount == summary.totalCount && zero.totalBytes == summary.totalBytes,
+               "零条分配仍可统计整包大小")
+        expect(FileKind(summary.entries[0]).symbol == "folder.fill", "目录使用文件夹图标")
+        expect(FileKind(ext: "png").symbol == "photo.fill" && FileKind(ext: "pdf").symbol == "doc.text.fill",
+               "图片和 PDF 预览使用不同符号")
+
+        MainActor.assumeIsolated {
+            expect(PreviewProvider.subtitle(format: "TAR", totalCount: summary.totalCount, totalBytes: summary.totalBytes)
+                   == "TAR · 共 304 个项目 · 总大小 5.0 KB · 仅显示前 300 项",
+                   "副标题包含格式、总数、总大小与截断提示")
+            expect(PreviewProvider.subtitle(format: nil, totalCount: 0, totalBytes: 0) == "归档 · 共 0 个项目",
+                   "未知格式与空归档省略大小")
+            expect(!PreviewProvider.subtitle(format: "ZIP", totalCount: 300, totalBytes: 1).contains("仅显示"),
+                   "正好 300 条无需截断提示")
+        }
+    } catch { expect(false, "流式摘要测试", "\(error)") }
 }
 
 private func testInProcessEncryptedZip() {
@@ -225,6 +260,10 @@ private func testPreviewProviderCompletion() {
         }
         expect(waitUntil(10, { first > 0 && second > 0 }), "替换预览后两个请求都交付完成回调")
         expect(first == 1 && second == 1 && allOnMain, "快速查看给每个请求在主线程回调一次")
+        let displayed = provider.view.subviews.compactMap { ($0 as? NSTextField)?.stringValue }
+        let expectedFormat = FormatDetector.detect(fixtures.appendingPathComponent("bundle.tgz"))?.displayName
+        expect(displayed.contains(PreviewProvider.subtitle(format: expectedFormat, totalCount: 1, totalBytes: 2)),
+               "实际预览副标题呈现最新请求的格式和大小")
 
         var released: PreviewProvider? = PreviewProvider(nibName: nil, bundle: nil)
         weak var weakProvider: PreviewProvider?

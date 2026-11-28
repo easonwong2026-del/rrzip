@@ -163,24 +163,45 @@ enum FinderJobRunner {
 
     /// 先在同卷临时目录解压，完成前不写入目标。取消时只删除本次的暂存区。
     static func extract(_ plan: PlannedExtraction, password: String?, intoNewFolder: Bool,
-                        jobID: UUID?, onProgress: (@Sendable (Double) -> Void)?) throws
+                        jobID: UUID?, onProgress: (@Sendable (Double) -> Void)?,
+                        entries: [String] = [], createDestination: Bool = false) throws
         -> (destination: URL, skipped: Int) {
         try TaskRegistry.checkCancellation(jobID)
-        let parent = intoNewFolder ? plan.destination.deletingLastPathComponent() : plan.destination
+        let fm = FileManager.default
+        let destination = plan.destination
+        let missing = !intoNewFolder && createDestination && !fm.fileExists(atPath: destination.path)
+        var directory: Int32 = -1
+        defer { if directory >= 0 { close(directory) } }
+        if !intoNewFolder, !missing { directory = try openDestination(destination) }
+        var parent = intoNewFolder ? destination.deletingLastPathComponent() : destination
+        if missing {
+            while !fm.fileExists(atPath: parent.path), parent.path != "/" {
+                parent.deleteLastPathComponent()
+            }
+        }
         let staged = parent.appendingPathComponent(".rrzip-\(UUID().uuidString)", isDirectory: true)
         guard mkdir(staged.path, intoNewFolder ? 0o777 : 0o700) == 0 else { throw fileError(errno) }
         defer { removeExtractionStage(staged) }
-        try ArchiveService.extract(plan.archive, entries: [], to: staged, password: password,
-                                   onConflict: plan.onConflict, jobID: jobID, onProgress: onProgress)
+        try ArchiveService.extract(plan.archive, entries: entries, to: staged, password: password,
+                                   onConflict: .overwrite, jobID: jobID, onProgress: onProgress,
+                                   validateSelection: true)
         try TaskRegistry.checkCancellation(jobID)
 
         if intoNewFolder {
-            return (try publish(staged, as: plan.destination, directory: true), 0)
+            return (try publish(staged, as: destination, directory: true), 0)
         }
-        let directory = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if missing {
+            try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+            directory = try openDestination(destination)
+        }
+        return (destination, try publishContents(of: staged, into: directory, jobID: jobID,
+                                                onConflict: plan.onConflict))
+    }
+
+    private static func openDestination(_ url: URL) throws -> Int32 {
+        let directory = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard directory >= 0 else { throw fileError(errno) }
-        defer { close(directory) }
-        return (parent, try publishContents(of: staged, into: directory, jobID: jobID))
+        return directory
     }
 
     /// 压缩。`each` 为真时每个项目各生成一个包。
@@ -333,7 +354,8 @@ enum FinderJobRunner {
     }
 
     /// 只合并真实目录。用已打开的目录描述符发布，避免既有软链或重名改变写入位置。
-    private static func publishContents(of staged: URL, into destination: Int32?, jobID: UUID?) throws -> Int {
+    private static func publishContents(of staged: URL, into destination: Int32?, jobID: UUID?,
+                                        onConflict: ArchiveConflictPolicy) throws -> Int {
         try TaskRegistry.checkCancellation(jobID)
         guard try makeStageWritable(staged) else { throw ArchiveError.unsafePath(staged.path) }
         var skipped = 0
@@ -350,7 +372,11 @@ enum FinderJobRunner {
                 if destination != nil, next < 0, errno != ENOTDIR, errno != ELOOP, errno != ENOENT {
                     throw fileError(errno)
                 }
-                skipped += try publishContents(of: child, into: next >= 0 ? next : nil, jobID: jobID)
+                skipped += try publishContents(of: child, into: next >= 0 ? next : nil, jobID: jobID,
+                                               onConflict: onConflict)
+            } else if let destination, onConflict == .overwrite {
+                // renameat 替换同名文件或软链本身，绝不进入软链或删目录。
+                guard renameat(AT_FDCWD, child.path, destination, name) == 0 else { throw fileError(errno) }
             } else {
                 skipped += 1
             }

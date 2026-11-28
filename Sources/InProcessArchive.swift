@@ -65,14 +65,20 @@ enum InProcessArchive {
         try Reader().listSummary(url, passphrase: passphrase, limit: nil, isCancelled: isCancelled).entries
     }
 
-    /// 流式摘要列目录：最多仅实例化前 `limit` 条 `ArchiveEntry`，超出部分只累加 `totalCount`，
+    struct Summary: Sendable {
+        let entries: [ArchiveEntry]
+        let totalCount: Int
+        let totalBytes: Int64
+    }
+
+    /// 流式摘要列目录：最多仅实例化前 `limit` 条 `ArchiveEntry`，超出部分只统计数量与大小，
     /// 避免 Quick Look 扩展在超大压缩包下因全量分配触发 Jetsam OOM。
     static func listSummary(
         _ url: URL,
         passphrase: String? = nil,
         limit: Int = 300,
         isCancelled: (() -> Bool)? = nil
-    ) throws -> (entries: [ArchiveEntry], totalCount: Int) {
+    ) throws -> Summary {
         let reader = Reader()
         return try reader.listSummary(url, passphrase: passphrase, limit: limit, isCancelled: isCancelled)
     }
@@ -88,7 +94,7 @@ enum InProcessArchive {
             passphrase: String?,
             limit: Int?,
             isCancelled: (() -> Bool)?
-        ) throws -> (entries: [ArchiveEntry], totalCount: Int) {
+        ) throws -> Summary {
             guard let handle = C.readNew() else {
                 throw ArchiveError.tool("无法初始化 libarchive")
             }
@@ -113,6 +119,7 @@ enum InProcessArchive {
             var entries: [ArchiveEntry] = []
             if let limit { entries.reserveCapacity(max(0, min(limit, 512))) }
             var totalCount = 0
+            var totalBytes: Int64 = 0
             var verifiedPassword = false
 
             while true {
@@ -125,7 +132,8 @@ enum InProcessArchive {
                     throw Self.mapError(handle, fallback: "无法读取归档")
                 }
                 guard let entry = raw, let pathPointer = C.pathname(entry) else { continue }
-                guard pathPointer.pointee != 0 else { continue }
+                let pathLength = strlen(pathPointer)
+                guard pathLength > 0 else { continue }
 
                 // ZIP 的文件名不需解密。用首个能读到数据的加密条目触发密码检查，
                 // 后续条目交给完整性校验或解压验证，避免每个条目都派生密钥。
@@ -137,22 +145,25 @@ enum InProcessArchive {
                     verifiedPassword = count > 0
                 }
                 totalCount += 1
+                let isDirectory = (C.filetype(entry) & S_IFMT) == S_IFDIR
+                    || pathPointer[pathLength - 1] == 47
+                let size = isDirectory ? 0 : C.size(entry)
+                if size > 0 { totalBytes += min(size, Int64.max - totalBytes) }
                 if let limit, entries.count >= limit { continue }
                 let path = String(cString: pathPointer)
-                let isDirectory = (C.filetype(entry) & S_IFMT) == S_IFDIR || path.hasSuffix("/")
                 let modifiedDate = C.hasMtime(entry) != 0
                     ? Date(timeIntervalSince1970: Double(C.mtime(entry)) + Double(C.mtimeNanos(entry)) / 1e9) : nil
                 let mode = C.strmode(entry).map { String(cString: $0).trimmingCharacters(in: .whitespaces) }
                 entries.append(ArchiveEntry(
                     path: path,
-                    size: isDirectory ? 0 : C.size(entry),
+                    size: size,
                     modified: modifiedDate.map { formatter.string(from: $0) } ?? "—",
                     mode: mode ?? "----------",
                     modifiedDate: modifiedDate,
                     symlinkTarget: C.symlink(entry).map { String(cString: $0) }
                 ))
             }
-            return (entries, totalCount)
+            return Summary(entries: entries, totalCount: totalCount, totalBytes: totalBytes)
         }
 
         /// libarchive 的错误字符串只在这一层有意义；加密要单独认出来，

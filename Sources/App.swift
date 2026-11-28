@@ -5,10 +5,9 @@
 //  应用入口与 AppDelegate：打开请求、服务、通知授权、窗口尺寸。
 
 import AppKit
-import PDFKit
+import Carbon
 import QuickLook
 import SwiftUI
-import UniformTypeIdentifiers
 // UNUserNotificationCenter 没标 Sendable，但它的方法本身就是线程安全的；
 // 用 @preconcurrency 压掉严格并发下的误报，不绕过检查本身
 @preconcurrency import UserNotifications
@@ -16,262 +15,296 @@ import UniformTypeIdentifiers
 @main
 struct RrzipApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @State var model = AppDelegate.primaryModel
 
     init() {
-        // 有命令行参数就按 CLI 跑完退出，否则进入正常界面
-        if let code = Self.runCLI() { exit(code) }
-    }
-
-    /// 命令行入口：返回退出码，nil 表示没有 CLI 参数。
-    /// 这里刻意不用返回 Never 的局部函数——CI 的 Swift 6.0 在 -O 下会把它优化成
-    /// 不执行，导致 --list 走到「读取失败」分支。
-    private static func runCLI() -> Int32? {
-        let args = CommandLine.arguments
-
-        func value(_ flag: String) -> String? {
-            guard let index = args.firstIndex(of: flag), index + 1 < args.count else { return nil }
-            return args[index + 1]
-        }
-
-        func writeError(_ message: String) {
-            FileHandle.standardError.write(Data("error: \(message)\n".utf8))
-        }
-
-        let password = value("--pass")
-
-        // 精确识别：便于排查「后缀不对但内容对」的文件
-        if let path = value("--detect") {
-            let url = URL(fileURLWithPath: path)
-            guard let detection = FormatDetector.detect(url) else {
-                writeError("无法识别 \(url.lastPathComponent)")
-                return 1
-            }
-            print("\(detection.format.id)\t\(detection.displayName)\t\(detection.source.rawValue)")
-            print("openable=\(detection.format.isOpenable)\tsevenZip=\(detection.format.sevenZipType ?? "-")")
-            return 0
-        }
-
-        // 位置参数 = 指定选项之后、到下一个选项之前的所有值
-        func positional(after flag: String) -> [String] {
-            guard let start = args.firstIndex(of: flag) else { return [] }
-            let takesValue: Set<String> = ["--prefix", "--pass"]
-            var out: [String] = []
-            var index = start + 1
-            while index < args.count {
-                let token = args[index]
-                if takesValue.contains(token) { index += 2; continue }
-                if token.hasPrefix("--") { break }
-                out.append(token)
-                index += 1
-            }
-            return out
-        }
-
-        if args.contains("--add") {
-            let list = positional(after: "--add")
-            guard let first = list.first else {
-                writeError("--add 需要一个归档路径")
-                return 1
-            }
-            let items = list.dropFirst().map { URL(fileURLWithPath: $0) }
-            guard !items.isEmpty else {
-                writeError("--add 需要至少一个待加入的文件")
-                return 1
-            }
-            do {
-                try SevenZip.add(URL(fileURLWithPath: first), items: Array(items),
-                                 prefix: value("--prefix") ?? "", password: password)
-                print("added \(items.count)")
-                return 0
-            } catch {
-                writeError(error.localizedDescription)
-                return 1
-            }
-        }
-
-        if args.contains("--remove") {
-            let list = positional(after: "--remove")
-            guard let first = list.first else {
-                writeError("--remove 需要一个归档路径")
-                return 1
-            }
-            do {
-                try SevenZip.remove(URL(fileURLWithPath: first), entries: Array(list.dropFirst()), password: password)
-                print("removed \(list.count - 1)")
-                return 0
-            } catch {
-                writeError(error.localizedDescription)
-                return 1
-            }
-        }
-
-        // 渲染缩略图到 PNG：rrzip --thumb <归档> <包内路径> <输出.png> [--size 560]
-        if args.contains("--thumb") {
-            let rest = positional(after: "--thumb")
-            guard rest.count >= 3 else {
-                writeError("用法：--thumb <归档> <包内路径> <输出.png>")
-                return 1
-            }
-            let archive = URL(fileURLWithPath: rest[0])
-            let entryPath = rest[1]
-            let output = URL(fileURLWithPath: rest[2])
-            let side = Double(value("--size") ?? "560") ?? 560
-            let ext = (entryPath as NSString).pathExtension.lowercased()
-
-            let staging = FileManager.default.temporaryDirectory
-                .appendingPathComponent("rrzip-thumb-\(UUID().uuidString)", isDirectory: true)
-            try? FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: staging) }
-
-            do {
-                try SevenZip.extract(archive, entries: [entryPath], to: staging, password: password)
-            } catch {
-                writeError(error.localizedDescription)
-                return 1
-            }
-            let file = staging.appendingPathComponent(entryPath)
-            guard let image = ThumbnailStore.renderForTool(url: file, ext: ext, maxPixel: side) else {
-                writeError("渲染失败 \(entryPath)")
-                return 1
-            }
-            let rep = NSBitmapImageRep(cgImage: image)
-            guard let data = rep.representation(using: .png, properties: [:]) else {
-                writeError("编码失败")
-                return 1
-            }
-            do {
-                try data.write(to: output)
-                print("ok \(image.width)x\(image.height) -> \(output.path)")
-                return 0
-            } catch {
-                writeError(error.localizedDescription)
-                return 1
-            }
-        }
-
-        guard let path = value("--list") else { return nil }
-        let url = URL(fileURLWithPath: path)
-
-        let entries: [ArchiveEntry]
-        do {
-            entries = try ArchiveService.list(url, password: password)
-        } catch {
-            writeError(error.localizedDescription)
-            return 1
-        }
-        for entry in entries {
-            print("\(entry.mode)\t\(entry.size)\t\(entry.modified)\t\(entry.path)")
-        }
-        return 0
+        if let code = CLI.run(Array(CommandLine.arguments.dropFirst())) { exit(code) }
     }
 
     var body: some Scene {
-        Window("rrzip", id: MainWindowRecovery.sceneID) {
-            ContentView(model: model)
-                .background(WindowRegistration(isMain: true))
-                // 最小尺寸与模式无关：简化与完整共用同一个下限，
-                // 否则窗口永远缩不进触发自动收起的宽度
-                .frame(minWidth: Layout.minWindowWidth, minHeight: Layout.minWindowHeight)
-                .onAppear { AppDelegate.attach(model) }
+        WindowGroup("rrzip", id: MainWindowRecovery.sceneID) {
+            ArchiveWindow()
         }
         .defaultSize(width: 720, height: 520)
-        .commands {            CommandGroup(replacing: .newItem) {
-                Button("打开压缩包…") { model.openWithPanel() }
-                    .keyboardShortcut("o")
-                Button("新建压缩包…") { model.createArchive() }
-                    .keyboardShortcut("n")
-                Divider()
-                Button("全部解压…") { model.extractAll() }
-                    .keyboardShortcut("e")
-                Button("解压选中项…") { model.extractSelection() }
-                    .keyboardShortcut("e", modifiers: [.command, .shift])
-                Divider()
-                Button("返回上一级") {
-                    if model.canGoBack { model.popTo(model.trail.count - 2) }
-                }
-                .keyboardShortcut("[", modifiers: .command)
-                .disabled(!model.canGoBack)
-            }
-        }
-        .commands {
-            CommandGroup(after: .pasteboard) {
-                Button("搜索包内文件") {
-                    NotificationCenter.default.post(name: .rrzipFocusSearch, object: nil)
-                }
-                .keyboardShortcut("f")
-            }
-        }
-        .commands {
-            CommandGroup(after: .toolbar) {
-                Button("返回上级") { model.goBack() }
-                    .keyboardShortcut(.upArrow, modifiers: .command)
-                    .disabled(!model.canGoBack)
-                Button("快速查看") {
-                    QuickLookController.shared.toggle(entry: model.selectedEntry, model: model)
-                }
-                .keyboardShortcut(.space, modifiers: [])
-                .disabled(model.selectedEntry == nil)
-                Button("加入暂存区") { model.addSelectionToStash() }
-                    .keyboardShortcut("s", modifiers: [.command, .option])
-                    .disabled(model.selection.isEmpty)
-                Divider()
-                Button("批量处理…") { model.pickBatch() }
-                    .keyboardShortcut("b", modifiers: [.command, .shift])
-                Button("检查当前压缩包") { model.verifyCurrent() }
-                    .disabled(model.current == nil)
-                Divider()
-                Button(model.isCompactMode ? "展开为完整模式" : "收起为简化模式") {
-                    NotificationCenter.default.post(name: .rrzipToggleWorkspaceMode, object: nil)
-                }
-                .keyboardShortcut("m", modifiers: [.command, .control])
-            }
-            // 帮助菜单里随时能重看首次启动那一屏
-            CommandGroup(replacing: .help) {
-                Button("欢迎使用 rrzip") {
-                    NotificationCenter.default.post(name: .rrzipShowWelcome, object: nil)
-                }
-            }
-        }
+        .commands { ArchiveCommands() }
 
-        // 设置中心：⌘, 由系统菜单自动提供
         Settings {
-            SettingsView(model: model)
-                .background(WindowRegistration(isMain: false))
+            SettingsView(model: AppDelegate.sessions.activeModel ?? AppDelegate.settingsModel)
+                .background(WindowRegistration(model: nil))
         }
+    }
+}
+
+private struct ArchiveWindow: View {
+    @State private var model = AppDelegate.sessions.makeModel()
+
+    var body: some View {
+        ContentView(model: model)
+            .background(WindowRegistration(model: model))
+            .frame(minWidth: Layout.minWindowWidth, minHeight: Layout.minWindowHeight)
+            .navigationTitle(model.rootArchive?.lastPathComponent ?? "rrzip")
+            .focusedSceneValue(\.archiveModel, model)
+    }
+}
+
+private struct ArchiveModelFocusKey: FocusedValueKey {
+    typealias Value = ArchiveModel
+}
+
+private extension FocusedValues {
+    var archiveModel: ArchiveModel? {
+        get { self[ArchiveModelFocusKey.self] }
+        set { self[ArchiveModelFocusKey.self] = newValue }
+    }
+}
+
+private struct ArchiveCommands: Commands {
+    @FocusedValue(\.archiveModel) private var model
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("新建窗口") { openWindow(id: MainWindowRecovery.sceneID) }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+            Button("打开压缩包…") { (model ?? AppDelegate.settingsModel).openWithPanel() }
+                .keyboardShortcut("o")
+            Button("新建压缩包…") { model?.createArchive() }
+                .keyboardShortcut("n")
+                .disabled(model == nil)
+            Divider()
+            Button("全部解压…") { model?.extractAll() }
+                .keyboardShortcut("e")
+                .disabled(model?.current == nil)
+            Button("解压选中项…") { model?.extractSelection() }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(model?.selection.isEmpty != false)
+            Divider()
+            Button("返回上一级") { model?.goBack() }
+                .keyboardShortcut("[", modifiers: .command)
+                .disabled(model?.canGoBack != true)
+        }
+        CommandGroup(after: .pasteboard) {
+            Button("搜索包内文件") { post(.rrzipFocusSearch) }
+                .keyboardShortcut("f")
+                .disabled(model == nil)
+        }
+        CommandGroup(after: .toolbar) {
+            Button("返回上级") { model?.goBack() }
+                .keyboardShortcut(.upArrow, modifiers: .command)
+                .disabled(model?.canGoBack != true)
+            Button("快速查看") {
+                if let model { QuickLookController.shared.toggle(entry: model.selectedEntry, model: model) }
+            }
+            .keyboardShortcut(.space, modifiers: [])
+            .disabled(model?.selectedEntry == nil)
+            Button("加入暂存区") { model?.addSelectionToStash() }
+                .keyboardShortcut("s", modifiers: [.command, .option])
+                .disabled(model?.selection.isEmpty != false)
+            Divider()
+            Button("批量处理…") { model?.pickBatch() }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+                .disabled(model == nil)
+            Button("检查当前压缩包") { model?.verifyCurrent() }
+                .disabled(model?.current == nil)
+            Divider()
+            Button(model?.isCompactMode == false ? "收起为简化模式" : "展开为完整模式") {
+                post(.rrzipToggleWorkspaceMode)
+            }
+            .keyboardShortcut("m", modifiers: [.command, .control])
+            .disabled(model == nil)
+        }
+        CommandGroup(replacing: .help) {
+            Button("欢迎使用 rrzip") { post(.rrzipShowWelcome) }
+                .disabled(model == nil)
+        }
+    }
+
+    private func post(_ name: Notification.Name) {
+        if let model { NotificationCenter.default.post(name: name, object: model) }
     }
 }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    static let primaryModel = ArchiveModel()
-    static weak var model: ArchiveModel?
-    static weak var mainWindow: NSWindow?
-    fileprivate static weak var settingsWindow: NSWindow?
-    fileprivate static var openPrimaryWindow: (() -> Void)?
+    static let sessions = WindowSessionRegistry()
+    static let settingsModel: ArchiveModel = {
+        let model = sessions.makeModel()
+        model.routeOpen = { urls, _ in open(urls) }
+        return model
+    }()
 
+    private final class WindowReference {
+        weak var window: NSWindow?
+        init(_ window: NSWindow) { self.window = window }
+    }
+
+    private static var windows: [UUID: WindowReference] = [:]
+    fileprivate static var openMainWindow: (() -> Void)?
+    private static var windowRequested = false
+    private static var hasRegisteredMainWindow = false
+    private static weak var launchedDelegate: AppDelegate?
+    private static var handlesLaterFileEvents = false
+    private static var pendingOpen: [(url: URL, preferred: UUID?)] = []
+    private static var fileEventWindows: Set<UUID> = []
+    private static var unassignedFileWindows: Set<UUID> = []
+    private static var finderJobID: UUID?
+    private static var startupTasksRun = false
+    private static var startupWelcomeShown = false
     private static let finderTaskWorker = makeFinderTaskWorker()
+
+    static func takeStartupTasks() -> Bool {
+        guard !startupTasksRun else { return false }
+        startupTasksRun = true
+        return true
+    }
+
+    static func claimStartupWelcome() -> Bool {
+        guard !startupWelcomeShown else { return false }
+        startupWelcomeShown = true
+        return true
+    }
+
+    static func window(for model: ArchiveModel) -> NSWindow? { windows[model.sessionID]?.window }
+
+    fileprivate static func register(_ model: ArchiveModel, in window: NSWindow) {
+        let id = model.sessionID
+        guard windows[id]?.window !== window else { return }
+        windows[id] = WindowReference(window)
+        hasRegisteredMainWindow = true
+        if !handlesLaterFileEvents, let event = NSAppleEventManager.shared().currentAppleEvent,
+           event.eventClass == AEEventClass(kCoreEventClass), event.eventID == AEEventID(kAEOpenDocuments) {
+            fileEventWindows.insert(id)
+        } else {
+            windowRequested = false
+        }
+        sessions.register(model)
+        if window.isKeyWindow { sessions.activate(id) }
+        model.routeOpen = { urls, source in open(urls, preferred: source.sessionID) }
+        model.cancelFinderTask = { finderTaskWorker.cancelCurrent() }
+
+        DispatchQueue.main.async {
+            installOpenDocumentHandler()
+            drainPendingOpen()
+            consumeFinderNotice()
+        }
+    }
+
+    private static func focus(_ id: UUID) {
+        guard let window = windows[id]?.window else { return }
+        sessions.activate(id)
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private static func visibleSession() -> ArchiveModel? {
+        if let active = sessions.activeModel, window(for: active)?.isVisible == true { return active }
+        let ordered = NSApp.orderedWindows
+        for window in ordered where window.isVisible {
+            if let id = windows.first(where: { $0.value.window === window })?.key {
+                sessions.activate(id)
+                return sessions.model(id)
+            }
+        }
+        return nil
+    }
+
+    @discardableResult
+    private static func requestWindow() -> Bool {
+        if windowRequested { return true }
+        guard let openMainWindow else { return false }
+        windowRequested = true
+        openMainWindow()
+        return true
+    }
+
+    static func open(_ urls: [URL], preferred: UUID? = nil) {
+        guard !urls.isEmpty else { return }
+        let archives = urls.filter {
+            if case .open = OpenGate.decide($0) { return true }
+            return false
+        }
+        let requested = archives.isEmpty ? Array(urls.prefix(1)) : archives
+        pendingOpen += requested.map { ($0, preferred) }
+        drainPendingOpen()
+    }
+
+    private static func drainPendingOpen() {
+        guard hasRegisteredMainWindow, FormalWriteLedger.shared.currentGate == .idle else { return }
+        while let next = pendingOpen.first {
+            if case .open = OpenGate.decide(next.url) {
+                switch sessions.route(next.url, preferred: next.preferred, newlyCreated: unassignedFileWindows) {
+                case .focus(let id):
+                    focus(id)
+                case .reuse(let id):
+                    unassignedFileWindows.remove(id)
+                    sessions.model(id)?.openInSession(next.url)
+                    focus(id)
+                case .newWindow:
+                    requestWindow()
+                    return
+                }
+            } else if let model = sessions.activeModel {
+                unassignedFileWindows.remove(model.sessionID)
+                model.openInSession(next.url)
+                focus(model.sessionID)
+            } else {
+                requestWindow()
+                return
+            }
+            pendingOpen.removeFirst()
+        }
+        let unused = unassignedFileWindows
+        unassignedFileWindows.removeAll()
+        for id in unused where sessions.model(id)?.canReuseWindow == true {
+            windows[id]?.window?.close()
+        }
+    }
+
+    @objc private func windowBecameKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              let id = Self.windows.first(where: { $0.value.window === window })?.key else { return }
+        Self.sessions.activate(id)
+    }
+
+    @objc private func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              let id = Self.windows.first(where: { $0.value.window === window })?.key else { return }
+        if let model = Self.sessions.model(id) { QuickLookController.shared.close(for: model) }
+        Self.windows.removeValue(forKey: id)
+        Self.fileEventWindows.remove(id)
+        Self.unassignedFileWindows.remove(id)
+        Self.sessions.unregister(id)
+        if window.isKeyWindow {
+            DispatchQueue.main.async {
+                guard NSApp.isActive, NSApp.keyWindow == nil, let model = Self.visibleSession() else { return }
+                Self.focus(model.sessionID)
+            }
+        }
+    }
 
     private static func askFinderPassword(for url: URL, wrong: Bool) async -> String? {
         guard !Task.isCancelled else { return nil }
         NSApp.activate(ignoringOtherApps: true)
-        if !AppDelegate.restoreMainWindow(in: NSApp) {
-            if let openPrimaryWindow = AppDelegate.openPrimaryWindow {
-                openPrimaryWindow()
-            } else {
-                let config = NSWorkspace.OpenConfiguration()
-                config.activates = true
-                do {
-                    _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config)
-                } catch {
-                    AppDelegate.primaryModel.notice = "无法打开窗口输入访达任务密码"
-                    return nil
-                }
+        for _ in 0..<100 {
+            let gate = FormalWriteLedger.shared.currentGate
+            guard !Task.isCancelled, gate != .cancelling, gate != .terminating else { return nil }
+            if let model = visibleSession() {
+                focus(model.sessionID)
+                return await model.askPassword(for: url, wrong: wrong)
             }
+            requestWindow()
+            do { try await Task.sleep(nanoseconds: 50_000_000) } catch { return nil }
         }
-        let gate = FormalWriteLedger.shared.currentGate
-        guard !Task.isCancelled, gate != .cancelling, gate != .terminating else { return nil }
-        return await AppDelegate.primaryModel.askPassword(for: url, wrong: wrong)
+        sessions.activeModel?.notice = "无法打开窗口输入访达任务密码"
+        return nil
+    }
+
+    private static func updateFinderActivity(_ job: TaskJob?) {
+        let starting = job != nil && finderJobID != job?.id
+        finderJobID = job?.id
+        if starting, visibleSession() == nil, FormalWriteLedger.shared.currentGate == .idle {
+            requestWindow()
+        }
+        sessions.showFinderJob(job)
     }
 
     private static func makeFinderTaskWorker() -> FinderTaskWorker {
@@ -282,95 +315,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             askPassword: askFinderPassword,
             feedback: { receipt, outcome, operation in
                 if receipt.state != .running, let message = receipt.message {
-                    AppDelegate.model?.notice = message
+                    sessions.activeModel?.notice = message
                 }
                 if receipt.state == .succeeded || receipt.state == .failed {
                     FinderNotifier.report(outcome, verb: operation.verb,
                                           reveal: operation == .extractHere ? nil : outcome.outputs.first)
                 }
             },
-            activity: { job in AppDelegate.primaryModel.finderJob = job },
-            onError: { error in AppDelegate.model?.notice = "访达任务队列：\(error.localizedDescription)" },
+            activity: updateFinderActivity,
+            onError: { error in sessions.activeModel?.notice = "访达任务队列：\(error.localizedDescription)" },
             log: { FinderJobLog.append($0) }
         )
     }
 
-    private static func scanFinderTasks() {
-        finderTaskWorker.start()
+    private static func consumeFinderNotice() {
+        guard let model = sessions.activeModel, let notice = PendingNotice.take() else { return }
+        model.notice = "\(notice.title) · \(notice.message)"
     }
 
-    /// 冷启动时收到的文件。此时窗口还没建好、`model` 仍是 nil，
-    /// 直接调 `.open` 会被可选链吞掉——表现就是「右键用 rrzip 打开，毫无反应」。
-    /// 先存下来，等 ContentView 上屏后由 `attach` 取走。
-    @MainActor private(set) static var pendingOpen: [URL] = []
-
-    /// ContentView 上屏时调用：接上 model，并把冷启动排队中的文件放进去
-    @MainActor
-    static func attach(_ model: ArchiveModel) {
-        Self.model = model
-        // 退出协调要能问队列里还有多少活、能取消、能在排空时收到回调
-        TerminationCoordinator.shared.host = model
-        scanFinderTasks()
-        // 访达那边转交过来的结果（跳过 N 个、解压失败），启动时补一句
-        if let notice = PendingNotice.take() {
-            model.notice = "\(notice.title) · \(notice.message)"
-        }
-        guard !pendingOpen.isEmpty else { return }
-        let urls = pendingOpen
-        pendingOpen = []
-        open(urls)
-    }
-
-    /// 所有「从外部打开」的入口都走这里：能判定就直接开，判不了就告知
-    @MainActor
-    static func open(_ urls: [URL]) {
+    @objc private func handleOpenDocuments(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
+        let urls = openDocumentURLs(event)
         guard !urls.isEmpty else { return }
-        guard let model else {
-            pendingOpen.append(contentsOf: urls)
-            return
-        }
-        restoreMainWindow(in: NSApp)
-        let archives = urls.filter {
-            if case .open = OpenGate.decide($0) { return true }
-            return false
-        }
-        if let first = archives.first {
-            model.open(url: first)
-            if archives.count > 1 {
-                model.notice = "另有 \(archives.count - 1) 个压缩包未打开"
-            }
-        } else if let first = urls.first {
-            // 交回 model 走 unrecognized 分支，给出真实提示而不是静默返回
-            model.open(url: first)
-        }
+        Self.open(urls)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
-    @MainActor
-    @discardableResult
-    static func restoreMainWindow(in app: NSApplication) -> Bool {
-        let windows = app.windows.filter { !($0 is NSPanel) }
-        let candidates = windows.map {
-            MainWindowRecovery.Candidate(identifier: $0.identifier?.rawValue,
-                                         canBecomeMain: $0.canBecomeMain, isSettings: $0 === settingsWindow)
-        }
-        let registered = mainWindow.flatMap { windows.firstIndex(of: $0) }
-        guard let index = MainWindowRecovery.choose(registered: registered, candidates: candidates) else { return false }
-        let main = windows[index]
-        mainWindow = main
-        if main.isMiniaturized { main.deminiaturize(nil) }
-        main.makeKeyAndOrderFront(nil)
-        return true
+    private static func installOpenDocumentHandler() {
+        // 先让 SwiftUI 建立第一个真正的主窗口，使后续路由始终有可用的 OpenWindowAction。
+        guard !handlesLaterFileEvents, hasRegisteredMainWindow, let launchedDelegate else { return }
+        NSAppleEventManager.shared().setEventHandler(
+            launchedDelegate, andSelector: #selector(handleOpenDocuments(_:reply:)),
+            forEventClass: AEEventClass(kCoreEventClass), andEventID: AEEventID(kAEOpenDocuments))
+        handlesLaterFileEvents = true
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.launchedDelegate = self
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(windowBecameKey), name: NSWindow.didBecomeKeyNotification, object: nil)
+        center.addObserver(self, selector: #selector(windowWillClose), name: NSWindow.willCloseNotification, object: nil)
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
         requestNotificationPermissionIfNeeded()
         wireTermination()
-        Self.model = Self.primaryModel
-        Self.primaryModel.cancelFinderTask = { AppDelegate.finderTaskWorker.cancelCurrent() }
-        TerminationCoordinator.shared.host = Self.primaryModel
-        Self.scanFinderTasks()
+        Self.sessions.cancelFinderTask = { AppDelegate.finderTaskWorker.cancelCurrent() }
+        TerminationCoordinator.shared.host = Self.sessions
+        Self.finderTaskWorker.start()
+        DispatchQueue.main.async { Self.installOpenDocumentHandler() }
     }
 
     /// 退出协调的界面部分：状态机在 TerminationCoordinator，这里只提供
@@ -386,6 +377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         coordinator.onAbort = {
             NSApp.reply(toApplicationShouldTerminate: false)
+            AppDelegate.drainPendingOpen()
         }
         // 原地编辑 / 访达服务结束时立刻叫醒退出协调，不必等下一个轮询周期。
         // 回调用 Task 切回主线程：账本注销可能发生在任意线程。
@@ -442,11 +434,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 激活时补扫队列，也取旧版扩展可能留下的通知。
     func applicationDidBecomeActive(_ notification: Notification) {
-        Self.scanFinderTasks()
-        Task { @MainActor in
-            guard let model = AppDelegate.model, let notice = PendingNotice.take() else { return }
-            model.notice = "\(notice.title) · \(notice.message)"
-        }
+        Self.finderTaskWorker.start()
+        Self.consumeFinderNotice()
     }
 
     /// 访达扩展只能投递通知、不能申请授权，所以授权这件事只能由主程序做。
@@ -554,7 +543,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         guard !urls.isEmpty else { return }
+        let created = Self.fileEventWindows
+        Self.fileEventWindows.removeAll()
+        // AppKit 可能在 didFinishLaunching 前投递首批 URL。等关闭监听接好再回收多余窗口。
         Task { @MainActor in
+            AppDelegate.unassignedFileWindows.formUnion(created)
             AppDelegate.open(urls)
             NSApp.activate(ignoringOtherApps: true)
         }
@@ -564,10 +557,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 窗口关掉后再点 Dock 图标，把主窗口找回来
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag {
-            AppDelegate.restoreMainWindow(in: sender)
+        if Self.visibleSession() != nil { return true }
+        if let model = Self.sessions.activeModel, Self.window(for: model)?.isMiniaturized == true {
+            Self.focus(model.sessionID)
+            return false
         }
-        return true
+        return !Self.hasRegisteredMainWindow || !Self.requestWindow()
     }
 }
 
@@ -585,35 +580,33 @@ extension Notification.Name {
 }
 
 
-// 通过两种 scene 的内容标记窗口，保留 SwiftUI 已分配的 identifier。
+// 窗口通过自身的 AppKit 原生句柄登记，避免迟到的布局回调改到别的窗口。
 private struct WindowRegistration: NSViewRepresentable {
     @Environment(\.openWindow) private var openWindow
-    let isMain: Bool
+    let model: ArchiveModel?
 
     final class WindowView: NSView {
-        var isMain = false
+        weak var model: ArchiveModel?
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             guard let window else { return }
-            if isMain {
-                AppDelegate.mainWindow = window
-            } else {
-                AppDelegate.settingsWindow = window
-            }
             if window.identifier == nil {
-                let id = isMain ? MainWindowRecovery.mainID : MainWindowRecovery.settingsID
+                let id = model == nil ? MainWindowRecovery.settingsID : MainWindowRecovery.mainID
                 window.identifier = NSUserInterfaceItemIdentifier(id)
+            }
+            if let model {
+                window.tabbingMode = .disallowed
+                AppDelegate.register(model, in: window)
             }
         }
     }
 
     func makeNSView(context: Context) -> WindowView {
-        // 只剩设置窗口时，Launch Services 可能只激活它。由 scene 显式重新打开主窗口。
-        let open = openWindow
-        AppDelegate.openPrimaryWindow = { open(id: MainWindowRecovery.sceneID) }
+        let action = openWindow
+        AppDelegate.openMainWindow = { action(id: MainWindowRecovery.sceneID) }
         let view = WindowView()
-        view.isMain = isMain
+        view.model = model
         return view
     }
 

@@ -3,6 +3,7 @@
 //
 import AppKit
 import Foundation
+import Observation
 import UniformTypeIdentifiers
 
 /// 应用内拖拽使用的自定义类型：暂存区靠它拿到「包 + 包内路径」，不必先解压
@@ -50,6 +51,47 @@ enum StashLayout: String, CaseIterable, Identifiable {
         case .flat: return "都放在同一层，重复的自动加「 2」「 3」"
         case .original: return "按包里的路径还原，可能和已有文件重名"
         }
+    }
+}
+
+/// 嵌套包可能存放在已关闭窗口的缓存里。暂存条目和正在导出的快照各自保留来源。
+private final class StashArchiveLease {
+    private let archives: Set<URL>
+
+    init(_ items: [StashItem]) {
+        archives = Set(items.map(\.archive))
+        for archive in archives { ScratchUsage.shared.hold(archive) }
+    }
+
+    deinit {
+        for archive in archives { ScratchUsage.shared.release(archive) }
+    }
+}
+
+@MainActor
+@Observable
+final class StashStore {
+    private(set) var items: [StashItem] = []
+    var layout = UserDefaults.standard.string(forKey: "rrzip.stashLayout")
+        .flatMap(StashLayout.init(rawValue:)) ?? .perArchive {
+        didSet { UserDefaults.standard.set(layout.rawValue, forKey: "rrzip.stashLayout") }
+    }
+    @ObservationIgnored private var lease = StashArchiveLease([])
+    @ObservationIgnored private(set) var passwords: [String: String] = [:]
+
+    func update(_ change: (inout [StashItem]) -> Void) {
+        change(&items)
+        lease = StashArchiveLease(items)
+        let paths = Set(items.map { $0.archive.path })
+        passwords = passwords.filter { paths.contains($0.key) }
+    }
+
+    func remember(_ password: String?, for archive: URL) {
+        if let password, items.contains(where: { $0.archive == archive }) { passwords[archive.path] = password }
+    }
+
+    func forgetPassword(for archive: URL) {
+        passwords[archive.path] = nil
     }
 }
 
@@ -137,6 +179,7 @@ extension ArchiveModel {
                 updateStash { $0.append(item) }
             }
         }
+        stashStore.remember(passwords[frame.archive.path], for: frame.archive)
         isStashVisible = true
         status = "已加入暂存 · 共 \(stash.count) 项"
         selection = []
@@ -148,6 +191,7 @@ extension ArchiveModel {
         if !stash.contains(where: { $0.archive == archive && $0.path == path }) {
             updateStash { $0.append(StashItem(archive: archive, path: path, size: size)) }
         }
+        stashStore.remember(passwords[archive.path] ?? passwordFromOtherWindows?(archive), for: archive)
         isStashVisible = true
         status = "已加入暂存 · 共 \(stash.count) 项"
     }
@@ -179,9 +223,11 @@ extension ArchiveModel {
     func exportStash(to destination: URL) {
         guard !stash.isEmpty else { return }
         let items = stash
-        let passwordMap = passwords
+        let passwordMap = stashStore.passwords.merging(passwords) { _, local in local }
         let layout = stashLayout
+        let lease = StashArchiveLease(items)
         submitJob(title: "正在导出暂存", detail: "\(items.count) 项") { [weak self] jobID in
+            defer { withExtendedLifetime(lease) {} }
             guard let self else { return .cancelled }
             return await self.runStashExportJob(to: destination, items: items,
                                                 passwords: passwordMap,
@@ -237,7 +283,11 @@ extension ArchiveModel {
         status = skipped.isEmpty ? "已导出 \(exported) 项"
                                  : "已导出 \(exported) 项 · \(skipped.count) 项已存在，未覆盖"
         // 有跳过就留着暂存项：用户可能想换个目录再导一次
-        if skipped.isEmpty { clearStash() }
+        if skipped.isEmpty {
+            let exportedIDs = Set(items.map(\.id))
+            updateStash { $0.removeAll { exportedIDs.contains($0.id) } }
+            if stash.isEmpty { isStashVisible = false }
+        }
         return .succeeded
     }
 
@@ -274,8 +324,10 @@ extension ArchiveModel {
     func packStash(to output: URL) {
         guard !stash.isEmpty else { return }
         let items = stash
-        let passwordMap = passwords
+        let passwordMap = stashStore.passwords.merging(passwords) { _, local in local }
+        let lease = StashArchiveLease(items)
         submitJob(title: "正在打包暂存", detail: output.lastPathComponent) { [weak self] jobID in
+            defer { withExtendedLifetime(lease) {} }
             guard let self else { return .cancelled }
             return await self.runStashPackJob(output: output, items: items,
                                               passwords: passwordMap, jobID: jobID)
@@ -298,15 +350,16 @@ extension ArchiveModel {
         }
 
         do {
-            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+            let packedFiles = staging.appendingPathComponent("files", isDirectory: true)
+            try FileManager.default.createDirectory(at: packedFiles, withIntermediateDirectories: true)
 
             var files: [URL] = []
+            var fileNames: Set<String> = []
             for (index, item) in items.enumerated() {
                 try checkCancelled()
                 status = "正在解压暂存项 \(index + 1)/\(items.count)…"
 
-                let folder = staging.appendingPathComponent(
-                    item.archive.deletingPathExtension().lastPathComponent, isDirectory: true)
+                let folder = staging.appendingPathComponent(item.id.uuidString, isDirectory: true)
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
                 do {
@@ -323,7 +376,7 @@ extension ArchiveModel {
                     throw ArchiveError.tool("「\(item.name)」解压失败：\(error.localizedDescription)")
                 }
 
-                var file = folder.appendingPathComponent(item.path)
+                let file = folder.appendingPathComponent(item.path)
                 // 引擎没报错但文件不在，同样算失败——继续压只会漏文件
                 guard FileManager.default.fileExists(atPath: file.path) else {
                     throw ArchiveError.tool("「\(item.name)」没有解出来，已停止打包")
@@ -331,13 +384,13 @@ extension ArchiveModel {
                 // 同名时加包名前缀：7-Zip 不接受两个不同目录下的同名文件
                 let ext = file.pathExtension
                 let base = file.deletingPathExtension().lastPathComponent
-                let renamed = folder
+                let requested = packedFiles
                     .appendingPathComponent("\(base)-\(item.archive.deletingPathExtension().lastPathComponent)")
-                    .appendingPathExtension(ext)
-                if (try? FileManager.default.moveItem(at: file, to: renamed)) != nil {
-                    file = renamed
-                }
-                files.append(file)
+                let renamed = UniquePath.file(ext.isEmpty ? requested : requested.appendingPathExtension(ext),
+                                              avoidingFilenames: fileNames)
+                try FileManager.default.moveItem(at: file, to: renamed)
+                fileNames.insert(renamed.lastPathComponent.lowercased())
+                files.append(renamed)
             }
 
             // 解压阶段耗掉的时间里用户可能已经点了取消，别再往下压了

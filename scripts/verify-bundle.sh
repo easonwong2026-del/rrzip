@@ -32,3 +32,16 @@ hdiutil imageinfo "$DMG" >/dev/null || { echo "::error::$DMG 不是可用的磁�
 echo "dmg 就绪：$DMG"
 ./scripts/release-notes.sh "v${APP_VERSION}" > build/notes.md
 echo "发布说明：v${APP_VERSION}"
+
+BIN="$APP/Contents/MacOS/rrzip"
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+"$BIN" --help > "$fixture/help.txt"
+grep -q -- '--extract' "$fixture/help.txt"
+[ "$("$BIN" --version)" = "$APP_VERSION" ]
+printf 'rrzip CLI smoke\n' > "$fixture/source.txt"
+"$BIN" --create "$fixture/sample.zip" "$fixture/source.txt"
+"$BIN" --verify "$fixture/sample.zip"
+"$BIN" --extract "$fixture/sample.zip" -o "$fixture/extracted"
+cmp "$fixture/source.txt" "$fixture/extracted/source.txt"
+echo "CLI 实际产物检查通过：--help --version --create --verify --extract"

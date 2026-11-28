@@ -276,14 +276,15 @@ func testRealFileFlowAcrossRelaunch() {
             try ArchiveModel.writeArchive(at: produced, from: [original], format: .zip,
                                           password: "", volume: nil)
 
-            // 3. 关闭窗口：什么都不做，任务不中断、缓存不清理、文件不动
+            // 3. 关闭窗口只清理该窗口的临时副本，正式文件不动
+            first.closeWindow()
             expect(fm.fileExists(atPath: original.path), "关窗后原始 ZIP 还在")
             expect(fm.fileExists(atPath: produced.path), "关窗后新生成 ZIP 还在")
 
-            // 4. 重新启动：新的 model 第一次碰工作目录时清掉上次的临时文件
+            // 4. 建立新会话，验证已关闭窗口的副本仍已释放
             let second = ArchiveModel()
             _ = second.cacheSizeOnDisk()
-            expect(!fm.fileExists(atPath: preview?.path ?? "x"), "重启后上次的预览缓存被清掉")
+            expect(!fm.fileExists(atPath: preview?.path ?? "x"), "关闭窗口后旧会话的预览缓存被清掉")
             expect(fm.fileExists(atPath: original.path), "重启后原始 ZIP 还在")
             expect(fm.fileExists(atPath: produced.path), "重启后新生成 ZIP 还在")
 
