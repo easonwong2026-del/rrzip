@@ -52,11 +52,16 @@ func testPayloadConcurrentDedup() {
             return
         }
 
-        // 先碰一次工作目录：它第一次被访问时会清掉上次运行留下的临时文件
+        // 工作目录按窗口分层，解压次数以各会话下的解压目录计。
         _ = model.cacheSizeOnDisk()
         let scratch = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("rrzip/scratch", isDirectory: true)
-        let before = (try? FileManager.default.contentsOfDirectory(atPath: scratch.path))?.count ?? 0
+        func units() -> Int {
+            let fm = FileManager.default
+            let sessions = (try? fm.contentsOfDirectory(at: scratch, includingPropertiesForKeys: nil)) ?? []
+            return sessions.reduce(0) { $0 + ((try? fm.contentsOfDirectory(atPath: $1.path))?.count ?? 0) }
+        }
+        let before = units()
 
         // 详情栏、缩略图、悬停预览同时要同一份文件
         var results: [URL?] = []
@@ -83,7 +88,7 @@ func testPayloadConcurrentDedup() {
         expect(urls.first.map { FileManager.default.fileExists(atPath: $0.path) } == true,
                "临时副本还在")
 
-        let after = (try? FileManager.default.contentsOfDirectory(atPath: scratch.path))?.count ?? 0
+        let after = units()
         expect(after - before == 1, "实际解压只有一次", "新增 \(after - before) 个临时目录")
         expect(waitUntil(5, { !ScratchUsage.shared.isWorking }), "worker 归零")
 

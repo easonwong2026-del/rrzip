@@ -411,13 +411,16 @@ enum Tar {
     }
 
     static func create(at output: URL, from items: [URL], format: String,
-                       jobID: UUID? = nil) throws {
+                       gzipLevel: Int? = nil, jobID: UUID? = nil) throws {
         var args: [String] = []
         switch format {
         case "zip": args = ["-a", "-cf", output.path]
         case "tar": args = ["-cf", output.path]
         case "tgz": args = ["-czf", output.path]
         default: throw ArchiveError.unsupported(format)
+        }
+        if format == "tgz", let gzipLevel {
+            args += ["--options", "gzip:compression-level=\(gzipLevel)"]
         }
         guard let first = items.first else { throw ArchiveError.tool("没有要压缩的内容") }
 

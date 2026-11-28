@@ -670,8 +670,8 @@ extension NSView {
 /// 焦点还停在搜索框里时，方向键在挪光标、Return 在提交输入、空格在打字，
 /// 看起来像「点了行但键盘不听话」。只在这一步切，边输入边跳结果时不动焦点。
 @MainActor
-func takeKeyboardFocus() {
-    NotificationCenter.default.post(name: .rrzipFocusList, object: nil)
+func takeKeyboardFocus(_ model: ArchiveModel) {
+    NotificationCenter.default.post(name: .rrzipFocusList, object: model)
 }
 
 // MARK: - 列表行
@@ -745,7 +745,7 @@ struct EntryRow: View {
         .onTapGesture(count: 2) { model.activate(entry) }
         .onTapGesture {
             model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? [])
-            takeKeyboardFocus()
+            takeKeyboardFocus(model)
         }
         .onDrag { EntryDrag.provider(for: entry, model: model) }
         .onHover { inside in
@@ -788,7 +788,7 @@ struct EntryRow: View {
         .accessibilityAction { model.activate(entry) }
         .accessibilityAction(named: Text("选中")) {
             model.select(entry)
-            takeKeyboardFocus()
+            takeKeyboardFocus(model)
         }
         .help(entry.path)
     }
@@ -812,14 +812,14 @@ struct ColumnRow: View {
             row
                 .onTapGesture {
                     model.jump(to: entry.path)
-                    takeKeyboardFocus()
+                    takeKeyboardFocus(model)
                 }
         } else {
             row
                 .onTapGesture(count: 2) { model.activate(entry) }
                 .onTapGesture {
                     model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? [])
-                    takeKeyboardFocus()
+                    takeKeyboardFocus(model)
                 }
         }
     }
@@ -857,11 +857,11 @@ struct ColumnRow: View {
         .archiveEntryAccessibility(entry, selected: selected)
         .accessibilityAction {
             if entry.isDirectory { model.jump(to: entry.path) } else { model.activate(entry) }
-            takeKeyboardFocus()
+            takeKeyboardFocus(model)
         }
         .accessibilityAction(named: Text("选中")) {
             model.select(entry)
-            takeKeyboardFocus()
+            takeKeyboardFocus(model)
         }
         .help(entry.path)
     }
@@ -911,7 +911,7 @@ struct IconTile: View {
         .onTapGesture(count: 2) { model.activate(entry) }
         .onTapGesture {
             model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? [])
-            takeKeyboardFocus()
+            takeKeyboardFocus(model)
         }
         .onDrag { EntryDrag.provider(for: entry, model: model) }
         .onHover { inside in
@@ -922,7 +922,7 @@ struct IconTile: View {
         .accessibilityAction { model.activate(entry) }
         .accessibilityAction(named: Text("选中")) {
             model.select(entry)
-            takeKeyboardFocus()
+            takeKeyboardFocus(model)
         }
         .help(entry.path)
     }

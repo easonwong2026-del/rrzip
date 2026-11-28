@@ -167,12 +167,14 @@ final class ArchiveModel {
     var batchRequest: BatchRequest?
 
     /// 暂存区：跨层、跨包攒起来，最后一次性导出
-    private(set) var stash: [StashItem] = []
-    func updateStash(_ change: (inout [StashItem]) -> Void) { change(&stash) }
+    let stashStore: StashStore
+    var stash: [StashItem] { stashStore.items }
+    func updateStash(_ change: (inout [StashItem]) -> Void) { stashStore.update(change) }
     var isStashVisible = false
     /// 暂存导出的落盘方式
-    var stashLayout: StashLayout = .perArchive {
-        didSet { UserDefaults.standard.set(stashLayout.rawValue, forKey: "rrzip.stashLayout") }
+    var stashLayout: StashLayout {
+        get { stashStore.layout }
+        set { stashStore.layout = newValue }
     }
 
     /// 首页「最近打开」，最多 8 条
@@ -374,7 +376,13 @@ final class ArchiveModel {
 
     private(set) var passwords: [String: String] = [:]
 
-    init() {
+    let sessionID = UUID()
+    @ObservationIgnored var routeOpen: (([URL], ArchiveModel) -> Void)?
+    @ObservationIgnored var passwordFromOtherWindows: ((URL) -> String?)?
+    private(set) var windowClosed = false
+
+    init(stashStore: StashStore? = nil) {
+        self.stashStore = stashStore ?? StashStore()
         // 调试用：defaults write com.rrzip.mac rrzip.viewMode -string icons
         if let mode = UserDefaults.standard.string(forKey: "rrzip.viewMode"),
            let parsed = ArchiveViewMode(rawValue: mode) {
@@ -387,10 +395,6 @@ final class ArchiveModel {
         if let mode = UserDefaults.standard.string(forKey: "rrzip.workspaceMode"),
            let parsed = WorkspaceMode(rawValue: mode) {
             workspaceMode = parsed
-        }
-        if let layout = UserDefaults.standard.string(forKey: "rrzip.stashLayout"),
-           let parsed = StashLayout(rawValue: layout) {
-            stashLayout = parsed
         }
         if let key = UserDefaults.standard.string(forKey: "rrzip.sortKey"),
            let parsed = SortKey(rawValue: key) {
@@ -466,6 +470,7 @@ final class ArchiveModel {
 
     /// 打开成功后记一笔；同一个包只保留最新一条
     func recordRecent(_ url: URL) {
+        loadRecentArchives()
         var list = recentArchives.filter { $0.path != url.path }
         list.insert(RecentArchive(path: url.path, name: url.lastPathComponent, openedAt: Date()), at: 0)
         recentArchives = Array(list.prefix(8))
@@ -473,6 +478,7 @@ final class ArchiveModel {
     }
 
     func removeRecent(_ item: RecentArchive) {
+        loadRecentArchives()
         recentArchives.removeAll { $0.path == item.path }
         saveRecentArchives()
     }
@@ -502,6 +508,12 @@ final class ArchiveModel {
     // MARK: - 打开
 
     func open(url: URL) {
+        if let routeOpen { return routeOpen([url], self) }
+        openInSession(url)
+    }
+
+    func openInSession(_ url: URL) {
+        guard !windowClosed else { return }
         // 统一走格式识别：后缀说不清时读魔数，改过名 / 没后缀的包也能打开。
         // 这里不能再按后缀前置拦截，否则拖入、⌘O、访达打开三条路径都和 README 的承诺不一致。
         switch OpenGate.decide(url) {
@@ -527,10 +539,12 @@ final class ArchiveModel {
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.message = "选择一个压缩包；选多个会进入批量处理"
+        panel.message = "选择要打开的压缩包"
         guard panel.runModal() == .OK else { return }
         let urls = panel.urls
-        if urls.count > 1 {
+        if let routeOpen {
+            routeOpen(urls, self)
+        } else if urls.count > 1 {
             batchRequest = BatchRequest(urls: urls, mode: .extract)
         } else if let url = urls.first {
             open(url: url)
@@ -553,33 +567,51 @@ final class ArchiveModel {
     func verifyCurrent() {
         guard let frame = current else { return }
         let password = passwords[frame.archive.path]
-        isLoading = true
-        status = "正在校验 \(frame.archive.lastPathComponent)…"
-        Task {
+        let name = frame.archive.lastPathComponent
+        submitJob(title: "正在校验", detail: name) { [weak self] jobID in
+            guard let self else { return .cancelled }
+            self.status = "正在校验 \(name)…"
             do {
                 try await Task.detached(priority: .userInitiated) {
-                    try SevenZip.verify(frame.archive, password: password)
+                    try ArchiveService.verify(frame.archive, password: password, jobID: jobID)
                 }.value
-                isLoading = false
-                status = "校验通过 · \(frame.archive.lastPathComponent)"
+                try TaskRegistry.checkCancellation(jobID)
+                self.status = "校验通过 · \(name)"
+                return .succeeded
+            } catch ArchiveError.cancelled {
+                self.status = "已取消校验"
+                return .cancelled
             } catch {
-                isLoading = false
-                status = "校验失败"
-                errorMessage = error.localizedDescription
+                self.status = "校验失败"
+                return .failed(error.localizedDescription)
             }
         }
     }
 
     private var loadTask: Task<Void, Never>?
     private var loadGeneration: UInt64 = 0
+    private var openingArchive: URL?
+    var rootArchive: URL? { openingArchive ?? trail.first?.archive }
+    var canReuseWindow: Bool {
+        rootArchive == nil && !isLoading && passwordRequest == nil
+            && batchRequest == nil && pendingCreate == nil && errorMessage == nil
+    }
 
     func loadFrame(url: URL, resetTrail: Bool, restorePrefix: String? = nil) {
+        guard !windowClosed else {
+            if !resetTrail { ScratchUsage.shared.release(url) }
+            return
+        }
         loadTask?.cancel()
         loadGeneration &+= 1
         let generation = loadGeneration
+        openingArchive = resetTrail ? url : nil
         isLoading = true
         status = "正在读取 \(url.lastPathComponent)…"
         loadTask = Task {
+            defer {
+                if loadGeneration == generation { openingArchive = nil }
+            }
             await performLoad(
                 url: url,
                 resetTrail: resetTrail,
@@ -636,6 +668,7 @@ final class ArchiveModel {
 
         if let passphrase {
             passwords[url.path] = passphrase
+            stashStore.remember(passphrase, for: url)
             unlocked.insert(url.path)
         }
         let attrs = await Task.detached {
@@ -745,13 +778,14 @@ final class ArchiveModel {
     private(set) var isTerminating = false
     /// 队列排空时回调一次，退出协调用它决定什么时候真正退出
     var onWorkDrained: (() -> Void)?
+    @ObservationIgnored var onClosedJobDrained: (() -> Void)?
 
     private var jobQueue: [PendingJob] = []
     private var jobBusy = false
     private var jobReveal: Task<Void, Never>?
 
     /// 正在跑 + 排队中的任务数
-    var pendingJobCount: Int { (job == nil ? 0 : 1) + jobQueue.count }
+    var pendingJobCount: Int { (job != nil || passwordRequest != nil ? 1 : 0) + jobQueue.count }
 
     /// 有没有还没收尾的活：队列任务，或预览解压 / 缩略图这类临时写入。
     /// ⌘Q 要不要拦下来问一句，看的就是它。
@@ -851,12 +885,13 @@ final class ArchiveModel {
         isLoading = job != nil
 
         notifyWorkDrainedIfNeeded()
+        if windowClosed, pendingJobCount == 0 { onClosedJobDrained?() }
     }
 
     /// 退出流程的「排空」判定：队列空了、且没有正在写的正式文件，才通知一次。
     /// 原地编辑与访达服务不走队列，所以不能只看 job。
     func notifyWorkDrainedIfNeeded() {
-        guard isTerminating, job == nil, jobQueue.isEmpty else { return }
+        guard isTerminating, pendingJobCount == 0 else { return }
         guard FormalWriteLedger.shared.isEmpty else { return }
         let drained = onWorkDrained
         onWorkDrained = nil
@@ -913,6 +948,7 @@ final class ArchiveModel {
             activePasswordPrompt = next
             passwordRequest = next.request
         }
+        notifyWorkDrainedIfNeeded()
     }
 
     /// 退出取消时一次性放行所有挂起的密码询问（含当前弹窗与排队项）
@@ -958,14 +994,12 @@ final class ArchiveModel {
         let passphrase = passwords[archive.path]
         let engine = frame.engine
         let path = entry.path
-        let scratch = payloads.scratch
+        let dir = payloads.scratch.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        ScratchUsage.shared.beginWork(on: dir.path)
+        defer { ScratchUsage.shared.endWork(on: dir.path) }
 
         do {
             return try await Task.detached { () -> URL in
-                let dir = scratch.appendingPathComponent(UUID().uuidString, isDirectory: true)
-                // 解压在往这个目录里写，回收不许进来
-                ScratchUsage.shared.beginWork(on: dir.path)
-                defer { ScratchUsage.shared.endWork(on: dir.path) }
                 switch engine {
                 case .libarchive:
                     try Tar.extract(archive, entries: [path], to: dir, passphrase: passphrase)
@@ -1123,6 +1157,7 @@ final class ArchiveModel {
     func lockCurrent() {
         guard let frame = current else { return }
         passwords[frame.archive.path] = nil
+        stashStore.forgetPassword(for: frame.archive)
         unlocked.remove(frame.archive.path)
         // 只清密码、保留已加载的条目列表，避免立刻又弹出密码框
         status = "已锁定 · \(frame.entries.count) 个项目"
@@ -1145,6 +1180,11 @@ extension ArchiveModel: TerminationHost {
     }
 
     func cancelWorkForTermination() {
+        cancelWindowWork()
+        cancelFinderTask?()
+    }
+
+    func cancelWindowWork() {
         isTerminating = true
 
         // 1. 排队的一条都不许再启动。清完 pumpJobs 就没有下家
@@ -1157,17 +1197,32 @@ extension ArchiveModel: TerminationHost {
         if passwordRequest != nil || activePasswordPrompt != nil || !passwordPromptQueue.isEmpty {
             cancelAllPasswordPrompts()
         }
-        cancelFinderTask?()
 
         // 3. 正在跑的交给 TaskRegistry 终止子进程。这里不能直接退进程：
         //    压缩正在写临时文件、暂存打包正在写 staging 目录，
         //    要等执行体捕获取消、自己把 defer 清理跑完。
-        guard let job else { return }
+        guard let job else {
+            notifyWorkDrainedIfNeeded()
+            return
+        }
         status = "正在取消…"
         TaskRegistry.cancel(job.id)
     }
 
     func resumeAfterAbortedTermination() {
         isTerminating = false
+    }
+
+    func closeWindow() {
+        guard !windowClosed else { return }
+        windowClosed = true
+        routeOpen = nil
+        passwordFromOtherWindows = nil
+        loadGeneration &+= 1
+        loadTask?.cancel()
+        loadTask = nil
+        openingArchive = nil
+        cancelWindowWork()
+        payloads.close()
     }
 }

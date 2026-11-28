@@ -9,6 +9,8 @@ final class PayloadCache {
     private var payloadCache: [String: URL] = [:]
     /// 同一 key 正在解压：后来的调用者登记在这里，共享同一次结果
     private var payloadWaiters: [String: [(URL?) -> Void]] = [:]
+    private var directory: URL?
+    private var closed = false
 
     /// 临时副本的磁盘软预算。单个文件本身超预算时也照样解压，
     /// 只是它得等自己不再被占用、且比别的都老才会被回收。
@@ -16,17 +18,28 @@ final class PayloadCache {
 
     // MARK: - 工作目录
 
-    private lazy var workspace: URL = {
+    private static let scratchRoot: URL = {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("rrzip", isDirectory: true)
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let scratch = base.appendingPathComponent("scratch", isDirectory: true)
         try? FileManager.default.removeItem(at: scratch)   // 上次运行留下的临时文件全部清掉
         try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
-        return base
+        return scratch
     }()
 
-    var scratch: URL { workspace.appendingPathComponent("scratch", isDirectory: true) }
+    var scratch: URL {
+        if let directory { return directory }
+        let url = Self.scratchRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        directory = url
+        return url
+    }
+
+    func close() {
+        closed = true
+        payloadCache.removeAll()
+        if let directory { ScratchUsage.shared.retire(directory) }
+    }
 
     private func freshScratch(_ name: String = UUID().uuidString) -> URL {
         let url = scratch.appendingPathComponent(name, isDirectory: true)
@@ -36,7 +49,7 @@ final class PayloadCache {
 
     /// 缓存与临时目录占用，设置页显示
     func sizeOnDisk() -> Int64 {
-        CacheMaintenance.size(of: workspace)
+        CacheMaintenance.size(of: scratch)
     }
 
     /// 清掉缩略图、预览临时副本与解压缓存；不动任何压缩包。
@@ -44,13 +57,10 @@ final class PayloadCache {
     /// 只判 `job != nil` 会漏掉排队中的任务：清完它一开始跑，要读的副本已经没了。
     @discardableResult
     func clear(busy: Bool) -> CacheCleanupReport {
-        let report = CacheMaintenance.purge([workspace], busy: busy)
+        let report = CacheMaintenance.purge([scratch], busy: busy)
         guard !report.blocked else { return report }
 
         payloadCache.removeAll()
-        // 目录本身留着：删掉再建会让正在进行的预览当场失败，也没这个必要
-        try? FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         return report
     }
 
@@ -74,7 +84,7 @@ final class PayloadCache {
 
     func url(for entry: ArchiveEntry, in frame: ArchiveModel.Frame, password: String?,
              retaining retainedArchives: @escaping () -> [URL], completion: @escaping (URL?) -> Void) {
-
+        guard !closed else { return completion(nil) }
         let key = cacheKey(entry, in: frame)
         if let cached = payloadCache[key], FileManager.default.fileExists(atPath: cached.path) {
             markUsed(cached)
@@ -114,7 +124,7 @@ final class PayloadCache {
                 }
                 return file
             }.value
-            if let url {
+            if let url, !closed {
                 payloadCache[key] = url
                 // 磁盘软预算：按字节回收最久未用的临时副本。
                 // 这一次的目录还在 beginWork 里登记着，回收跳不过去就超预算，不会删它
@@ -122,7 +132,7 @@ final class PayloadCache {
             }
             // 失败的路径也要把等待者全部放走：留一个就永久挂着
             for waiter in payloadWaiters.removeValue(forKey: key) ?? [] {
-                waiter(url)
+                waiter(closed ? nil : url)
             }
         }
     }

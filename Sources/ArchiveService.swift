@@ -45,8 +45,7 @@ enum ArchiveService {
                 throw ArchiveError.cancelled
             } catch ArchiveError.needsPassword {
                 // 系统 libarchive 不支持 7z 头加密。收到密码后仅为这种格式走 7zz。
-                if engine == .libarchive, let password, !password.isEmpty, SevenZip.isAvailable,
-                   FormatDetector.detect(url)?.format.id == "7zip" {
+                if retriesEncryptedSevenZip(url, password: password, after: engine) {
                     lastError = ArchiveError.needsPassword
                     continue
                 }
@@ -68,6 +67,11 @@ enum ArchiveService {
         case .sevenZip:
             return try SevenZip.list(url, password: password, jobID: jobID)
         }
+    }
+
+    private static func retriesEncryptedSevenZip(_ url: URL, password: String?, after engine: ArchiveEngine) -> Bool {
+        engine == .libarchive && password?.isEmpty == false && SevenZip.isAvailable
+            && FormatDetector.detect(url)?.format.id == "7zip"
     }
 
     /// 同时超过 50 GiB 和 200 倍才阻断，为合法的大归档和高压缩率数据各留余量。
@@ -105,14 +109,16 @@ enum ArchiveService {
                         onConflict: ArchiveConflictPolicy = .overwrite,
                         jobID: UUID? = nil,
                         preferredEngine: ArchiveEngine? = nil,
-                        onProgress: (@Sendable (Double) -> Void)? = nil) throws {
+                        onProgress: (@Sendable (Double) -> Void)? = nil,
+                        validateSelection: Bool = false) throws {
         for entry in entries {
             try ArchivePathGuard.validateRelative(entry)
         }
         try TaskRegistry.checkCancellation(jobID)
         var engine = preferredEngine
         var compressedSize: Int64?
-        if entries.isEmpty {
+        let preflight = entries.isEmpty || validateSelection
+        if preflight {
             let inspected = try listWithEngine(url, password: password, jobID: jobID)
             // 分卷片段的字节数不能当成整组压缩大小。
             if FormatDetector.detectByExtension(url)?.split == nil {
@@ -127,7 +133,7 @@ enum ArchiveService {
             ?? engineOrder(for: url)
         for candidate in order where candidate.isAvailable {
             try TaskRegistry.checkCancellation(jobID)
-            if entries.isEmpty, candidate != engine {
+            if preflight, candidate != engine {
                 let inspected = try list(url, using: candidate, password: password, jobID: jobID)
                 try validateExtraction(entries: inspected, compressedSize: compressedSize)
             }
@@ -149,6 +155,10 @@ enum ArchiveService {
                 // 取消会变成「再战一次」——任务卡住，用户还得再按一遍。
                 throw ArchiveError.cancelled
             } catch ArchiveError.needsPassword {
+                if retriesEncryptedSevenZip(url, password: password, after: candidate) {
+                    lastError = ArchiveError.needsPassword
+                    continue
+                }
                 throw ArchiveError.needsPassword
             } catch ArchiveError.unsafePath(let bad) {
                 // 安全拦截禁止回退到另一个引擎重试
@@ -161,10 +171,10 @@ enum ArchiveService {
     }
 
     /// 完整性校验：只有 7-Zip 能从头到尾 CRC 一遍
-    static func verify(_ url: URL, jobID: UUID? = nil) throws {
+    static func verify(_ url: URL, password: String? = nil, jobID: UUID? = nil) throws {
         try TaskRegistry.checkCancellation(jobID)
         guard SevenZip.isAvailable else { throw ArchiveError.engineUnavailable }
-        try SevenZip.verify(url, jobID: jobID)
+        try SevenZip.verify(url, password: password, jobID: jobID)
     }
 
     /// 这个包本机能不能开：格式识别 + 引擎可用性

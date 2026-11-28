@@ -104,7 +104,8 @@ enum ArchiveWriter {
         volume: String?,
         level: Int = 5,
         jobID: UUID? = nil,
-        onProgress: (@Sendable (Double) -> Void)? = nil
+        onProgress: (@Sendable (Double) -> Void)? = nil,
+        gzipLevel: Int? = nil
     ) throws {
         let fm = FileManager.default
         let folder = output.deletingLastPathComponent()
@@ -161,7 +162,7 @@ enum ArchiveWriter {
             } else {
                 // TAR / TGZ 走 bsdtar。它也支持取消：
                 // 不传 jobID 的话，这两个格式的任务按「取消」不会有任何反应。
-                try Tar.create(at: staged, from: items, format: format.ext, jobID: jobID)
+                try Tar.create(at: staged, from: items, format: format.ext, gzipLevel: gzipLevel, jobID: jobID)
             }
             // 压完了但取消信号刚好赶到：这时候交出产物等于没取消。
             // 拿掉这一行，用户点了取消却仍然得到一个包（旧的同名包还会被替换）。

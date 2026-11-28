@@ -36,14 +36,17 @@ enum UniquePath {
     }
 
     /// 文件版：`a.zip` → `a 2.zip`，`backup.tar.gz` → `backup 2.tar.gz`
-    static func file(_ url: URL) -> URL {
-        guard fileExists(url) else { return url }
+    static func file(_ url: URL, avoidingFilenames reserved: Set<String> = []) -> URL {
+        func occupied(_ candidate: URL) -> Bool {
+            fileExists(candidate) || reserved.contains(candidate.lastPathComponent.lowercased())
+        }
+        guard occupied(url) else { return url }
         let folder = url.deletingLastPathComponent()
         let (base, ext) = splitNameAndExtension(url.lastPathComponent)
         for index in 2...(maxAttempts + 1) {
             let name = ext.isEmpty ? "\(base) \(index)" : "\(base) \(index).\(ext)"
             let candidate = folder.appendingPathComponent(name)
-            if !fileExists(candidate) { return candidate }
+            if !occupied(candidate) { return candidate }
         }
         let fallback = ext.isEmpty
             ? "\(base) \(UUID().uuidString.prefix(8))"

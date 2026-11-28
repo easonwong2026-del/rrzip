@@ -188,14 +188,14 @@ extension ContentView {
                 // 以前只清文字、焦点留在输入框，接着按方向键还在挪光标。
                 .onExitCommand {
                     model.searchText = ""
-                    takeKeyboardFocus()
+                    takeKeyboardFocus(model)
                 }
                 // Return：搜完直接回列表继续操作，不留在输入框里
                 .onSubmit {
                     if model.selection.isEmpty, let first = model.displayEntries.first {
                         model.select(first)
                     }
-                    takeKeyboardFocus()
+                    takeKeyboardFocus(model)
                 }
             if !model.searchText.isEmpty {
                 Button {

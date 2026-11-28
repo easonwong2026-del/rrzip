@@ -66,6 +66,7 @@ final class ScratchUsage: @unchecked Sendable {
     private var holds: [String: Int] = [:]
     /// 正在写入的临时目录。自动回收不看清缓存那条路，必须能单独问出来
     private var active: [String: Int] = [:]
+    private var retired: Set<String> = []
 
     /// 开始一段会读写临时文件的工作。必须在派发任务之前调用，
     /// 放到 Task 里就晚了：调用方紧接着清缓存会漏判。
@@ -91,7 +92,9 @@ final class ScratchUsage: @unchecked Sendable {
         if let count = active[key] {
             if count <= 1 { active.removeValue(forKey: key) } else { active[key] = count - 1 }
         }
+        let ready = takeUnusedRetired()
         lock.unlock()
+        remove(ready)
     }
 
     var isWorking: Bool {
@@ -114,7 +117,29 @@ final class ScratchUsage: @unchecked Sendable {
         if let count = holds[key] {
             if count <= 1 { holds.removeValue(forKey: key) } else { holds[key] = count - 1 }
         }
+        let ready = takeUnusedRetired()
         lock.unlock()
+        remove(ready)
+    }
+
+    /// 关闭窗口后，快照、Quick Look 或后台解压仍可能使用该目录。
+    func retire(_ url: URL) {
+        let key = Self.canonical(url.path)
+        lock.lock()
+        retired.insert(key)
+        let ready = takeUnusedRetired()
+        lock.unlock()
+        remove(ready)
+    }
+
+    private func takeUnusedRetired() -> Set<String> {
+        let ready = retired.filter { !Self.matches(holds, $0) && !Self.matches(active, $0) }
+        retired.subtract(ready)
+        return ready
+    }
+
+    private func remove(_ paths: Set<String>) {
+        for path in paths { try? FileManager.default.removeItem(atPath: path) }
     }
 
     /// 这个路径，或它下面的任何文件是否被占着。
@@ -158,7 +183,13 @@ final class ScratchUsage: @unchecked Sendable {
 
     /// 测试用：不留下跨用例的计数
     func reset() {
-        lock.lock(); workers = 0; holds.removeAll(); active.removeAll(); lock.unlock()
+        lock.lock()
+        workers = 0
+        holds.removeAll()
+        active.removeAll()
+        let ready = takeUnusedRetired()
+        lock.unlock()
+        remove(ready)
     }
 }
 

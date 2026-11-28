@@ -13,6 +13,7 @@ if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--tar-locale" 
 }
 
 runArchiveTests()
+runCLITests()
 runModelTests()
 runNavigationTests()
 runFinderTests()
@@ -24,6 +25,7 @@ runSaveAsBackgroundTests()
 runResourceTests()
 runInProcessArchiveTests()
 runLifecycleTests()
+runWindowSessionTests()
 runCacheTests()
 runExitCoverageTests()
 runSecurityTests()

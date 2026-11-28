@@ -12,6 +12,7 @@ ARCHIVE_CORE=(
     Sources/InProcessArchive.swift
     Sources/FormatCatalog.swift
     Sources/FormatDetector.swift
+    Sources/FileKind.swift
     Sources/ArchiveService.swift
 )
 
@@ -27,6 +28,7 @@ SHARED_STATE=(
 
 # 主程序与测试共用的模型、界面流程和写入协调，扩展不编入这些文件。
 APP_ONLY=(
+    Sources/CLI.swift
     Sources/ArchiveWriter.swift
     Sources/ArchiveIndex.swift
     Sources/PayloadCache.swift
@@ -35,6 +37,7 @@ APP_ONLY=(
     Sources/CacheMaintenance.swift
     # 退出状态机：不碰 AppKit，测试直接跑真的状态迁移
     Sources/AppLifecycle.swift
+    Sources/WindowSessions.swift
     # 正式写入账本：原地编辑与访达服务靠它被退出协调看见
     Sources/FormalWriteLedger.swift
     # 访达服务执行体：测试直接调，验证它进账本、走原子写

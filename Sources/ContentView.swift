@@ -53,20 +53,24 @@ struct ContentView: View {
             .onChange(of: windowWidth) { _, width in scheduleModeCheck(width) }
             .preferredColorScheme(model.appearance.scheme)
             .onDrop(of: [.fileURL], isTargeted: $isDropTarget) { handleDrop($0) }
-            .task { await runStartupTasks() }
-            .onReceive(NotificationCenter.default.publisher(for: .rrzipFocusSearch)) { _ in
+            .task { if AppDelegate.takeStartupTasks() { await runStartupTasks() } }
+            .onReceive(NotificationCenter.default.publisher(for: .rrzipFocusSearch)) { notification in
+                guard notification.object as? ArchiveModel === model else { return }
                 searchFocused = true
             }
-            .onReceive(NotificationCenter.default.publisher(for: .rrzipFocusList)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .rrzipFocusList)) { notification in
+                guard notification.object as? ArchiveModel === model else { return }
                 // 点中列表行 / 搜索框里按 Esc、Return 之后，键盘交还列表
                 searchFocused = false
                 listFocused = true
             }
-            .onReceive(NotificationCenter.default.publisher(for: .rrzipToggleWorkspaceMode)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .rrzipToggleWorkspaceMode)) { notification in
+                guard notification.object as? ArchiveModel === model else { return }
                 model.toggleWorkspaceMode()
                 applyModeWindowSize()
             }
-            .onReceive(NotificationCenter.default.publisher(for: .rrzipShowWelcome)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .rrzipShowWelcome)) { notification in
+                guard notification.object as? ArchiveModel === model else { return }
                 showWelcome = true
             }
             .onAppear { layoutWindowOnAppear() }
@@ -251,8 +255,7 @@ struct ContentView: View {
                     autoModeReady = true
                 }
             }
-            guard let window = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 400 })
-            else { return }
+            guard let window = AppDelegate.window(for: model), window.frame.width > 400 else { return }
             let compact = model.isCompactMode
             // 最小尺寸与模式解耦：完整模式也允许缩到简化尺寸。
             // 旧版在这里把完整模式锁到 1020 宽，而自动收起判据是 < 760，
@@ -283,7 +286,8 @@ struct ContentView: View {
             }
 #endif
             guard WelcomeView.minorVersion(welcomeSeenVersion)
-                    != WelcomeView.minorVersion(WelcomeView.version) else { return }
+                    != WelcomeView.minorVersion(WelcomeView.version),
+                  AppDelegate.claimStartupWelcome() else { return }
             showWelcome = true
         }
     }
@@ -366,16 +370,11 @@ struct ContentView: View {
 #endif
         // 支持 `open -a rrzip xxx.zip` 以及命令行直接传路径。
         // 判定走 OpenGate，改过名的包从命令行打开也要能认出来。
-        if model.trail.isEmpty {
-            for arg in CommandLine.arguments.dropFirst() where !arg.hasPrefix("-") {
-                let url = URL(fileURLWithPath: arg)
-                guard FileManager.default.fileExists(atPath: url.path) else { continue }
-                if case .open = OpenGate.decide(url) {
-                    model.open(url: url)
-                    break
-                }
-            }
-        }
+        let archives = CommandLine.arguments.dropFirst()
+            .filter { !$0.hasPrefix("-") }
+            .map { URL(fileURLWithPath: $0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) && ArchiveService.canOpen($0) }
+        AppDelegate.open(archives, preferred: model.sessionID)
         // 调试用：跳进某个包内目录（也支持 defaults write com.rrzip.mac rrzip.goto）
 #if DEBUG
         let goto = CommandLine.arguments.firstIndex(of: "--goto").flatMap { index in
@@ -454,9 +453,7 @@ struct ContentView: View {
     /// 手动切换模式时同步窗口尺寸：展开给工作台尺寸，收起给小窗尺寸。
     /// 顶边保持不动，避免窗口在屏幕上跳。
     func applyModeWindowSize() {
-        guard let window = NSApp.keyWindow
-                ?? NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain })
-        else { return }
+        guard let window = AppDelegate.window(for: model) else { return }
         let compact = model.isCompactMode
         // 下限恒定，不随模式抬高；抬高就等于禁止用户把完整模式拉窄到自动收起阈值以下
         window.minSize = NSSize(width: Layout.minWindowWidth,
