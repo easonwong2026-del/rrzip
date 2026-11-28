@@ -7,6 +7,8 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import Observation
+import os
 
 /// 造一张真 PNG：随机字节的假图渲染必然失败，验不了「重新生成」
 private func makePNG(at url: URL, side: Int = 8) -> Bool {
@@ -113,6 +115,13 @@ func testThumbnailClearAllowsRetry() {
             expect(store.failedCount == 0, "清理会清掉失败记录")
             expect(store.version > versionBefore, "清理后通知界面刷新")
 
+            let clearVersion = store.version
+            let invalidated = OSAllocatedUnfairLock(initialState: false)
+            withObservationTracking {
+                _ = store.version
+            } onChange: {
+                invalidated.withLock { $0 = true }
+            }
             var image: CGImage?
             var done = false
             store.thumbnail(for: entry, model: model, maxPixel: 160) { result in
@@ -122,9 +131,14 @@ func testThumbnailClearAllowsRetry() {
             expect(waitUntil(20, { done }), "清理后重新发起渲染")
             expect(image != nil, "之前失败的图片可以重新生成")
             expect(store.failedCount == 0, "成功后不再记失败")
+            expect(store.version == clearVersion, "单张结果不会广播刷新其他单元格")
+            expect(!invalidated.withLock { $0 }, "Observation 不会用一张缩略图刷新其他键")
+            expect(store.cached(forKey: key) != nil, "重建的单元格可以从共享缓存取回渲染结果")
+            expect(store.cached(forKey: key + "-other") == nil, "结果仅写入本条目当前键")
 
             // 清空之后再清一次：不能因为缓存空就崩或卡住
             store.clear()
+            expect(invalidated.withLock { $0 }, "清理会使观察了版本的缩略图失效")
             expect(store.failedCount == 0, "空缓存重复清理也不出错")
         } catch {
             expect(false, "缩略图清理 抛出异常", "\(error)")
@@ -262,14 +276,15 @@ func testRealFileFlowAcrossRelaunch() {
             try ArchiveModel.writeArchive(at: produced, from: [original], format: .zip,
                                           password: "", volume: nil)
 
-            // 3. 关闭窗口：什么都不做，任务不中断、缓存不清理、文件不动
+            // 3. 关闭窗口只清理该窗口的临时副本，正式文件不动
+            first.closeWindow()
             expect(fm.fileExists(atPath: original.path), "关窗后原始 ZIP 还在")
             expect(fm.fileExists(atPath: produced.path), "关窗后新生成 ZIP 还在")
 
-            // 4. 重新启动：新的 model 第一次碰工作目录时清掉上次的临时文件
+            // 4. 建立新会话，验证已关闭窗口的副本仍已释放
             let second = ArchiveModel()
             _ = second.cacheSizeOnDisk()
-            expect(!fm.fileExists(atPath: preview?.path ?? "x"), "重启后上次的预览缓存被清掉")
+            expect(!fm.fileExists(atPath: preview?.path ?? "x"), "关闭窗口后旧会话的预览缓存被清掉")
             expect(fm.fileExists(atPath: original.path), "重启后原始 ZIP 还在")
             expect(fm.fileExists(atPath: produced.path), "重启后新生成 ZIP 还在")
 

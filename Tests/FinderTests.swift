@@ -8,67 +8,63 @@ import Foundation
 
 /// 访达菜单判定
 func testFinderMenu() {
+    print("访达菜单判定")
     do {
-        print("访达菜单判定")
-        do {
-            let zip = fixtures.appendingPathComponent("basic.zip")
-            let renamed = fixtures.appendingPathComponent("renamed.bin")
-            let text = fixtures.appendingPathComponent("src/说明.txt")
-            let folder = fixtures.appendingPathComponent("src/照片")
+        let zip = fixtures.appendingPathComponent("basic.zip")
+        let renamed = fixtures.appendingPathComponent("renamed.bin")
+        let text = fixtures.appendingPathComponent("src/说明.txt")
+        let folder = fixtures.appendingPathComponent("src/照片")
 
-            let single = FinderSelection.inspect([zip])
-            expect(single.archives.count == 1 && single.plain.isEmpty, "单个包归到压缩包")
-            expect(FinderMenuBuilder.actions(for: single) == [.open, .extractHere, .extractToFolder],
-                   "单包给 打开/解压到此处/解压到文件夹")
-            expect(FinderMenuBuilder.title(for: .extractHere, in: single) == "解压到此处",
-                   "单包标题不带数量")
-            expect(FinderMenuBuilder.title(for: .extractToFolder, in: single) == "解压到「basic」",
-                   "解压到文件夹带包名", FinderMenuBuilder.title(for: .extractToFolder, in: single))
+        let single = FinderSelection.inspect([zip])
+        expect(single.archives.count == 1 && single.plain.isEmpty, "单个包归到压缩包")
+        expect(FinderMenuBuilder.actions(for: single) == [.open, .extractHere, .extractToFolder],
+               "单包给 打开/解压到此处/解压到文件夹")
+        expect(FinderMenuBuilder.title(for: .extractHere, in: single) == "解压到此处",
+               "单包标题不带数量")
+        expect(FinderMenuBuilder.title(for: .extractToFolder, in: single) == "解压到「basic」",
+               "解压到文件夹带包名", FinderMenuBuilder.title(for: .extractToFolder, in: single))
 
-            let byMagic = FinderSelection.inspect([renamed])
-            expect(byMagic.archives.count == 1, "改名为 .bin 的 zip 按内容识别")
-            expect(FinderMenuBuilder.actions(for: byMagic) == [.open, .extractHere, .extractToFolder],
-                   "改名包同样给解压菜单")
+        let byMagic = FinderSelection.inspect([renamed])
+        expect(byMagic.archives.count == 1, "改名为 .bin 的 zip 按内容识别")
+        expect(FinderMenuBuilder.actions(for: byMagic) == [.open, .extractHere, .extractToFolder],
+               "改名包同样给解压菜单")
 
-            let noBudget = FinderSelection.inspect([renamed], magicBudget: 0)
-            expect(noBudget.plain.count == 1 && noBudget.archives.isEmpty,
-                   "魔数预算为 0 时不读文件，按普通文件处理")
+        let noBudget = FinderSelection.inspect([renamed], magicBudget: 0)
+        expect(noBudget.plain.count == 1 && noBudget.archives.isEmpty,
+               "魔数预算为 0 时不读文件，按普通文件处理")
 
-            let many = FinderSelection.inspect([zip, renamed])
-            expect(FinderMenuBuilder.actions(for: many) == [.open, .extractHere, .extractToFolder],
-                   "多包仍是 3 项")
-            expect(FinderMenuBuilder.title(for: .open, in: many) == "用 rrzip 打开第一个",
-                   "多包打开文案说明只开第一个")
-            expect(FinderMenuBuilder.title(for: .extractHere, in: many) == "解压 2 个压缩包到此处",
-                   "多包解压标题带数量")
-            expect(FinderMenuBuilder.title(for: .extractToFolder, in: many) == "分别解压到同名文件夹",
-                   "多包解压到文件夹不拼包名")
+        let many = FinderSelection.inspect([zip, renamed])
+        expect(FinderMenuBuilder.actions(for: many) == [.open, .extractHere, .extractToFolder],
+               "多包仍是 3 项")
+        expect(FinderMenuBuilder.title(for: .open, in: many) == "用 rrzip 打开第一个",
+               "多包打开文案说明只开第一个")
+        expect(FinderMenuBuilder.title(for: .extractHere, in: many) == "解压 2 个压缩包到此处",
+               "多包解压标题带数量")
+        expect(FinderMenuBuilder.title(for: .extractToFolder, in: many) == "分别解压到同名文件夹",
+               "多包解压到文件夹不拼包名")
 
-            let oneFile = FinderSelection.inspect([text])
-            expect(oneFile.archives.isEmpty && oneFile.plain.count == 1, "普通文件归到 plain")
-            expect(FinderMenuBuilder.actions(for: oneFile) == [.compressZip, .compressSevenZip],
-                   "单个普通文件不给「分别压缩」")
-            // 沙盒扩展里没有 7zz，7Z 那一项不能摆出来
-            expect(FinderMenuBuilder.actions(for: oneFile, canCreate7z: false) == [.compressZip],
-                   "没有 7zz 时去掉「压缩为 7Z」")
+        let oneFile = FinderSelection.inspect([text])
+        expect(oneFile.archives.isEmpty && oneFile.plain.count == 1, "普通文件归到 plain")
+        expect(FinderMenuBuilder.actions(for: oneFile) == [.compressZip, .compressSevenZip],
+               "单个普通文件不给「分别压缩」")
+        // 沙盒扩展里没有 7zz，7Z 那一项不能摆出来
+        expect(FinderMenuBuilder.actions(for: oneFile, canCreate7z: false) == [.compressZip],
+               "没有 7zz 时去掉「压缩为 7Z」")
 
-            let twoItems = FinderSelection.inspect([text, folder])
-            expect(twoItems.plain.count == 2, "目录算普通项目")
-            expect(FinderMenuBuilder.actions(for: twoItems) == [.compressZip, .compressSevenZip, .compressEach],
-                   "多选普通项目给「分别压缩」")
-            expect(FinderMenuBuilder.title(for: .compressZip, in: twoItems) == "压缩 2 个项目为 ZIP",
-                   "压缩标题带数量", FinderMenuBuilder.title(for: .compressZip, in: twoItems))
+        let twoItems = FinderSelection.inspect([text, folder])
+        expect(twoItems.plain.count == 2, "目录算普通项目")
+        expect(FinderMenuBuilder.actions(for: twoItems) == [.compressZip, .compressSevenZip, .compressEach],
+               "多选普通项目给「分别压缩」")
+        expect(FinderMenuBuilder.title(for: .compressZip, in: twoItems) == "压缩 2 个项目为 ZIP",
+               "压缩标题带数量", FinderMenuBuilder.title(for: .compressZip, in: twoItems))
 
-            let mixed = FinderSelection.inspect([zip, text])
-            expect(FinderMenuBuilder.actions(for: mixed) == [.extractHere, .compressZip],
-                   "混合选择只留双方都成立的动作")
-            expect(FinderMenuBuilder.unsupportedNote(for: mixed) == nil, "没有不支持项时不加说明")
+        let mixed = FinderSelection.inspect([zip, text])
+        expect(FinderMenuBuilder.actions(for: mixed) == [.extractHere, .compressZip],
+               "混合选择只留双方都成立的动作")
+        expect(FinderMenuBuilder.unsupportedNote(for: mixed) == nil, "没有不支持项时不加说明")
 
-            let empty = FinderSelection.inspect([])
-            expect(FinderMenuBuilder.actions(for: empty).isEmpty, "空选择不出菜单")
-        }
-    } catch {
-        expect(false, "访达菜单判定 抛出异常", "\(error)")
+        let empty = FinderSelection.inspect([])
+        expect(FinderMenuBuilder.actions(for: empty).isEmpty, "空选择不出菜单")
     }
 }
 
@@ -167,83 +163,75 @@ func testFinderPlanning() {
 
 /// 访达任务执行
 func testFinderExecution() {
+    print("访达任务执行")
     do {
-        print("访达任务执行")
-        do {
-            let zip = fixtures.appendingPathComponent("basic.zip")
-            let work = fixtures.appendingPathComponent("exec-test", isDirectory: true)
-            try? FileManager.default.removeItem(at: work)
-            try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        let zip = fixtures.appendingPathComponent("basic.zip")
+        let work = fixtures.appendingPathComponent("exec-test", isDirectory: true)
+        try? FileManager.default.removeItem(at: work)
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
 
-            let localZip = work.appendingPathComponent("basic.zip")
-            try FileManager.default.copyItem(at: zip, to: localZip)
+        let localZip = work.appendingPathComponent("basic.zip")
+        try FileManager.default.copyItem(at: zip, to: localZip)
 
-            // 1. 解到包名文件夹
-            let first = FinderJobRunner.extract([localZip], mode: .newFolder)
-            expect(first.succeeded == ["basic.zip"], "第一次解压成功", "\(first.failed)")
-            expect(FileManager.default.fileExists(atPath: work.appendingPathComponent("basic/说明.txt").path),
-                   "解到包名子目录")
+        // 1. 解到包名文件夹
+        let first = FinderJobRunner.extract([localZip], mode: .newFolder)
+        expect(first.succeeded == ["basic.zip"], "第一次解压成功", "\(first.failed)")
+        expect(FileManager.default.fileExists(atPath: work.appendingPathComponent("basic/说明.txt").path),
+               "解到包名子目录")
 
-            // 2. 再解一次同一目录：应该另建 basic 2，不动第一份
-            _ = FinderJobRunner.extract([localZip], mode: .newFolder)
-            expect(FileManager.default.fileExists(atPath: work.appendingPathComponent("basic 2/说明.txt").path),
-                   "重名目录递增，不覆盖上一份")
+        // 2. 再解一次同一目录：应该另建 basic 2，不动第一份
+        _ = FinderJobRunner.extract([localZip], mode: .newFolder)
+        expect(FileManager.default.fileExists(atPath: work.appendingPathComponent("basic 2/说明.txt").path),
+               "重名目录递增，不覆盖上一份")
 
-            // 3. 解到此处：目标已存在同名文件时必须跳过而不是覆盖
-            let hereDir = work.appendingPathComponent("here", isDirectory: true)
-            try FileManager.default.createDirectory(at: hereDir, withIntermediateDirectories: true)
-            let hereZip = hereDir.appendingPathComponent("basic.zip")
-            try FileManager.default.copyItem(at: zip, to: hereZip)
+        // 3. 解到此处：目标已存在同名文件时必须跳过而不是覆盖
+        let hereDir = work.appendingPathComponent("here", isDirectory: true)
+        try FileManager.default.createDirectory(at: hereDir, withIntermediateDirectories: true)
+        let hereZip = hereDir.appendingPathComponent("basic.zip")
+        try FileManager.default.copyItem(at: zip, to: hereZip)
 
-            _ = FinderJobRunner.extract([hereZip], mode: .here)
-            let target = hereDir.appendingPathComponent("说明.txt")
-            try "ADMIN".write(to: target, atomically: true, encoding: .utf8)
+        _ = FinderJobRunner.extract([hereZip], mode: .here)
+        let target = hereDir.appendingPathComponent("说明.txt")
+        try "ADMIN".write(to: target, atomically: true, encoding: .utf8)
 
-            let second = FinderJobRunner.extract([hereZip], mode: .here)
-            let content = (try? String(contentsOf: target, encoding: .utf8)) ?? ""
-            expect(content.contains("ADMIN"), "已存在的同名文件没有被覆盖", content)
-            expect(second.skippedFiles == 4,
-                   "跳过数被记下来（basic.zip 里 4 个文件都已存在）", "\(second.skippedFiles)")
+        let second = FinderJobRunner.extract([hereZip], mode: .here)
+        let content = (try? String(contentsOf: target, encoding: .utf8)) ?? ""
+        expect(content.contains("ADMIN"), "已存在的同名文件没有被覆盖", content)
+        expect(second.skippedFiles == 4,
+               "跳过数被记下来（basic.zip 里 4 个文件都已存在）", "\(second.skippedFiles)")
 
-            // 4. 加密包：解压前就判出来，且不留空目录
-            let secret = fixtures.appendingPathComponent("secret.7z")
-            if FileManager.default.fileExists(atPath: secret.path) {
-                let encrypted = FinderJobRunner.extract([secret], mode: .newFolder)
-                expect(encrypted.needsPassword == ["secret.7z"], "加密包提前判为需要密码")
-                expect(!FileManager.default.fileExists(atPath: fixtures.appendingPathComponent("secret").path),
-                       "不给加密包留空目录")
-            }
-        } catch {
-            expect(false, "访达任务执行", "\(error)")
+        // 4. 加密包：解压前就判出来，且不留空目录
+        let secret = fixtures.appendingPathComponent("secret.7z")
+        if FileManager.default.fileExists(atPath: secret.path) {
+            let encrypted = FinderJobRunner.extract([secret], mode: .newFolder)
+            expect(encrypted.needsPassword == ["secret.7z"], "加密包提前判为需要密码")
+            expect(!FileManager.default.fileExists(atPath: fixtures.appendingPathComponent("secret").path),
+                   "不给加密包留空目录")
         }
     } catch {
-        expect(false, "访达任务执行 抛出异常", "\(error)")
+        expect(false, "访达任务执行", "\(error)")
     }
 }
 
 /// 访达转交
 func testPendingHandoff() {
+    print("访达转交")
     do {
-        print("访达转交")
-        do {
-            let noticeURL = fixtures.appendingPathComponent("pending-notice.json")
-            PendingNotice.write(title: "跳过 3 个", message: "已存在", to: noticeURL)
-            let notice = PendingNotice.take(from: noticeURL)
-            expect(notice?.title == "跳过 3 个", "提示能读回")
-            expect(notice?.message == "已存在", "正文能读回")
-            expect(PendingNotice.take(from: noticeURL) == nil, "读一次就清掉")
+        let noticeURL = fixtures.appendingPathComponent("pending-notice.json")
+        PendingNotice.write(title: "跳过 3 个", message: "已存在", to: noticeURL)
+        let notice = PendingNotice.take(from: noticeURL)
+        expect(notice?.title == "跳过 3 个", "提示能读回")
+        expect(notice?.message == "已存在", "正文能读回")
+        expect(PendingNotice.take(from: noticeURL) == nil, "读一次就清掉")
 
-            let extractURL = fixtures.appendingPathComponent("pending-extract.json")
-            PendingExtraction.write(archives: [URL(fileURLWithPath: "/tmp/a.7z")],
-                                    mode: .newFolder, to: extractURL)
-            let pending = PendingExtraction.read(from: extractURL)
-            expect(pending?.mode == .newFolder, "解压意图能读回")
-            expect(pending?.archives.first?.hasSuffix("a.7z") == true, "包路径能读回")
-            PendingExtraction.clear(extractURL)
-            expect(PendingExtraction.read(from: extractURL) == nil, "清掉后读不到")
-        }
-    } catch {
-        expect(false, "访达转交 抛出异常", "\(error)")
+        let extractURL = fixtures.appendingPathComponent("pending-extract.json")
+        PendingExtraction.write(archives: [URL(fileURLWithPath: "/tmp/a.7z")],
+                                mode: .newFolder, to: extractURL)
+        let pending = PendingExtraction.read(from: extractURL)
+        expect(pending?.mode == .newFolder, "解压意图能读回")
+        expect(pending?.archives.first?.hasSuffix("a.7z") == true, "包路径能读回")
+        PendingExtraction.clear(extractURL)
+        expect(PendingExtraction.read(from: extractURL) == nil, "清掉后读不到")
     }
 }
 
@@ -252,4 +240,64 @@ func runFinderTests() {
     testFinderPlanning()
     testFinderExecution()
     testPendingHandoff()
+    testFinderMagicVolumePolicy()
+    testFinderAtomicCompression()
+}
+
+private func testFinderMagicVolumePolicy() {
+    print("访达 · 魔数探测只读取本地现有内容")
+    expect(FinderSelection.allowsMagic(volumeIsLocal: true, downloadingStatus: nil), "普通本地文件可读魔数")
+    expect(FinderSelection.allowsMagic(volumeIsLocal: true, downloadingStatus: .current), "已下载的 iCloud 文件可读魔数")
+    expect(!FinderSelection.allowsMagic(volumeIsLocal: false, downloadingStatus: nil), "网络卷跳过魔数")
+    expect(!FinderSelection.allowsMagic(volumeIsLocal: true, downloadingStatus: .notDownloaded), "iCloud 占位文件跳过魔数")
+    expect(!FinderSelection.allowsMagic(volumeIsLocal: nil, downloadingStatus: nil), "卷类型无法确认时跳过魔数")
+
+    let unknown = fixtures.appendingPathComponent("renamed.bin")
+    let known = fixtures.appendingPathComponent("basic.zip")
+    var checked: [URL] = []
+    let selection = FinderSelection.inspect([unknown, known]) { url in checked.append(url); return false }
+    expect(selection.plain == [unknown], "禁止读魔数时把未知后缀当普通文件")
+    expect(selection.archives == [known], "已知后缀无须读取魔数")
+    expect(checked == [unknown], "只有未知后缀进入本地内容检查")
+}
+
+private func testFinderAtomicCompression() {
+    print("访达 · 原子发布、重名和失败清理")
+    let fm = FileManager.default
+    let folder = fixtures.appendingPathComponent("finder-atomic", isDirectory: true)
+    do {
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let source = folder.appendingPathComponent("report.txt")
+        let original = folder.appendingPathComponent("report.zip")
+        let bytes = Data("用户已有的文件".utf8)
+        try Data("新内容".utf8).write(to: source)
+        try bytes.write(to: original)
+        let result = FinderJobRunner.compress([source], format: .zip, each: false)
+        expect(result.succeeded == ["report.txt"] && result.failed.isEmpty, "成功压缩后才报告发布完成")
+        let oldBytes = try Data(contentsOf: original)
+        expect(oldBytes == bytes, "已有同名文件逐字节保留")
+        let generated = folder.appendingPathComponent("report 2.zip")
+        expect((try? InProcessArchive.list(generated).contains { $0.path == "report.txt" }) == true,
+               "重名走 UniquePath 并产出完整 ZIP")
+
+        let missing = folder.appendingPathComponent("missing.txt")
+        let failure = FinderJobRunner.compress([missing], format: .zip, each: false)
+        expect(failure.succeeded.isEmpty && failure.failed.count == 1, "压缩失败报告真实错误")
+        let names = try fm.contentsOfDirectory(atPath: folder.path)
+        expect(!names.contains("missing.zip") && !names.contains { $0.hasPrefix(".rrzip-") },
+               "失败和成功都不留下隐藏暂存文件，失败不发布残包")
+
+        let staged = folder.appendingPathComponent(".staged")
+        try Data("ready".utf8).write(to: staged)
+        let published = try FinderJobRunner.publish(staged, as: original)
+        expect(published.lastPathComponent == "report 3.zip", "发布阶段重新检查被占用的名称")
+        expect(!fm.fileExists(atPath: staged.path), "原子移动后暂存路径消失")
+        let dangling = folder.appendingPathComponent("report 4.zip")
+        try fm.createSymbolicLink(atPath: dangling.path, withDestinationPath: "nothing")
+        expect(UniquePath.file(original).lastPathComponent == "report 5.zip", "断开的软链名称也视为占用")
+        let dir = folder.appendingPathComponent("extract")
+        try fm.createSymbolicLink(atPath: dir.path, withDestinationPath: "missing-folder")
+        expect(UniquePath.directory(dir).lastPathComponent == "extract 2", "目录名也避让断开的软链")
+        expect(FinderJobRunner.compress([], format: .zip, each: false).succeeded.isEmpty, "空选择安全返回")
+    } catch { expect(false, "原子发布测试", "\(error)") }
 }

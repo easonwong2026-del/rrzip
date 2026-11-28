@@ -26,19 +26,19 @@ struct FinderSelection {
 
     /// 分类。默认最多对 20 个「后缀说不清」的项目读魔数——
     /// 右键选中几百个 txt 时不应该为了识别把每个文件的头部都读一遍。
-    static func inspect(_ urls: [URL], magicBudget: Int = 20) -> FinderSelection {
+    static func inspect(_ urls: [URL], magicBudget: Int = 20,
+                        canReadMagic: (URL) -> Bool = canReadMagicOnVolume) -> FinderSelection {
         var result = FinderSelection()
         var budget = magicBudget
 
         for url in urls {
-            if isDirectory(url) {
+            if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
                 result.plain.append(url)
                 continue
             }
-            // 后缀认得就不用读文件，OpenGate 内部也是这个顺序
-            let suffixKnown = FormatDetector.detectByExtension(url) != nil
-            if !suffixKnown {
-                guard budget > 0 else {
+            // 已知后缀直接判定。未知后缀只在本地可读时打开文件。
+            if FormatDetector.detectByExtension(url) == nil {
+                guard budget > 0, canReadMagic(url) else {
                     result.plain.append(url)
                     continue
                 }
@@ -56,8 +56,16 @@ struct FinderSelection {
         return result
     }
 
-    private static func isDirectory(_ url: URL) -> Bool {
-        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+    private static func canReadMagicOnVolume(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [
+            .volumeIsLocalKey, .ubiquitousItemDownloadingStatusKey
+        ]) else { return false }
+        return allowsMagic(volumeIsLocal: values.volumeIsLocal,
+                           downloadingStatus: values.ubiquitousItemDownloadingStatus)
+    }
+
+    static func allowsMagic(volumeIsLocal: Bool?, downloadingStatus: URLUbiquitousItemDownloadingStatus?) -> Bool {
+        volumeIsLocal == true && downloadingStatus != .notDownloaded
     }
 }
 
@@ -66,8 +74,7 @@ enum FinderMenuBuilder {
     /// 选择 → 该出现的动作，顺序固定（解压在前，压缩在后）。
     /// 单个普通文件不出现「分别压缩」——那个动作只在多选时才有意义。
     ///
-    /// `canCreate7z`：沙盒扩展里没有 7zz，压不了 7Z。传 false 就把这一项去掉，
-    /// 不要摆一个点了必然报错的菜单项。
+    /// `canCreate7z` 表示执行请求的主程序是否提供 7-Zip。
     static func actions(for selection: FinderSelection, canCreate7z: Bool = true) -> [FinderAction] {
         let hasArchive = !selection.archives.isEmpty
         let hasPlain = !selection.plain.isEmpty

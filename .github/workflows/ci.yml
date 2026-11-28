@@ -28,47 +28,26 @@ jobs:
       - name: 下载 7-Zip 引擎
         run: ./scripts/fetch-7zz.sh
 
-      - name: 单元测试
-        run: |
-          ./scripts/test.sh 2>&1 | tee /tmp/test.log
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            tail -40 /tmp/test.log | while IFS= read -r line; do
-              echo "::error::$line"
-            done
-            exit "$status"
-          fi
-          # 防「测试被悄悄删掉」：只增不减，数量掉了就红
-          count=$(grep -o '全部通过（[0-9]* 项）' /tmp/test.log | grep -o '[0-9]*' | head -1)
-          echo "测试通过 $count 项"
-          if [ "${count:-0}" -lt 750 ]; then
-            echo "::error::测试数 $count 低于基线 750（v2.15.0 应为 760）"
-            exit 1
-          fi
+      - name: 单元测试与断言基线
+        run: ./scripts/check-tests.sh
 
-      # CreateArchiveSheet 曾经定义了两个月却从没挂到界面上，
-      # pendingCreate 设了没人看——编译器不会报，只能靠这条拦住
-      - name: 检查视图接线
-        run: |
-          for v in CreateArchiveSheet BatchSheet TaskCard; do
-            n=$(grep -rn "$v(" Sources/ --include=*.swift | grep -v "struct $v" | wc -l | tr -d ' ')
-            if [ "$n" -lt 1 ]; then
-              echo "::error::$v 定义了但没有调用点，功能是断的"
-              exit 1
-            fi
-            echo "$v 调用点 $n"
-          done
+      - name: 检查视图接线与严格并发
+        run: ./scripts/check-targets.sh 2>&1 | tee /tmp/check.log
+        shell: bash
 
-      - name: 并发严格检查
+      - name: 构建 app
         run: |
-          # 输出落文件再转成 ::error::，失败时不用抓日志就能看到具体哪一行
-          if ! xcrun swiftc -typecheck -swift-version 5 -strict-concurrency=complete \
-                -target arm64-apple-macos14.0 Sources/*.swift > /tmp/check.log 2>&1; then
-            tail -80 /tmp/check.log | while IFS= read -r line; do
+          ./build.sh > /tmp/build.log 2>&1 || {
+            echo "::error::build.sh 失败，以下为最后 25 行"
+            tail -25 /tmp/build.log | while IFS= read -r line; do
               echo "::error::$line"
             done
             exit 1
-          fi
+          }
+          tail -5 /tmp/build.log
+
+      - name: 校验产物与当前版本发布说明
+        run: ./scripts/verify-bundle.sh
 
       # 失败日志只看得到「exit code 1」，靠这个把尾部贴到 PR 上
       - name: 失败时贴日志
@@ -86,57 +65,11 @@ jobs:
             gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/ci-body.md || true
           done
 
-      - name: 构建 app
-        run: |
-          ./build.sh > /tmp/build.log 2>&1 || {
-            echo "::error::build.sh 失败，以下为最后 25 行"
-            tail -25 /tmp/build.log | while IFS= read -r line; do
-              echo "::error::$line"
-            done
-            exit 1
-          }
-          tail -5 /tmp/build.log
-
-      - name: 校验产物
-        run: |
-          set -e
-          APP=build/rrzip.app
-          test -x "$APP/Contents/MacOS/rrzip"
-          test -x "$APP/Contents/Resources/7zz"
-          test -d "$APP/Contents/PlugIns/ArchivePreview.appex"
-          # 访达扩展必须一起验：v2.10.0 只验了快速查看，扩展构建坏了 CI 也不会红
-          test -d "$APP/Contents/PlugIns/ArchiveFinder.appex"
-          test -x "$APP/Contents/PlugIns/ArchiveFinder.appex/Contents/MacOS/ArchiveFinder"
-          plutil -lint "$APP/Contents/Info.plist"
-          plutil -lint "$APP/Contents/PlugIns/ArchivePreview.appex/Contents/Info.plist"
-          plutil -lint "$APP/Contents/PlugIns/ArchiveFinder.appex/Contents/Info.plist"
-          # 扩展版本号必须跟着主 app 走
-          main=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
-          finder=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/PlugIns/ArchiveFinder.appex/Contents/Info.plist")
-          [ "$main" = "$finder" ] || { echo "::error::访达扩展版本 $finder 与主 app $main 不一致"; exit 1; }
-          codesign --verify --deep --strict "$APP"
-          # dmg 必须是按 app 版本命名的那一份，别拿任意一个 *.dmg 顶数
-          DMG="build/rrzip-${main}.dmg"
-          [ -f "$DMG" ] || { echo "::error::没有产出 $DMG"; exit 1; }
-          hdiutil imageinfo "$DMG" >/dev/null || { echo "::error::$DMG 不是可用的磁盘镜像"; exit 1; }
-          echo "dmg 就绪：$DMG"
-
-      # upload-artifact 传「单个目录」时上传的是目录内容：直接指 build/rrzip.app，
-      # 下载下来的 zip 根目录就是 Contents/，看起来像个坏包。先摊到 dist 再传 dist，
-      # 这样 zip 根是 rrzip.app/。ditto 保留扩展属性与权限，复制后再验一次签名。
-      - name: 暂存 app 产物
-        run: |
-          set -e
-          rm -rf dist && mkdir -p dist
-          ditto build/rrzip.app dist/rrzip.app
-          test -d dist/rrzip.app/Contents/MacOS
-          codesign --verify --deep --strict dist/rrzip.app
-
       - name: 上传 app
         uses: actions/upload-artifact@v4
         with:
           name: rrzip-app
-          path: dist
+          path: build/rrzip.app
           retention-days: 7
 
       # PR 页面上直接能下 dmg，省得本地再打一次

@@ -11,6 +11,8 @@ final class QuickLookController: NSObject, QLPreviewPanelDataSource, QLPreviewPa
     static let shared = QuickLookController()
 
     private var previewURL: URL?
+    private weak var owner: ArchiveModel?
+    private var requestID = UUID()
     /// 面板被系统关掉（Esc 由面板自己处理、点关闭按钮）时也要释放占用，
     /// 不能只指望我们自己的 close()
     private var observingPanel = false
@@ -42,19 +44,23 @@ final class QuickLookController: NSObject, QLPreviewPanelDataSource, QLPreviewPa
     }
 
     @objc private func panelDidDismiss() {
+        owner = nil
+        requestID = UUID()
         setPreviewURL(nil)
     }
 
     func toggle(entry: ArchiveEntry?, model: ArchiveModel) {
-        if isVisible {
-            QLPreviewPanel.shared()?.orderOut(nil)
-            setPreviewURL(nil)
+        if isVisible, owner === model {
+            close()
             return
         }
         guard let entry, !entry.isDirectory else { return }
 
-        model.payloadURL(for: entry) { [weak self] url in
-            guard let self, let url else { return }
+        let id = UUID()
+        requestID = id
+        model.payloadURL(for: entry) { [weak self, weak model] url in
+            guard let self, let model, !model.windowClosed, self.requestID == id, let url else { return }
+            self.owner = model
             self.setPreviewURL(url)
             guard let panel = QLPreviewPanel.shared() else {
                 NSWorkspace.shared.open(url)      // 兜底：交给系统默认程序
@@ -63,13 +69,18 @@ final class QuickLookController: NSObject, QLPreviewPanelDataSource, QLPreviewPa
             self.observe(panel)
             panel.dataSource = self
             panel.delegate = self
+            panel.reloadData()
             panel.makeKeyAndOrderFront(nil)
         }
     }
 
     func close() {
         QLPreviewPanel.shared()?.orderOut(nil)
-        setPreviewURL(nil)
+        panelDidDismiss()
+    }
+
+    func close(for model: ArchiveModel) {
+        if owner === model { close() }
     }
 
     // MARK: - QLPreviewPanelDataSource

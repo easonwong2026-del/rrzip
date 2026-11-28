@@ -9,6 +9,7 @@
 //  以前两边各写了一份，改规则时要记得改两处。
 //
 
+import Darwin
 import Foundation
 
 enum UniquePath {
@@ -35,15 +36,17 @@ enum UniquePath {
     }
 
     /// 文件版：`a.zip` → `a 2.zip`，`backup.tar.gz` → `backup 2.tar.gz`
-    static func file(_ url: URL) -> URL {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return url }
+    static func file(_ url: URL, avoidingFilenames reserved: Set<String> = []) -> URL {
+        func occupied(_ candidate: URL) -> Bool {
+            fileExists(candidate) || reserved.contains(candidate.lastPathComponent.lowercased())
+        }
+        guard occupied(url) else { return url }
         let folder = url.deletingLastPathComponent()
         let (base, ext) = splitNameAndExtension(url.lastPathComponent)
         for index in 2...(maxAttempts + 1) {
             let name = ext.isEmpty ? "\(base) \(index)" : "\(base) \(index).\(ext)"
             let candidate = folder.appendingPathComponent(name)
-            if !fm.fileExists(atPath: candidate.path) { return candidate }
+            if !occupied(candidate) { return candidate }
         }
         let fallback = ext.isEmpty
             ? "\(base) \(UUID().uuidString.prefix(8))"
@@ -51,20 +54,24 @@ enum UniquePath {
         return folder.appendingPathComponent(fallback)
     }
 
+    private static func fileExists(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0
+    }
+
     /// 目录版：`a` → `a 2`。
     /// `reserved` 用于同一批多选：两个包都叫 a，不能都解到 a/
     static func directory(_ url: URL, avoiding reserved: Set<String> = []) -> URL {
-        let fm = FileManager.default
         let parent = url.deletingLastPathComponent()
         let base = url.lastPathComponent
         var candidate = url
         var index = 2
-        while (fm.fileExists(atPath: candidate.path) || reserved.contains(candidate.path))
+        while (fileExists(candidate) || reserved.contains(candidate.path))
                 && index <= maxAttempts + 1 {
             candidate = parent.appendingPathComponent("\(base) \(index)", isDirectory: true)
             index += 1
         }
-        if fm.fileExists(atPath: candidate.path) || reserved.contains(candidate.path) {
+        if fileExists(candidate) || reserved.contains(candidate.path) {
             return parent.appendingPathComponent("\(base) \(UUID().uuidString.prefix(8))", isDirectory: true)
         }
         return candidate

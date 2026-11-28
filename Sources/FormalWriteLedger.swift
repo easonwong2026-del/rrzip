@@ -4,17 +4,9 @@
 //  FormalWriteLedger.swift
 //  rrzip
 //
-//  不经过任务队列、但会写用户文件的活：
-//  - 原地增删压缩包条目（7zz 正在改用户的原包）
-//  - 访达右键服务（压缩 / 解压，产物直接落在用户目录）
-//
-//  它们和预览缓存有本质区别：
-//  - 删掉 / 写坏目标文件是毁用户数据，不能像预览缓存那样 5 秒后一走了之；
-//  - 7zz 正在改原包，也不能 terminate 它来「取消」——半截的压缩包比不退出更糟。
-//  所以退出协调对它们只有一个策略：等它跑完。
-//
-//  登记必须**同步**发生在派发任务之前。反过来（先派发再登记）的话，
-//  中间那一下 ⌘Q 就会漏判——这正是原地编辑和访达服务以前的问题。
+//  跟踪队列之外、需要退出协调等待的操作。
+//  原地编辑和访达服务必须等写完，批量任务可以取消后清理。
+//  登记要发生在派发之前，防止 ⌘Q 漏掉刚提交的任务。
 //
 
 import Foundation
@@ -40,8 +32,10 @@ enum FormalWriteGate: String, Sendable, Equatable {
 struct FormalWriteSummary: Equatable, Sendable {
     var inPlaceEdits = 0
     var finderServices = 0
+    var batchExtracts = 0
+    var batchVerifications = 0
 
-    var total: Int { inPlaceEdits + finderServices }
+    var total: Int { inPlaceEdits + finderServices + batchExtracts + batchVerifications }
     var isEmpty: Bool { total == 0 }
 }
 
@@ -52,11 +46,15 @@ struct FormalWrite: Equatable, Sendable {
         case inPlaceEdit
         /// 访达右键服务：压缩 / 解压
         case finderService
+        case batchExtract
+        case batchVerify
 
         var title: String {
             switch self {
             case .inPlaceEdit: return "原地编辑压缩包"
             case .finderService: return "访达服务"
+            case .batchExtract: return "批量解压"
+            case .batchVerify: return "批量校验"
             }
         }
     }
@@ -72,6 +70,7 @@ final class FormalWriteLedger: @unchecked Sendable {
 
     private let lock = NSLock()
     private var entries: [UUID: FormalWrite] = [:]
+    private var batchCancellations: [UUID: @MainActor @Sendable () -> Void] = [:]
     /// 退出流程的写入准入。默认 open，退出协调接管后关闭。
     private var gate: FormalWriteGate = .idle
     /// 归零时回调一次（可选）。没有它也能退出，只是要多等一个轮询周期。
@@ -97,7 +96,8 @@ final class FormalWriteLedger: @unchecked Sendable {
 
     /// 登记一项正式写入。返回 nil 表示**被退出流程拒绝**——
     /// 调用方必须据此放弃操作，不能先干活再补登记。
-    func begin(_ kind: FormalWrite.Kind, label: String) -> UUID? {
+    func begin(_ kind: FormalWrite.Kind, label: String,
+               onCancel: (@MainActor @Sendable () -> Void)? = nil) -> UUID? {
         let write = FormalWrite(id: UUID(), kind: kind, label: label)
         lock.lock()
         guard gate.acceptsWrites else {
@@ -105,14 +105,22 @@ final class FormalWriteLedger: @unchecked Sendable {
             return nil
         }
         entries[write.id] = write
+        batchCancellations[write.id] = onCancel
         lock.unlock()
         return write.id
+    }
+
+    @MainActor
+    func cancelBatches() {
+        let cancellations = lock.withLock { Array(batchCancellations.values) }
+        for cancel in cancellations { cancel() }
     }
 
     func end(_ id: UUID) {
         var becameEmpty = false
         var handler: (@Sendable () -> Void)?
         lock.lock()
+        batchCancellations.removeValue(forKey: id)
         if entries.removeValue(forKey: id) != nil, entries.isEmpty {
             becameEmpty = true
             handler = emptyHandler
@@ -146,6 +154,8 @@ final class FormalWriteLedger: @unchecked Sendable {
             switch write.kind {
             case .inPlaceEdit: result.inPlaceEdits += 1
             case .finderService: result.finderServices += 1
+            case .batchExtract: result.batchExtracts += 1
+            case .batchVerify: result.batchVerifications += 1
             }
         }
         return result
@@ -153,6 +163,10 @@ final class FormalWriteLedger: @unchecked Sendable {
 
     /// 测试用：不留下跨用例的登记与准入状态
     func reset() {
-        lock.lock(); entries.removeAll(); gate = .idle; lock.unlock()
+        lock.withLock {
+            entries.removeAll()
+            batchCancellations.removeAll()
+            gate = .idle
+        }
     }
 }

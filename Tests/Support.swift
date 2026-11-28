@@ -6,20 +6,40 @@
 
 import Foundation
 
-var failures = 0
-var checks = 0
+private final class TestCounts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var checks = 0
+    private var failures = 0
 
-func expect(_ condition: Bool, _ name: String, _ detail: @autoclosure () -> String = "") {
-    checks += 1
-    if condition {
-        print("  ✓ \(name)")
-    } else {
-        failures += 1
-        print("  ✗ \(name) \(detail())")
+    func record(_ passed: Bool) {
+        lock.withLock {
+            checks += 1
+            if !passed { failures += 1 }
+        }
+    }
+
+    var total: (checks: Int, failures: Int) {
+        lock.withLock { (checks, failures) }
     }
 }
 
+private let testCounts = TestCounts()
+
+func expect(_ condition: Bool, _ name: String, _ detail: @autoclosure () -> String = "") {
+    testCounts.record(condition)
+    print(condition ? "  ✓ \(name)" : "  ✗ \(name) \(detail())")
+}
+
 let fixtures = URL(fileURLWithPath: CommandLine.arguments[1])
+
+/// 直接写入数据。用 truncate 生成的空洞会被 tar 跳过，解压可能在测试发出取消前结束。
+func makeLargeCancellationFixture(at url: URL) throws {
+    FileManager.default.createFile(atPath: url.path, contents: nil)
+    let handle = try FileHandle(forWritingTo: url)
+    defer { try? handle.close() }
+    let chunk = Data(repeating: 0xa5, count: 1024 * 1024)
+    for _ in 0..<384 { try handle.write(contentsOf: chunk) }
+}
 
 /// 跑主线程 runloop 直到条件成立或超时。测试里等队列里的异步任务用，
 /// 别用固定 sleep：机器快慢不一样，固定等待不是慢就是脆。
@@ -43,6 +63,7 @@ func stashTempDirs() -> Set<String> {
 }
 
 func finish() {
+    let (checks, failures) = testCounts.total
     print("")
     print(failures == 0 ? "全部通过（\(checks) 项）" : "失败 \(failures)/\(checks)")
     exit(failures == 0 ? 0 : 1)

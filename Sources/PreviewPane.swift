@@ -6,8 +6,13 @@ import AVKit
 import PDFKit
 import SwiftUI
 
+// 后台创建的 PDFDocument 移交给主线程后，只在主线程使用。
+private struct LoadedPDF: @unchecked Sendable {
+    let document: PDFDocument?
+}
+
 struct PreviewPane: View {
-    @ObservedObject var model: ArchiveModel
+    var model: ArchiveModel
 
     @State private var payload: URL?
     @State private var image: NSImage?
@@ -61,7 +66,8 @@ struct PreviewPane: View {
                 if !entry.isDirectory {
                     ToolButton(symbol: "arrow.up.right.square",
                                help: "用默认程序打开（临时副本，修改不会写回）",
-                               inactive: payload == nil) {
+                               inactive: payload == nil,
+                               accessibilityLabel: "用默认程序打开") {
                         if let payload { NSWorkspace.shared.open(payload) }
                     }
                     ToolButton(symbol: "square.and.arrow.down", help: "另存为…") {
@@ -189,6 +195,7 @@ struct PreviewPane: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("缩小预览")
 
             Button { zoom = 0 } label: {
                 Text(zoom == 0 ? "适应" : "\(Int(zoom * 100))%")
@@ -197,6 +204,8 @@ struct PreviewPane: View {
                     .frame(minWidth: 30)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("适应面板")
+            .accessibilityValue(zoom == 0 ? "适应" : "\(Int(zoom * 100))%")
             .help("回到适应面板")
 
             Button { zoom = min(4, (zoom == 0 ? 1 : zoom) + 0.25) } label: {
@@ -206,6 +215,7 @@ struct PreviewPane: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("放大预览")
 
             Rectangle()
                 .fill(Color.primary.opacity(0.12))
@@ -217,6 +227,7 @@ struct PreviewPane: View {
                     .frame(minWidth: 22)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(zoom == 0 ? "按实际像素查看" : "适应面板大小")
             .help(zoom == 0 ? "按实际像素查看" : "适应面板大小")
         }
         .padding(.horizontal, 8)
@@ -321,11 +332,10 @@ struct PreviewPane: View {
         let token = entry.id
         reset()
 
-        // 大小判断放在解压之前：音视频要整份落到临时目录才能播，
-        // 超过上限的条目解了也是白写几百 MB 再删掉。
+        // 先按声明大小判断，超过内联上限的条目交给系统快速查看。
         if InlinePreviewLimits.skipsExtraction(entry) {
             loading = false
-            note = "文件较大（\(entry.displaySize)），不在面板内加载"
+            note = "文件较大（\(entry.displaySize)），按空格快速查看"
             return
         }
 
@@ -335,14 +345,12 @@ struct PreviewPane: View {
         // 选中项已经换了就丢弃这次结果，避免显示上一个文件
         guard !Task.isCancelled, selectedEntry?.id == token else { return }
 
-        // 元数据里没写大小的条目判不了，只能解压后按实际大小复核：
-        // 真超了就丢掉这份临时副本，不留着占磁盘
-        if let url, InlinePreviewLimits.isMedia(entry.ext) {
+        if let url {
             let onDisk = diskSize(url)
-            if onDisk > InlinePreviewLimits.media {
+            if InlinePreviewLimits.exceedsLimit(onDisk, for: entry.ext) {
                 model.discardPayload(url)
                 loading = false
-                note = "文件较大（\(ByteFormatter.string(onDisk))），不在面板内加载"
+                note = "文件较大（\(ByteFormatter.string(onDisk))），按空格快速查看"
                 return
             }
         }
@@ -360,19 +368,28 @@ struct PreviewPane: View {
             return
         }
 
+        if InlinePreviewLimits.imageExts.contains(ext) {
+            ScratchUsage.shared.beginWork(on: url.path)
+            let decoded = await Task.detached(priority: .userInitiated) {
+                defer { ScratchUsage.shared.endWork(on: url.path) }
+                return ThumbnailStore.downsample(url: url, maxPixel: InlinePreviewLimits.imageMaxPixel,
+                                                 maxSourcePixels: InlinePreviewLimits.imageMaxSourcePixels)
+            }.value
+            guard !Task.isCancelled else { return }
+            image = decoded.map { NSImage(cgImage: $0, size: .zero) }
+            if decoded == nil { note = "无法在面板中预览，按空格快速查看" }
+            return
+        }
+
         switch ext {
-        case "png", "jpg", "jpeg", "heic", "gif", "webp", "tiff", "bmp":
-            let raw = await Task.detached(priority: .userInitiated) {
-                try? Data(contentsOf: url, options: .mappedIfSafe)
-            }.value
-            guard !Task.isCancelled else { return }
-            image = raw.flatMap { NSImage(data: $0) }
         case "pdf":
-            let raw = await Task.detached(priority: .userInitiated) {
-                try? Data(contentsOf: url, options: .mappedIfSafe)
+            ScratchUsage.shared.beginWork(on: url.path)
+            let document = await Task.detached(priority: .userInitiated) {
+                defer { ScratchUsage.shared.endWork(on: url.path) }
+                return LoadedPDF(document: PDFDocument(url: url))
             }.value
             guard !Task.isCancelled else { return }
-            pdf = raw.flatMap { PDFDocument(data: $0) }
+            pdf = document.document
         case "txt", "md", "json", "swift", "js", "ts", "py", "sh", "html", "css", "xml", "yml", "yaml", "log", "csv":
             let loadedText = await Task.detached(priority: .userInitiated) { () -> String? in
                 guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }

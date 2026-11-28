@@ -24,7 +24,7 @@ macOS 原生压缩包工作台。SwiftUI + 系统 libarchive（`/usr/bin/tar`）
 | **加密** | ZIP 用 AES-256；7Z 连文件名一起加密（`-mhe=on`） |
 | **分卷** | 100 MB / 700 MB / 1 GB / 4 GB |
 | **加密包读取** | 打开时提示输入密码；右上角可一键锁定并清除密码 |
-| **访达快速查看** | 按空格直接看压缩包内容（`ArchivePreview.appex`） |
+| **访达快速查看** | 按空格查看归档格式、项目总数和未压缩大小。列表显示前 300 项及文件类型图标 |
 | **包内搜索** | 工具栏搜索框，跨层级匹配，结果显示完整路径 |
 | **三种视图** | 列表 / 图标网格 / **分栏列视图** 一键切换 |
 | **类型配色** | 文件夹蓝、压缩包青绿（品牌色）、图片橙、PDF 红、视频玫红、音频青蓝、代码绿、磁盘蓝，深浅色都适配 |
@@ -38,7 +38,8 @@ macOS 原生压缩包工作台。SwiftUI + 系统 libarchive（`/usr/bin/tar`）
 | **暂存拖拽** | 条目可直接拖进暂存条（只记包内路径，不解压） |
 | **批量处理** | 一次拖入多个包（或 ⇧⌘B）进入批量面板：批量解压到各自文件夹，或批量校验 |
 | **完整性校验** | 用 `7zz t` 完整读一遍，损坏的文件会指出具体条目 |
-| **暂存区** | 把条目攒起来，跨目录、跨压缩包累积，最后一次导出或打包成 ZIP |
+| **多窗口** | ⇧⌘N 新建窗口。外部打开多个包时复用空闲窗口或开新窗，已打开的包直接聚焦 |
+| **暂存区** | 所有窗口共享条目和导出布局，可跨目录、跨压缩包累积后一次导出或打包成 ZIP |
 | **图片 / PDF / 视频缩略图** | 图片走 ImageIO，PDF 渲染首页，视频取首帧（AVFoundation）；按需解压 + 缓存 |
 | **键盘导航** | ↑↓ 选择、回车进入 / 打开、空格快速查看、←（或 ⌘↑）返回上级；⌘/⇧ 多选、⌘A 全选、⌘F 搜索 |
 | **空格快速查看** | 系统快速查看面板全屏预览选中条目，再按空格关闭 |
@@ -47,7 +48,23 @@ macOS 原生压缩包工作台。SwiftUI + 系统 libarchive（`/usr/bin/tar`）
 | **格式识别** | 先看后缀，后缀不认识就读内容（magic number），改名/无后缀的文件也能打开 |
 | **原地编辑** | 往压缩包里加文件、删条目，保存后直接写回原包（嵌套包内不可用） |
 | **磁盘映像** | DMG、ISO、VHD/VHDX、VDI、VMDK、QCOW2、WIM 等交给内置 7-Zip 打开 |
-| 命令行 | `rrzip --list <包>` · `--detect <文件>` · `--thumb <包> <条目> <out.png>` · `--add` · `--remove` |
+| **命令行** | 归档创建、解压、校验、列表、识别、编辑和缩略图 |
+
+## 命令行
+
+安装后可直接运行 `/Applications/rrzip.app/Contents/MacOS/rrzip`。
+
+| 命令 | 用法 |
+|---|---|
+| 帮助和版本 | `--help` / `-h`，`--version` / `-v` |
+| 识别和列表 | `--detect <文件>`，`--list <归档> [--pass <密码>]` |
+| 校验完整性 | `--verify <归档> [--pass <密码>]` |
+| 解压 | `--extract <归档> -o <目录> [--overwrite] [--pass <密码>] [包内条目...]` |
+| 创建归档 | `--create <输出归档> <源文件...> [--format zip\|7z\|tar\|tgz] [--level 0..9] [--volume <分卷>] [--pass <密码>]` |
+| 加入或删除 | `--add <归档> <源文件...> [--prefix <包内目录>] [--pass <密码>]`，`--remove <归档> <包内条目...> [--pass <密码>]` |
+| 生成缩略图 | `--thumb <归档> <包内条目> <输出 PNG> [--size <最大边长>] [--pass <密码>]` |
+
+解压默认跳过同名文件。创建格式默认根据输出扩展名选择，以 `.tar.gz` 结尾时生成 TGZ。加密和分卷用于 ZIP 或 7Z，TAR 是未压缩归档。
 
 ## 性能
 
@@ -97,9 +114,9 @@ sit / sitx / lz4 / lzx 只能识别、不能打开（本机引擎不支持，会
 open build/rrzip.app
 ```
 
-`Assets/7zz` 是第三方二进制，不入库；`scripts/fetch-7zz.sh` 会从官方 release 拉取（直连失败自动走镜像）。
+`Assets/7zz` 是第三方二进制，不入库；`scripts/fetch-7zz.sh` 默认直连官方发布地址，校验下载包和解包后二进制的 SHA256。只有显式设置 `ALLOW_MIRROR=1` 且直连失败时才回退到镜像，镜像也强制校验。
 
-依赖：macOS 14+、Xcode Command Line Tools（`swiftc` 6.x）。
+当前只构建 Apple Silicon（`arm64`）。需要 macOS 14+ 与 Xcode Command Line Tools（`swiftc` 6.x，使用 Swift 5 语言模式）。
 
 产物：
 - `build/rrzip.app` —— 主程序
@@ -127,7 +144,11 @@ rrzip/
 │   ├── DetailPane.swift       # 右侧详情栏与信息卡
 │   ├── SidebarPane.swift      # 左侧目录树
 │   ├── TaskCard.swift         # 长任务进度卡
-│   ├── Model.swift            # 状态机：打开、密码、嵌套栈、解压、创建、工作模式
+│   ├── Model.swift            # 打开、密码、嵌套浏览、任务队列与工作模式
+│   ├── ArchiveWriter.swift    # 创建、原地编辑、原子写入与分卷回滚
+│   ├── ArchiveIndex.swift     # 目录索引、排序与选中项定位
+│   ├── PayloadCache.swift     # 预览和导出副本的缓存、回收与大小上限
+│   ├── ArchiveStash.swift     # 暂存区布局、导出和打包
 │   ├── PreviewPane.swift      # 右侧详情与预览
 │   ├── Batch.swift            # 批量解压 / 校验面板
 │   ├── Archive.swift          # 条目模型 + bsdtar / 7zz 双引擎封装（含增删、进度、取消）
@@ -142,13 +163,15 @@ rrzip/
 │   ├── HomeView.swift         # 首页：打开 / 新建 / 最近打开 / 快速压缩
 │   ├── WelcomeView.swift      # 首次启动一屏说明
 │   ├── FinderSettings.swift   # 访达右键配置（主程序写、扩展读）
+│   ├── FinderTaskQueue.swift  # 与访达扩展共用的文件队列
+│   ├── FinderTaskWorker.swift # 主程序认领与执行访达任务
+│   ├── FinderJobKit.swift     # 目标目录、冲突策略、通知文案
+│   ├── FinderJobRunner.swift  # 压缩、解压与任务日志
 │   ├── PendingExtraction.swift# 加密包解锁后接着解压的意图记录
 │   └── PendingNotice.swift    # 扩展转交主程序的一句话结果
 ├── FinderSync/
-│   ├── FinderSync.swift       # 菜单构建与动作分发
-│   ├── MenuBuilder.swift      # 菜单判定：按选择类型给动作（纯逻辑，可单测）
-│   ├── JobKit.swift           # 目标目录、冲突策略、通知文案
-│   └── JobRunner.swift        # 解压 / 压缩执行、任务日志
+│   ├── FinderSync.swift       # 菜单、提交请求和唤起主程序
+│   └── MenuBuilder.swift      # 按选择类型给动作
 ├── QuickLook/
 │   └── PreviewProvider.swift  # 快速查看扩展（QLPreviewingController）
 ├── Tests/
@@ -186,11 +209,15 @@ rrzip/
 
 - 格式识别和主程序共用一套（后缀 + 魔数），改名为 `.bin` 的 zip 也认得出
 - 解压**不会覆盖**已有文件：解到「包名」文件夹，重名自动变「包名 2」；解到当前目录时同名文件跳过，完成通知里报跳过几个
-- 完成后在访达里选中产物；跳过同名文件、解压失败会把原因转交主程序显示（访达扩展本身发不出系统通知，这是 appex 的权限边界）；每次任务都写 `~/Library/Application Support/rrzip/finder-jobs.log`
+- 右键支持压缩为 7Z，也能解压加密 7z、DMG、ISO 等可读归档。需要密码时由主程序接管，输入正确后继续原请求。
+- 压缩和解压经文件队列转交主程序。任务执行时在 rrzip 中显示进度卡，支持直接取消。选择「取消任务并退出」也会终止当前归档进程，等待暂存清理和回执写入。应用意外退出后会标记中断任务，方便检查已写出的文件。
+- 已完成的项目会保留。解压先写入同卷暂存目录，再按冲突策略发布。完成后可在访达中选中产物，解压到此处不跳转。任务记录位于 `~/Library/Application Support/rrzip/finder-jobs.log`。
 
 首次使用要在 **系统设置 → 通用 → 登录项与扩展 → 访达扩展** 勾选 rrzip，然后重启访达（设置页里有「重新启动访达」按钮）。
 
 旧版兼容：应用同时注册了 4 个「服务」菜单项（用 rrzip 压缩 / 打开 / 解压到此处 / 分别压缩），扩展不可用时可以兜底。找不到服务项时去「系统设置 → 键盘 → 键盘快捷键 → 服务 → 文件与文件夹」勾选一次。
+
+FinderSync 任务转交和后续权限收敛设计见 [FinderSync IPC 方案](Docs/finder-ipc-design.md)。
 
 ## 测试
 
@@ -198,7 +225,9 @@ rrzip/
 ./scripts/test.sh
 ```
 
-自动生成带中文名、含空格、嵌套目录、加密 7z、改名为 `.bin` 的样例包，断言 **142 项**：八进制转义还原、zip/tgz 列表、目录折叠、加密包识别与 7-Zip 回退、后缀与魔数识别、原地增删、子项索引一致性与 10 万条目性能、访达菜单矩阵、解压不覆盖（真的解压两次比对文件内容）、设置原子写、压缩进度回调、7zz 的 `-mx` 映射、扩展与主程序之间的两条转交记录。
+装好 7-Zip 引擎后，完整套件运行 **1212 项断言**。用例覆盖窗口路由与退出协调、共享暂存和预览缓存、CLI 真实归档操作、Quick Look 流式摘要、加密包和中文路径、软链与解压膨胀预检、访达队列、原子写入及设置回归。
+
+CI 和发布流程共用 `./scripts/check-tests.sh`、`./scripts/check-targets.sh` 和 `./scripts/verify-bundle.sh`，校验测试基线、界面接线、三目标严格并发，以及打包产物和当前版本说明。
 
 ## 许可
 
@@ -220,4 +249,4 @@ GNU GPL-3.0（见 [LICENSE](LICENSE)）。因为使用了 MacPacker 的格式目
 - 文本预览只读前 120 KB
 - 快速查看扩展只列条目，不预览条目内容
 - **访达扩展带全盘读写例外**：ad-hoc 签名下扩展拿不到「用户已选择文件」的沙盒授权，只能用 `temporary-exception.files.absolute-path.read-write` 兜底。这意味着该扩展进程能读写整块磁盘。拿到 Developer ID 后要复验能否删掉这条（脚本 `scripts/poc-sandbox.sh`）
-- 打开加密包时密码通过命令行参数传给 tar / 7zz，**同机其他用户理论上能在 `ps` 里看到**。单人使用的机器没问题，多用户共享机器上不要用它开加密包（libarchive 与 7-Zip 都不支持从标准输入读密码）
+- 使用系统 libarchive 列目录时，密码通过进程内 API 传递，子进程参数中没有密码。7z 加密头仍由 7-Zip 列目录。调用 `tar` 或 `7zz` 执行需要密码的操作时，密码仍可能出现在进程参数中。

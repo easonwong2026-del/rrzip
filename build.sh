@@ -6,6 +6,8 @@ cd "$(dirname "$0")"
 source scripts/sources.sh
 
 APP_NAME="rrzip"
+APP_VERSION="2.15.0"
+APP_BUILD="30"
 BUNDLE="build/${APP_NAME}.app"
 MIN_MACOS="14.0"
 # 主程序与两个扩展都只按这一个架构构建。7z 引擎也跟着只带这一份：
@@ -25,8 +27,8 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>${APP_NAME}</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.15.0</string>
-    <key>CFBundleVersion</key><string>30</string>
+    <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
+    <key>CFBundleVersion</key><string>${APP_BUILD}</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSHighResolutionCapable</key><true/>
@@ -152,8 +154,8 @@ cat > "$APEXPATH/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>ArchivePreview</string>
     <key>CFBundleIdentifier</key><string>com.rrzip.mac.preview</string>
     <key>CFBundlePackageType</key><string>XPC!</string>
-    <key>CFBundleShortVersionString</key><string>2.15.0</string>
-    <key>CFBundleVersion</key><string>30</string>
+    <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
+    <key>CFBundleVersion</key><string>${APP_BUILD}</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSExtension</key>
     <dict>
@@ -187,7 +189,7 @@ xcrun swiftc \
     -framework AppKit -framework QuickLookUI -larchive \
     -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$APEXPATH/Contents/MacOS/ArchivePreview" \
-    "${ARCHIVE_CORE[@]}" QuickLook/PreviewProvider.swift
+    "${ARCHIVE_CORE[@]}" "${QUICKLOOK_CORE[@]}"
 
 strip -x "$APEXPATH/Contents/MacOS/ArchivePreview"
 codesign --force --sign - --entitlements Entitlements/ArchivePreview.entitlements "$APEXPATH" >/dev/null
@@ -195,8 +197,6 @@ codesign --force --sign - --entitlements Entitlements/ArchivePreview.entitlement
 echo "==> 构建访达扩展"
 FSXPATH="$BUNDLE/Contents/PlugIns/ArchiveFinder.appex"
 mkdir -p "$FSXPATH/Contents/MacOS"
-FSXV=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$BUNDLE/Contents/Info.plist")
-FSXB=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$BUNDLE/Contents/Info.plist")
 cat > "$FSXPATH/Contents/Info.plist" <<FPLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -206,8 +206,8 @@ cat > "$FSXPATH/Contents/Info.plist" <<FPLIST
     <key>CFBundleIdentifier</key><string>com.rrzip.mac.finder</string>
     <key>CFBundleName</key><string>ArchiveFinder</string>
     <key>CFBundlePackageType</key><string>XPC!</string>
-    <key>CFBundleShortVersionString</key><string>${FSXV}</string>
-    <key>CFBundleVersion</key><string>${FSXB}</string>
+    <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
+    <key>CFBundleVersion</key><string>${APP_BUILD}</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
     <key>NSExtension</key>
     <dict>
@@ -223,7 +223,7 @@ xcrun swiftc \
     -target arm64-apple-macos${MIN_MACOS} \
     -module-name ArchiveFinder \
     -DARCHIVE_EXTENSION \
-    -framework Cocoa -framework FinderSync -framework UserNotifications -larchive \
+    -framework Cocoa -framework FinderSync -larchive \
     -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$FSXPATH/Contents/MacOS/ArchiveFinder" \
     "${ARCHIVE_CORE[@]}" "${SHARED_STATE[@]}" "${FINDER_CORE[@]}" \
@@ -248,8 +248,7 @@ du -sh "$BUNDLE"
 
 # 每次都出 dmg：下载后直接拖进「应用程序」，不用先解压
 echo "==> 打包 DMG"
-VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$BUNDLE/Contents/Info.plist")
-DMG="build/rrzip-${VERSION}.dmg"
+DMG="build/rrzip-${APP_VERSION}.dmg"
 STAGE_ROOT=$(mktemp -d)
 STAGE="$STAGE_ROOT/rrzip"
 # 不管成功失败都收走临时目录：set -e 下直接退出会把几百 MB 的 staging 留在 /var/folders
@@ -261,7 +260,7 @@ rm -f "$DMG"
 # UDZO = 压缩只读镜像；HFS+ 比 APFS 兼容性稳，老系统也能挂
 # 用 `|| status=$?` 而不是裸调用：裸调用会被 set -e 直接打断，退出码和清理都跑了
 status=0
-hdiutil create -quiet -volname "rrzip ${VERSION}" -srcfolder "$STAGE" \
+hdiutil create -quiet -volname "rrzip ${APP_VERSION}" -srcfolder "$STAGE" \
     -fs HFS+ -format UDZO -ov "$DMG" || status=$?
 if [ $status -ne 0 ]; then
     rm -f "$DMG"          # 半截镜像比没有更糟

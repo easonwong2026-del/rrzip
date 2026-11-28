@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 /// 统一的拖拽载荷：给访达的是解出来的文件，给暂存区的是「包 + 包内路径」。
 /// 条目拖出到访达与拖进暂存区共用这一份实现，避免两处走样。
 enum EntryDrag {
+    private static let markerType = "com.rrzip.entry-drag"
+
     /// 装配载荷。解压这一步由 `loadFile` 注入，便于测试只验类型与命名。
     ///
     /// 类型注册是这里的坑：访达向拖拽源要的是 `public.file-url`，
@@ -16,7 +18,7 @@ enum EntryDrag {
     static func makeProvider(
         name: String,
         payload: Data?,
-        loadFile: @escaping (@escaping (URL?, Error?) -> Void) -> Void
+        loadFile: @escaping @Sendable (@escaping @Sendable (URL?, Error?) -> Void) -> Void
     ) -> NSItemProvider {
         let provider = NSItemProvider()
         // 访达按这个名字落盘，和列表里看到的一致
@@ -25,7 +27,7 @@ enum EntryDrag {
         // 来源标记：文件和目录都带。窗口与首页靠它认出「这是自己拖出来的」，
         // 否则拖回自己会被当成外部文件打开（目录连暂存载荷都没有，只能靠这个标记）
         provider.registerDataRepresentation(
-            forTypeIdentifier: rrzipDragMarkerType,
+            forTypeIdentifier: markerType,
             visibility: .ownProcess
         ) { completion in
             completion(Data(), nil)
@@ -62,7 +64,7 @@ enum EntryDrag {
 
     /// 这次拖拽是不是从本应用列表里发起的（文件与目录都算）
     static func isInternal(_ provider: NSItemProvider) -> Bool {
-        provider.hasItemConformingToTypeIdentifier(rrzipDragMarkerType)
+        provider.hasItemConformingToTypeIdentifier(markerType)
     }
 
     @MainActor

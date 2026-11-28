@@ -27,39 +27,76 @@ enum ArchiveService {
         FormatDetector.prefersSevenZip(url) ? [.sevenZip, .libarchive] : [.libarchive, .sevenZip]
     }
 
-    /// 列目录。密码缺失直接抛 needsPassword，不换引擎——换了也一样要密码。
-    ///
-    /// 两条硬约束：
-    /// - 引擎不可用时直接跳过。以前会去试 7zz，扩展里它恒为 nil，抛出的
-    ///   `engineUnavailable` 会把 libarchive 的真实错误盖掉，用户只看到
-    ///   「请重新构建应用」。
-    /// - 沙盒扩展起不了 `/usr/bin/tar`（`Process.run()` 直接 NSCocoaErrorDomain 4），
-    ///   所以扩展里改走进程内 libarchive，不再 spawn 子进程。
-    static func list(_ url: URL, password: String?) throws -> [ArchiveEntry] {
+    static func list(_ url: URL, password: String?, jobID: UUID? = nil) throws -> [ArchiveEntry] {
+        try listWithEngine(url, password: password, jobID: jobID).entries
+    }
+
+    /// 返回实际列目录的引擎，供主程序保留已选定的归档读取路径。
+    static func listWithEngine(_ url: URL, password: String?, jobID: UUID? = nil)
+        throws -> (entries: [ArchiveEntry], engine: ArchiveEngine) {
+        try TaskRegistry.checkCancellation(jobID)
         var lastError: Error?
         for engine in engineOrder(for: url) where engine.isAvailable {
             do {
-                switch engine {
-                case .libarchive:
-                    #if ARCHIVE_EXTENSION
-                    return try InProcessArchive.list(url, passphrase: password)
-                    #else
-                    return try Tar.list(url, passphrase: password)
-                    #endif
-                case .sevenZip:
-                    return try SevenZip.list(url, password: password)
-                }
+                let entries = try list(url, using: engine, password: password, jobID: jobID)
+                try TaskRegistry.checkCancellation(jobID)
+                return (entries, engine)
+            } catch ArchiveError.cancelled {
+                throw ArchiveError.cancelled
             } catch ArchiveError.needsPassword {
+                // 系统 libarchive 不支持 7z 头加密。收到密码后仅为这种格式走 7zz。
+                if retriesEncryptedSevenZip(url, password: password, after: engine) {
+                    lastError = ArchiveError.needsPassword
+                    continue
+                }
                 throw ArchiveError.needsPassword
             } catch {
                 lastError = error
             }
         }
-        // 引擎全都不可用：说清楚是什么挡住了，而不是假装「格式不支持」
-        guard let lastError else {
-            throw ArchiveError.tool("这个压缩包需要 7-Zip 引擎，当前环境用不了")
+        throw lastError ?? ArchiveError.engineUnavailable
+    }
+
+    private static func list(_ url: URL, using engine: ArchiveEngine, password: String?, jobID: UUID?)
+        throws -> [ArchiveEntry] {
+        switch engine {
+        case .libarchive:
+            return try InProcessArchive.list(url, passphrase: password, isCancelled: {
+                jobID.map { TaskRegistry.wasCancelled($0) } ?? false
+            })
+        case .sevenZip:
+            return try SevenZip.list(url, password: password, jobID: jobID)
         }
-        throw lastError
+    }
+
+    private static func retriesEncryptedSevenZip(_ url: URL, password: String?, after engine: ArchiveEngine) -> Bool {
+        engine == .libarchive && password?.isEmpty == false && SevenZip.isAvailable
+            && FormatDetector.detect(url)?.format.id == "7zip"
+    }
+
+    /// 同时超过 50 GiB 和 200 倍才阻断，为合法的大归档和高压缩率数据各留余量。
+    static func validateExpansion(entries: [ArchiveEntry], compressedSize: Int64?) throws {
+        guard let compressedSize, compressedSize > 0 else { return }
+        let total = entries.reduce(0.0) { $0 + ($1.isDirectory ? 0 : Double(max(0, $1.size))) }
+        if total > 50 * 1024 * 1024 * 1024, total / Double(compressedSize) > 200 {
+            throw ArchiveError.excessiveExpansion
+        }
+    }
+
+    static func validateExtraction(entries: [ArchiveEntry], compressedSize: Int64?) throws {
+        var links: [(path: String, target: String)] = []
+        for entry in entries {
+            try ArchivePathGuard.validateRelative(entry.path)
+            if entry.isSymlink {
+                // 某些 7-Zip 格式只列出链接模式。目标无法核查时拒绝整包解压。
+                guard let target = entry.symlinkTarget else { throw ArchiveError.unsafePath(entry.path) }
+                links.append((entry.path, target))
+            }
+        }
+        if !links.isEmpty {
+            try ArchivePathGuard.validateSymlinks(links, entryPaths: entries.map(\.path))
+        }
+        try validateExpansion(entries: entries, compressedSize: compressedSize)
     }
 
     /// 解压。`entries` 为空表示全部。起始引擎失败时换另一个再试一次
@@ -71,30 +108,38 @@ enum ArchiveService {
                         password: String?,
                         onConflict: ArchiveConflictPolicy = .overwrite,
                         jobID: UUID? = nil,
-                        onProgress: (@Sendable (Double) -> Void)? = nil) throws {
+                        preferredEngine: ArchiveEngine? = nil,
+                        onProgress: (@Sendable (Double) -> Void)? = nil,
+                        validateSelection: Bool = false) throws {
         for entry in entries {
             try ArchivePathGuard.validateRelative(entry)
         }
-        // 全量解压前预检归档条目，提前拦截含绝对路径或 `..` 穿越的恶意归档
-        if entries.isEmpty {
-            do {
-                let inspected = try list(url, password: password)
-                for item in inspected {
-                    try ArchivePathGuard.validateRelative(item.path)
-                }
-            } catch ArchiveError.unsafePath(let bad) {
-                throw ArchiveError.unsafePath(bad)
-            } catch ArchiveError.needsPassword {
-                throw ArchiveError.needsPassword
-            } catch {
-                // 个别格式仅能直接解压或依赖后续引擎报错，不在此吞掉真实解压错误
+        try TaskRegistry.checkCancellation(jobID)
+        var engine = preferredEngine
+        var compressedSize: Int64?
+        let preflight = entries.isEmpty || validateSelection
+        if preflight {
+            let inspected = try listWithEngine(url, password: password, jobID: jobID)
+            // 分卷片段的字节数不能当成整组压缩大小。
+            if FormatDetector.detectByExtension(url)?.split == nil {
+                compressedSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
             }
+            try validateExtraction(entries: inspected.entries, compressedSize: compressedSize)
+            engine = inspected.engine
         }
 
         var lastError: Error?
-        for engine in engineOrder(for: url) where engine.isAvailable {
+        let order = engine.map { [$0, $0 == .libarchive ? .sevenZip : .libarchive] }
+            ?? engineOrder(for: url)
+        for candidate in order where candidate.isAvailable {
+            try TaskRegistry.checkCancellation(jobID)
+            if preflight, candidate != engine {
+                let inspected = try list(url, using: candidate, password: password, jobID: jobID)
+                try validateExtraction(entries: inspected, compressedSize: compressedSize)
+            }
+            try TaskRegistry.checkCancellation(jobID)
             do {
-                switch engine {
+                switch candidate {
                 case .libarchive:
                     try Tar.extract(url, entries: entries, to: destination,
                                      passphrase: password, keepExisting: onConflict == .skip,
@@ -110,6 +155,10 @@ enum ArchiveService {
                 // 取消会变成「再战一次」——任务卡住，用户还得再按一遍。
                 throw ArchiveError.cancelled
             } catch ArchiveError.needsPassword {
+                if retriesEncryptedSevenZip(url, password: password, after: candidate) {
+                    lastError = ArchiveError.needsPassword
+                    continue
+                }
                 throw ArchiveError.needsPassword
             } catch ArchiveError.unsafePath(let bad) {
                 // 安全拦截禁止回退到另一个引擎重试
@@ -122,9 +171,10 @@ enum ArchiveService {
     }
 
     /// 完整性校验：只有 7-Zip 能从头到尾 CRC 一遍
-    static func verify(_ url: URL) throws {
+    static func verify(_ url: URL, password: String? = nil, jobID: UUID? = nil) throws {
+        try TaskRegistry.checkCancellation(jobID)
         guard SevenZip.isAvailable else { throw ArchiveError.engineUnavailable }
-        try SevenZip.verify(url)
+        try SevenZip.verify(url, password: password, jobID: jobID)
     }
 
     /// 这个包本机能不能开：格式识别 + 引擎可用性

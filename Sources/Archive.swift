@@ -12,10 +12,23 @@ struct ArchiveEntry: Identifiable, Hashable {
     let size: Int64
     let modified: String
     let mode: String
+    let modifiedDate: Date?
+    let symlinkTarget: String?
+
+    init(path: String, size: Int64, modified: String, mode: String,
+         modifiedDate: Date? = nil, symlinkTarget: String? = nil) {
+        self.path = path
+        self.size = size
+        self.modified = modified
+        self.mode = mode
+        self.modifiedDate = modifiedDate
+        self.symlinkTarget = symlinkTarget
+    }
 
     var name: String { (path as NSString).lastPathComponent.isEmpty ? path : (path as NSString).lastPathComponent }
     var ext: String { (path as NSString).pathExtension.lowercased() }
     var isDirectory: Bool { mode.hasPrefix("d") || path.hasSuffix("/") }
+    var isSymlink: Bool { mode.hasPrefix("l") || symlinkTarget != nil }
     var isArchive: Bool { ArchiveKind.isArchive(ext: ext) }
 
     var displaySize: String { ByteFormatter.string(size) }
@@ -52,6 +65,7 @@ enum ArchiveError: LocalizedError {
     case needsPassword
     case engineUnavailable
     case unsafePath(String)
+    case excessiveExpansion
 
     var errorDescription: String? {
         switch self {
@@ -60,6 +74,7 @@ enum ArchiveError: LocalizedError {
         case .unsupported(let ext): return "暂不支持 .\(ext) 格式"
         case .needsPassword: return "该压缩包已加密，需要密码"
         case .engineUnavailable: return "7-Zip 引擎不可用，请重新构建应用"
+        case .excessiveExpansion: return "归档声明的解压体积与膨胀比异常，已中止解压"
         case .unsafePath(let path): return "检测到不安全的归档路径，已中止操作：\(path)"
         }
     }
@@ -72,12 +87,88 @@ enum ArchivePathGuard {
             if allowEmpty { return }
             throw ArchiveError.unsafePath(path)
         }
-        if path.hasPrefix("/") || path.hasPrefix("\\") || path.contains("\0") {
+        if isAbsolute(path) || hasListSeparator(path) {
             throw ArchiveError.unsafePath(path)
         }
         let segments = path.split(whereSeparator: { $0 == "/" || $0 == "\\" })
         if segments.contains("..") {
             throw ArchiveError.unsafePath(path)
+        }
+    }
+
+    private static func hasListSeparator(_ path: String) -> Bool {
+        path.utf8.contains { $0 == 0 || $0 == 10 || $0 == 13 }
+    }
+
+    private static func isAbsolute(_ path: String) -> Bool {
+        path.hasPrefix("/") || path.hasPrefix("\\") ||
+            (path.utf8.first.map { (65...90).contains($0) || (97...122).contains($0) } == true &&
+             path.utf8.dropFirst().first == 58)
+    }
+
+    static func validateSymlink(_ target: String, at path: String) throws {
+        try validateSymlinks([(path, target)])
+    }
+
+    static func validateSymlinks(_ links: [(path: String, target: String)], entryPaths: [String] = []) throws {
+        guard !links.isEmpty else { return }
+        for link in links {
+            try validateRelative(link.path)
+            guard !link.target.isEmpty, !isAbsolute(link.target), !hasListSeparator(link.target) else {
+                throw ArchiveError.unsafePath("\(link.path) -> \(link.target)")
+            }
+        }
+
+        // 两个引擎/格式对反斜杠的处理可能不同，两种路径解释都必须留在根目录内。
+        try validateSymlinks(links, entryPaths: entryPaths, splitting: { $0 == "/" })
+        if links.contains(where: { $0.path.contains("\\") || $0.target.contains("\\") }) ||
+            entryPaths.contains(where: { $0.contains("\\") }) {
+            try validateSymlinks(links, entryPaths: entryPaths, splitting: { $0 == "/" || $0 == "\\" })
+        }
+    }
+
+    private static func validateSymlinks(
+        _ links: [(path: String, target: String)], entryPaths: [String],
+        splitting isSeparator: (Character) -> Bool
+    ) throws {
+        var targets: [String: [Substring]] = [:]
+        for (path, target) in links {
+            let key = path.split(whereSeparator: isSeparator).filter { $0 != "." }
+                .joined(separator: "/").lowercased()
+            let parts = target.split(whereSeparator: isSeparator)
+            if let prior = targets.updateValue(parts, forKey: key), prior != parts {
+                throw ArchiveError.unsafePath(path)
+            }
+        }
+        // 归档可以包含指向目录的软链。其他归档条目不得借这些软链改变落点。
+        for path in entryPaths + links.map(\.path) {
+            var parent = ""
+            for component in path.split(whereSeparator: isSeparator).filter({ $0 != "." }).dropLast() {
+                if !parent.isEmpty { parent += "/" }
+                parent += component.lowercased()
+                if targets[parent] != nil { throw ArchiveError.unsafePath(path) }
+            }
+        }
+        for (path, target) in links {
+            var resolved = Array(path.split(whereSeparator: isSeparator).filter { $0 != "." }.dropLast())
+            var pending = Array(target.split(whereSeparator: isSeparator).reversed())
+            var hops = 0
+            while let component = pending.popLast() {
+                switch component {
+                case ".": continue
+                case "..":
+                    guard resolved.popLast() != nil else { throw ArchiveError.unsafePath("\(path) -> \(target)") }
+                default:
+                    resolved.append(component)
+                    let key = resolved.joined(separator: "/").lowercased()
+                    if let nested = targets[key] {
+                        hops += 1
+                        guard hops <= 40 else { throw ArchiveError.unsafePath(path) }
+                        resolved.removeLast()
+                        pending.append(contentsOf: nested.reversed())
+                    }
+                }
+            }
         }
     }
 
@@ -98,6 +189,10 @@ enum ArchivePathGuard {
     }
 
     static func writeListFile(_ items: [String]) throws -> URL {
+        // 创建归档时会传绝对源路径，只检查 listfile 的分隔符。
+        if let invalid = items.first(where: hasListSeparator) {
+            throw ArchiveError.unsafePath(invalid)
+        }
         let listURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("rrzip-list-\(UUID().uuidString).txt")
         let body = items.joined(separator: "\n") + "\n"
@@ -144,6 +239,7 @@ enum Tar {
 
         var env = ProcessInfo.processInfo.environment
         env["LANG"] = "en_US.UTF-8"
+        env["LC_ALL"] = "en_US.UTF-8"
         env["COPYFILE_DISABLE"] = "1"
         process.environment = env
 
@@ -166,8 +262,6 @@ enum Tar {
         process.standardOutput = out
         process.standardError = errHandle
         try process.run()
-        // 只有队列任务才登记进程归属。批量、预览这些临时进程不登记，
-        // 否则会把当前任务的句柄顶掉，取消就打到别人身上了。
         if let jobID { TaskRegistry.begin(process, for: jobID) }
         defer { if let jobID { TaskRegistry.endProcess(process, for: jobID) } }
 
@@ -206,8 +300,9 @@ enum Tar {
         }
 
         var entries: [ArchiveEntry] = []
+        let now = Date()
         for line in raw.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let entry = parse(String(line)) else { continue }
+            guard let entry = parse(String(line), now: now) else { continue }
             entries.append(entry)
         }
         return entries
@@ -221,25 +316,56 @@ enum Tar {
             || lower.contains("encryption")
     }
 
-    private static func parse(_ line: String) -> ArchiveEntry? {
-        let pattern = #"^([dlrwxst-]{10}[+@.]?)\s+\S+\s+\S+\s+\S+\s+(\d+)\s+(\w{3}\s+\d+\s+[\d:]{4,5})\s+(.*)$"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
-              match.numberOfRanges == 5,
+    private static let listingRegex = try! NSRegularExpression(
+        pattern: #"^([bcdhlprswxstST?-]{10}[+@.]?)\s+\S+\s+\S+\s+\S+\s+(\d+(?:\s*,\s*\d+)?)\s+([A-Za-z]{3}\s+\d+\s+(?:\d{4}|\d{1,2}:\d{2}))\s+(.*)$"#
+    )
+    private static let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    static func parse(_ line: String, now: Date = Date()) -> ArchiveEntry? {
+        guard let match = listingRegex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
               let modeRange = Range(match.range(at: 1), in: line),
               let sizeRange = Range(match.range(at: 2), in: line),
               let dateRange = Range(match.range(at: 3), in: line),
               let pathRange = Range(match.range(at: 4), in: line)
         else { return nil }
 
-        let path = decodeEscapes(String(line[pathRange]))
+        let mode = String(line[modeRange])
+        var pathname = line[pathRange]
+        var symlinkTarget: String?
+        if mode.hasPrefix("l"), let arrow = pathname.range(of: " -> ") {
+            symlinkTarget = decodeEscapes(String(pathname[arrow.upperBound...]))
+            pathname = pathname[..<arrow.lowerBound]
+        } else if mode.hasPrefix("h"), let link = pathname.range(of: " link to ") {
+            pathname = pathname[..<link.lowerBound]
+        }
+        let path = decodeEscapes(String(pathname))
         guard !path.isEmpty else { return nil }
-        return ArchiveEntry(
-            path: path,
-            size: Int64(line[sizeRange]) ?? 0,
-            modified: String(line[dateRange]),
-            mode: String(line[modeRange])
-        )
+        let modified = String(line[dateRange])
+        return ArchiveEntry(path: path, size: Int64(line[sizeRange]) ?? 0, modified: modified,
+                            mode: mode, modifiedDate: parseDate(modified, now: now),
+                            symlinkTarget: symlinkTarget)
+    }
+
+    private static func parseDate(_ raw: String, now: Date) -> Date? {
+        let fields = raw.split(whereSeparator: \.isWhitespace)
+        guard fields.count == 3, let month = months.firstIndex(of: String(fields[0])),
+              let day = Int(fields[1]) else { return nil }
+        let calendar = Calendar(identifier: .gregorian)
+        if let year = Int(fields[2]) {
+            return calendar.date(from: DateComponents(year: year, month: month + 1, day: day))
+        }
+        let time = fields[2].split(separator: ":")
+        guard time.count == 2, let hour = Int(time[0]), let minute = Int(time[1]) else { return nil }
+        var parts = DateComponents(year: calendar.component(.year, from: now), month: month + 1,
+                                   day: day, hour: hour, minute: minute)
+        guard let date = calendar.date(from: parts) else { return nil }
+        // bsdtar 对最近的条目省略年份，年初列上一年末的日期时需要回拨一年。
+        if date.timeIntervalSince(now) > 24 * 60 * 60, let year = parts.year {
+            parts.year = year - 1
+            return calendar.date(from: parts)
+        }
+        return date
     }
 
     /// bsdtar 在非 UTF-8 locale 下会把非 ASCII 字节打印成 \NNN 八进制转义
@@ -285,13 +411,16 @@ enum Tar {
     }
 
     static func create(at output: URL, from items: [URL], format: String,
-                       jobID: UUID? = nil) throws {
+                       gzipLevel: Int? = nil, jobID: UUID? = nil) throws {
         var args: [String] = []
         switch format {
         case "zip": args = ["-a", "-cf", output.path]
         case "tar": args = ["-cf", output.path]
         case "tgz": args = ["-czf", output.path]
         default: throw ArchiveError.unsupported(format)
+        }
+        if format == "tgz", let gzipLevel {
+            args += ["--options", "gzip:compression-level=\(gzipLevel)"]
         }
         guard let first = items.first else { throw ArchiveError.tool("没有要压缩的内容") }
 
@@ -349,127 +478,88 @@ enum Tar {
     }
 }
 
-/// 当前任务的进程归属。
-///
-/// 只有队列任务（`submitJob`）才有 jobID；批量、预览、校验这些临时进程
-/// **不注册**，否则会覆盖 current，让「取消 A」终止掉 B 的进程。
-///
-/// 时序上有三件事要分开：
-/// - `claim` 占位（任务开始）
-/// - `begin` / `endProcess` 登记与注销**单个子进程**
-/// - `release` 释放整个任务
-///
-/// 中间那层必须单独存在：加密解压第一次密码错了会重试，第一个进程退出时
-/// 就把 owner 清掉的话，第二次重试虽然还在跑，取消却已经无处可打。
-///
-/// 这几个方法是跨线程调的（主线程 claim / 取消，detached 里 spawn），
-/// 所以状态统一收进 `State`，由 NSLock 保护。`nonisolated(unsafe)` 只是
-/// 让编译器别管这块静态存储——并发安全由锁负责，不是靠它豁免掉的。
+/// 每个任务独立占位，子进程退出后仍保留占位，供引擎回退或密码重试使用。
 enum TaskRegistry {
     private struct State {
-        var current: Process?
-        var owner: UUID?
-        /// 记录每个已请求取消的任务 ID，避免取消排队任务时覆写当前运行任务的取消标记
+        var claimed: Set<UUID> = []
+        var processes: [UUID: Process] = [:]
         var cancelledIDs: Set<UUID> = []
     }
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var state = State()
 
-    /// 所有读写都在锁里；返回值带出来，避免在锁内调外部代码（terminate 之类）
     private static func withState<T>(_ body: (inout State) -> T) -> T {
         lock.lock()
         defer { lock.unlock() }
         return body(&state)
     }
 
-    /// 任务开始前占位。已经请求过取消就直接抛错，连进程都不启动。
     static func claim(_ id: UUID) throws {
-        let rejected = withState { state -> Bool in
-            if state.cancelledIDs.remove(id) != nil {
-                state.owner = nil
-                state.current = nil
-                return true
-            }
-            state.owner = id
-            state.current = nil
+        let rejected = withState { state in
+            if state.cancelledIDs.remove(id) != nil { return true }
+            state.claimed.insert(id)
             return false
         }
         if rejected { throw ArchiveError.cancelled }
     }
 
-    /// 子进程启动后登记。不属于 owner 的进程一律不接管。
     static func begin(_ process: Process, for id: UUID) {
-        let terminate = withState { state -> Bool in
-            guard state.owner == id else { return false }
-            state.current = process
-            // claim 之后、begin 之前来的取消，在这里补一刀
+        let terminate = withState { state in
+            guard state.claimed.contains(id) else { return false }
+            state.processes[id] = process
             return state.cancelledIDs.contains(id)
         }
-        if terminate { terminateWithFallback(process, for: id) }
+        if terminate { terminateWithFallback(process) }
     }
 
-    /// 单个子进程退出：只注销这一个进程，owner 留给任务本身。
-    /// 重试用第二个进程时，`begin` 还能把它挂上，取消照样打得着。
     static func endProcess(_ process: Process, for id: UUID) {
         withState { state in
-            guard state.owner == id else { return }
-            // 只清自己登记的那一个：万一有更新换代的进程，别把新的抹掉
-            if state.current === process { state.current = nil }
+            if state.processes[id] === process { state.processes[id] = nil }
         }
     }
 
-    /// 任务真正结束（`finishJob` 里调）。这里才释放归属。
     static func release(_ id: UUID) {
-        let leftover = withState { state -> Process? in
+        let leftover = withState { state in
             state.cancelledIDs.remove(id)
-            guard state.owner == id else { return nil }
-            let running = state.current
-            state.current = nil
-            state.owner = nil
-            return running
+            state.claimed.remove(id)
+            return state.processes.removeValue(forKey: id)
         }
-        // 正常路径不会走到这儿（进程都已 waitUntilExit）；真留下活进程就是有 bug，
-        // 与其让它在后台继续写用户的磁盘，不如收掉。
-        if let leftover { terminateWithFallback(leftover, for: id) }
+        if let leftover { terminateWithFallback(leftover) }
     }
 
-    /// 只对当前 owner 生效。串行保证了同一时刻只有一个任务，
-    /// 但临时进程可能正在跑——它们的取消由自己的调用方负责。
     static func cancel(_ id: UUID) {
         let target = withState { state -> Process? in
-            state.cancelledIDs.insert(id)
-            return state.owner == id ? state.current : nil
+            guard state.cancelledIDs.insert(id).inserted else { return nil }
+            return state.processes[id]
         }
-        if let target { terminateWithFallback(target, for: id) }
+        if let target { terminateWithFallback(target) }
     }
 
-    /// 先发 SIGTERM；若 3 秒后子进程仍在运行且仍归属该任务，再升级 SIGKILL 兜底
-    private static func terminateWithFallback(_ process: Process, for id: UUID) {
+    /// Process 保持到宽限期结束，只升级仍在运行的同一个子进程。
+    private static func terminateWithFallback(_ process: Process) {
         guard process.isRunning else { return }
         let pid = process.processIdentifier
         process.terminate()
         guard pid > 0 else { return }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3.0) {
-            let stillActive = withState { state in
-                state.owner == id && state.current?.processIdentifier == pid && (state.current?.isRunning ?? false)
-            }
-            if stillActive {
-                _ = kill(pid, SIGKILL)
-            }
+            if process.isRunning { _ = kill(pid, SIGKILL) }
         }
     }
 
-    /// 进程退出后判断：是我这个任务被取消了吗。
-    /// 必须在 `endProcess` 之前问——owner 一放掉就无从判断了。
     static func wasCancelled(_ id: UUID) -> Bool {
-        withState { $0.owner == id && $0.cancelledIDs.contains(id) }
+        withState { $0.claimed.contains(id) && $0.cancelledIDs.contains(id) }
+    }
+
+    static func checkCancellation(_ id: UUID?) throws {
+        if let id, wasCancelled(id) { throw ArchiveError.cancelled }
     }
 
     // 测试用
-    static var currentOwner: UUID? { withState { $0.owner } }
+    static var currentOwner: UUID? { withState { $0.claimed.count == 1 ? $0.claimed.first : nil } }
     static var pendingCancel: UUID? { withState { $0.cancelledIDs.first } }
-    static var hasProcess: Bool { withState { $0.current != nil } }
+    static var hasProcess: Bool { withState { !$0.processes.isEmpty } }
+    static func hasProcess(for id: UUID) -> Bool { withState { $0.processes[id] != nil } }
 }
 
 /// 应用内附带的 7-Zip 26.05（arm64）
@@ -519,6 +609,7 @@ enum SevenZip {
     static func run(_ args: [String], cwd: URL? = nil,
                     jobID: UUID? = nil,
                     captureOutput: Bool = true,
+                    includeStdoutOnError: Bool = false,
                     onProgress: ((Double) -> Void)? = nil) throws -> String {
         guard let binary else { throw ArchiveError.engineUnavailable }
         let process = Process()
@@ -591,7 +682,7 @@ enum SevenZip {
         let stdout = String(data: outData, encoding: .utf8) ?? ""
         if process.terminationStatus != 0 {
             let stderr = String(data: errData, encoding: .utf8) ?? ""
-            let reason = stderr.isEmpty ? stdout : stderr
+            let reason = stderr.isEmpty ? stdout : (includeStdoutOnError ? stderr + "\n" + stdout : stderr)
             throw ArchiveError.tool(reason.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         return stdout
@@ -608,32 +699,56 @@ enum SevenZip {
     }
 
     /// 完整读一遍校验。损坏、密码不对都会抛错。
-    static func verify(_ archive: URL, password: String? = nil) throws {
+    static func verify(_ archive: URL, password: String? = nil, jobID: UUID? = nil) throws {
         var args = ["t", "-y"]
         if let password, !password.isEmpty { args.append("-p\(password)") }
         args += ["--", archive.path]
-        try run(args, captureOutput: false)
+        do {
+            try run(args, jobID: jobID, captureOutput: false, includeStdoutOnError: true)
+        } catch let ArchiveError.tool(message) where looksEncrypted(message, archive: archive) {
+            throw ArchiveError.needsPassword
+        }
     }
 
     /// `7zz l -slt` 的块状输出解析
-    static func list(_ archive: URL, password: String? = nil) throws -> [ArchiveEntry] {
+    static func list(_ archive: URL, password: String? = nil, jobID: UUID? = nil) throws -> [ArchiveEntry] {
         var args = ["l", "-slt", "-ba"]
         if let password, !password.isEmpty { args.append("-p\(password)") }
         args += ["--", archive.path]
 
         let raw: String
         do {
-            raw = try run(args)
-        } catch let ArchiveError.tool(message) {
-            let lower = message.lowercased()
-            if lower.contains("password")
-                || lower.contains("encrypted")
-                || lower.contains("cannot open")
-                || lower.contains("break signaled") {
-                throw ArchiveError.needsPassword
-            }
-            throw ArchiveError.tool(message)
+            raw = try run(args, jobID: jobID, includeStdoutOnError: true)
+        } catch let ArchiveError.tool(message) where looksEncrypted(message, archive: archive) {
+            throw ArchiveError.needsPassword
         }
+
+        return parseList(raw)
+    }
+
+    private static func looksEncrypted(_ message: String, archive: URL) -> Bool {
+        let archivePrefix = "ERROR: \(archive.path) : "
+        return message.split(whereSeparator: \.isNewline).contains { line in
+            let diagnostic: Substring
+            if line.hasPrefix(archivePrefix) {
+                diagnostic = line.dropFirst(archivePrefix.count)
+            } else if line.hasPrefix("ERROR: ") {
+                diagnostic = line.dropFirst("ERROR: ".count)
+            } else {
+                diagnostic = line
+            }
+            let text = diagnostic.trimmingCharacters(in: .whitespaces).lowercased()
+            return text.hasPrefix("wrong password") || text.hasPrefix("can not open encrypted archive")
+                || text.hasPrefix("cannot open encrypted archive") || text.hasPrefix("enter password")
+                || text.hasPrefix("password is required") || text.hasPrefix("encrypted archive")
+                || text.hasPrefix("data error in encrypted file") || text.hasPrefix("crc failed in encrypted file")
+        }
+    }
+
+    static func parseList(_ raw: String) -> [ArchiveEntry] {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
 
         var entries: [ArchiveEntry] = []
         var current: [String: String] = [:]
@@ -641,14 +756,21 @@ enum SevenZip {
         func flush() {
             defer { current = [:] }
             guard let path = current["Path"], !path.isEmpty else { return }
-            let isFolder = (current["Folder"] ?? "-") == "+"
+            let attributes = current["Attributes"]
+            let posixMode = attributes?.split(whereSeparator: \.isWhitespace).last
+                .flatMap { $0.count == 10 ? String($0) : nil }
+            let mode = current["Mode"].flatMap { $0.isEmpty ? nil : $0 } ?? posixMode
+            let isFolder = current["Folder"] == "+" || mode?.hasPrefix("d") == true
             let size = Int64(current["Size"] ?? "0") ?? 0
             let modified = current["Modified"] ?? ""
             entries.append(ArchiveEntry(
                 path: path + (isFolder ? "/" : ""),
                 size: isFolder ? 0 : size,
                 modified: String(modified.prefix(16)),
-                mode: isFolder ? "drwxr-xr-x" : (current["Attributes"] ?? "-rw-r--r--")
+                mode: mode ?? (isFolder ? "drwxr-xr-x" : attributes ?? "-rw-r--r--"),
+                modifiedDate: formatter.date(from: String(modified.prefix(19))),
+                symlinkTarget: (current["Symbolic Link"].flatMap { $0.isEmpty ? nil : $0 }
+                    ?? current["Target"]).flatMap { $0.isEmpty ? nil : $0 }
             ))
         }
 

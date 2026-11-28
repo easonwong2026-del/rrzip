@@ -220,7 +220,7 @@ extension ContentView {
         return EntryRevealMarker(
             tick: entryRevealTick,
             count: entries.count,
-            index: entries.firstIndex { model.selection.contains($0.id) },
+            index: model.firstSelectedIndex,
             metrics: { index, contentHeight in
                 // 从底部反推：不用假设顶部内边距，行高是唯一常量
                 let height = listRowHeight
@@ -291,7 +291,7 @@ extension ContentView {
                     EntryRevealMarker(
                         tick: entryRevealTick,
                         count: items.count,
-                        index: items.firstIndex { model.selection.contains($0.id) },
+                        index: model.firstSelectedIndex,
                         metrics: { index, contentHeight in
                             let height = Metrics.columnRowHeight
                             return (y: contentHeight - 6 - CGFloat(items.count - index) * height,
@@ -334,7 +334,7 @@ extension ContentView {
                 EntryRevealMarker(
                     tick: entryRevealTick,
                     count: entries.count,
-                    index: entries.firstIndex { model.selection.contains($0.id) },
+                    index: model.firstSelectedIndex,
                     metrics: { index, contentHeight in
                         // 网格的格子高度随字号/行数固定，但不想在这里再写死一份：
                         // 由内容总高反推行距，行距减去间距就是格子高度
@@ -670,16 +670,16 @@ extension NSView {
 /// 焦点还停在搜索框里时，方向键在挪光标、Return 在提交输入、空格在打字，
 /// 看起来像「点了行但键盘不听话」。只在这一步切，边输入边跳结果时不动焦点。
 @MainActor
-func takeKeyboardFocus() {
-    NotificationCenter.default.post(name: .rrzipFocusList, object: nil)
+func takeKeyboardFocus(_ model: ArchiveModel) {
+    NotificationCenter.default.post(name: .rrzipFocusList, object: model)
 }
 
 // MARK: - 列表行
 
 struct EntryRow: View {
     let entry: ArchiveEntry
-    @ObservedObject var model: ArchiveModel
-    @ObservedObject var hover: HoverCoordinator
+    var model: ArchiveModel
+    var hover: HoverCoordinator
     let selected: Bool
     let showPath: Bool
 
@@ -745,7 +745,7 @@ struct EntryRow: View {
         .onTapGesture(count: 2) { model.activate(entry) }
         .onTapGesture {
             model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? [])
-            takeKeyboardFocus()
+            takeKeyboardFocus(model)
         }
         .onDrag { EntryDrag.provider(for: entry, model: model) }
         .onHover { inside in
@@ -784,6 +784,12 @@ struct EntryRow: View {
             .foregroundStyle(.red)
             .disabled(model.isNested)
         }
+        .archiveEntryAccessibility(entry, selected: selected)
+        .accessibilityAction { model.activate(entry) }
+        .accessibilityAction(named: Text("选中")) {
+            model.select(entry)
+            takeKeyboardFocus(model)
+        }
         .help(entry.path)
     }
 }
@@ -792,8 +798,8 @@ struct EntryRow: View {
 
 struct ColumnRow: View {
     let entry: ArchiveEntry
-    @ObservedObject var model: ArchiveModel
-    @ObservedObject var hover: HoverCoordinator
+    var model: ArchiveModel
+    var hover: HoverCoordinator
     let selected: Bool
 
     @State var hovering = false
@@ -806,14 +812,14 @@ struct ColumnRow: View {
             row
                 .onTapGesture {
                     model.jump(to: entry.path)
-                    takeKeyboardFocus()
+                    takeKeyboardFocus(model)
                 }
         } else {
             row
                 .onTapGesture(count: 2) { model.activate(entry) }
                 .onTapGesture {
                     model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? [])
-                    takeKeyboardFocus()
+                    takeKeyboardFocus(model)
                 }
         }
     }
@@ -848,6 +854,15 @@ struct ColumnRow: View {
             hovering = inside
             if inside { hover.begin(entry, model: model) } else { hover.end() }
         }
+        .archiveEntryAccessibility(entry, selected: selected)
+        .accessibilityAction {
+            if entry.isDirectory { model.jump(to: entry.path) } else { model.activate(entry) }
+            takeKeyboardFocus(model)
+        }
+        .accessibilityAction(named: Text("选中")) {
+            model.select(entry)
+            takeKeyboardFocus(model)
+        }
         .help(entry.path)
     }
 }
@@ -856,8 +871,8 @@ struct ColumnRow: View {
 
 struct IconTile: View {
     let entry: ArchiveEntry
-    @ObservedObject var model: ArchiveModel
-    @ObservedObject var hover: HoverCoordinator
+    var model: ArchiveModel
+    var hover: HoverCoordinator
     let selected: Bool
 
     @State var hovering = false
@@ -896,12 +911,18 @@ struct IconTile: View {
         .onTapGesture(count: 2) { model.activate(entry) }
         .onTapGesture {
             model.select(entry, modifiers: NSApp.currentEvent?.modifierFlags ?? [])
-            takeKeyboardFocus()
+            takeKeyboardFocus(model)
         }
         .onDrag { EntryDrag.provider(for: entry, model: model) }
         .onHover { inside in
             hovering = inside
             if inside { hover.begin(entry, model: model) } else { hover.end() }
+        }
+        .archiveEntryAccessibility(entry, selected: selected)
+        .accessibilityAction { model.activate(entry) }
+        .accessibilityAction(named: Text("选中")) {
+            model.select(entry)
+            takeKeyboardFocus(model)
         }
         .help(entry.path)
     }

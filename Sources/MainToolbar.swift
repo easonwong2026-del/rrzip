@@ -50,6 +50,7 @@ extension ContentView {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("设置")
             .help("设置（⌘,）")
 
             overflowMenu
@@ -119,6 +120,7 @@ extension ContentView {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
+                .accessibilityLabel("选择解压范围")
                 .help("选择解压范围")
             }
         }
@@ -165,11 +167,14 @@ extension ContentView {
         .buttonStyle(.plain)
         .disabled(model.current == nil)
         .opacity(model.current == nil ? 0.32 : 1)
+        .accessibilityLabel("暂存区")
+        .accessibilityAddTraits(model.isStashVisible ? .isSelected : [])
         .help("暂存区：把选中项攒起来，跨目录跨包一起导出")
     }
 
     var searchField: some View {
-        HStack(spacing: 5) {
+        @Bindable var model = model
+        return HStack(spacing: 5) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 10.5, weight: .medium))
                 .foregroundStyle(.tertiary)
@@ -183,14 +188,14 @@ extension ContentView {
                 // 以前只清文字、焦点留在输入框，接着按方向键还在挪光标。
                 .onExitCommand {
                     model.searchText = ""
-                    takeKeyboardFocus()
+                    takeKeyboardFocus(model)
                 }
                 // Return：搜完直接回列表继续操作，不留在输入框里
                 .onSubmit {
                     if model.selection.isEmpty, let first = model.displayEntries.first {
                         model.select(first)
                     }
-                    takeKeyboardFocus()
+                    takeKeyboardFocus(model)
                 }
             if !model.searchText.isEmpty {
                 Button {
@@ -201,6 +206,7 @@ extension ContentView {
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("清除搜索")
                 .help("清除搜索")
             }
         }
@@ -232,6 +238,8 @@ extension ContentView {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(mode.title)
+                .accessibilityAddTraits(model.viewMode == mode ? .isSelected : [])
                 .help(mode.title)
             }
         }
@@ -241,7 +249,8 @@ extension ContentView {
     }
 
     var overflowMenu: some View {
-        Menu {
+        @Bindable var model = model
+        return Menu {
             // 全局项（外观、工作模式）在没有打开压缩包时也要能用，
             // 所以菜单本身不再整体禁用，只禁用依赖当前包的动作
             Button("在访达中显示") { model.revealInFinder() }
@@ -270,6 +279,7 @@ extension ContentView {
         .menuIndicator(.hidden)
         .frame(width: 24)
         .fixedSize()
+        .accessibilityLabel("更多操作与外观")
         .help("更多操作与外观")
     }
 

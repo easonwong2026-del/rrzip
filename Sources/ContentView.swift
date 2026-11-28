@@ -11,8 +11,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
-    @ObservedObject var model: ArchiveModel
-    @StateObject var hover = HoverCoordinator()
+    var model: ArchiveModel
+    @State var hover = HoverCoordinator()
     @FocusState var listFocused: Bool
     @FocusState var searchFocused: Bool
     @State var stashTargeted = false
@@ -41,32 +41,36 @@ struct ContentView: View {
     @State var gridWidth: Double = 0
 
     var body: some View {
-        shell
+        @Bindable var model = model
+        return shell
             .background(Palette.window)
             .overlay { dropOverlay }
             .overlay(alignment: .bottom) { noticeBar }
-            .overlay(alignment: .bottom) { taskOverlay }
-            .animation(.easeOut(duration: 0.18), value: model.job?.title)
+            .overlay(alignment: .bottom) { TaskOverlay(model: model, bottomInset: bottomOverlayInset) }
             .animation(.easeOut(duration: 0.18), value: model.notice)
             .onChange(of: model.notice) { _, newValue in scheduleNoticeClear(newValue) }
             .background(widthReader)
             .onChange(of: windowWidth) { _, width in scheduleModeCheck(width) }
             .preferredColorScheme(model.appearance.scheme)
             .onDrop(of: [.fileURL], isTargeted: $isDropTarget) { handleDrop($0) }
-            .task { await runStartupTasks() }
-            .onReceive(NotificationCenter.default.publisher(for: .rrzipFocusSearch)) { _ in
+            .task { if AppDelegate.takeStartupTasks() { await runStartupTasks() } }
+            .onReceive(NotificationCenter.default.publisher(for: .rrzipFocusSearch)) { notification in
+                guard notification.object as? ArchiveModel === model else { return }
                 searchFocused = true
             }
-            .onReceive(NotificationCenter.default.publisher(for: .rrzipFocusList)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .rrzipFocusList)) { notification in
+                guard notification.object as? ArchiveModel === model else { return }
                 // 点中列表行 / 搜索框里按 Esc、Return 之后，键盘交还列表
                 searchFocused = false
                 listFocused = true
             }
-            .onReceive(NotificationCenter.default.publisher(for: .rrzipToggleWorkspaceMode)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .rrzipToggleWorkspaceMode)) { notification in
+                guard notification.object as? ArchiveModel === model else { return }
                 model.toggleWorkspaceMode()
                 applyModeWindowSize()
             }
-            .onReceive(NotificationCenter.default.publisher(for: .rrzipShowWelcome)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .rrzipShowWelcome)) { notification in
+                guard notification.object as? ArchiveModel === model else { return }
                 showWelcome = true
             }
             .onAppear { layoutWindowOnAppear() }
@@ -153,17 +157,6 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
-    var taskOverlay: some View {
-        if model.jobVisible, let job = model.job {
-            TaskCard(job: job) { model.cancelJob() }
-                // 选中操作条压在内容区底部，进度卡要整体上移让开它，
-                // 否则「取消任务」按钮正好盖住「删除…」
-                .padding(.bottom, bottomOverlayInset)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-        }
-    }
-
     /// 底部浮层（一次性提示、任务进度卡）距窗口底部的距离。
     /// 以前两处各写一个 44，结果都正好压住选中操作条；收成一份就不会再飘。
     var bottomOverlayInset: CGFloat {
@@ -184,24 +177,30 @@ struct ContentView: View {
     /// 挂到 background 的隐藏视图上：同一个视图链上两个 .alert 只会生效一个，
     /// 「出错了」那个会把这个吃掉。
     var passwordPrompt: some View {
-        Color.clear.alert(model.passwordRequest?.isRetry == true ? "密码不正确" : "该压缩包已加密",
-                          isPresented: Binding(
-                            get: { model.passwordRequest != nil },
-                            set: { if !$0, model.passwordRequest != nil { model.submitPassword(nil) } }
-                          )) {
-            SecureField("密码", text: $passwordInput)
-            Button("解锁") {
-                let value = passwordInput
-                passwordInput = ""
-                model.submitPassword(value.isEmpty ? nil : value)
+        let request = model.passwordRequest
+        return Color.clear
+            .alert(request?.isRetry == true ? "密码不正确" : "该压缩包已加密",
+                   isPresented: Binding(
+                    get: { request != nil && model.passwordRequest?.id == request?.id },
+                    set: { presented in
+                        if !presented, let request { model.submitPassword(nil, requestID: request.id) }
+                    }
+                   ), presenting: request) { item in
+                SecureField("密码", text: $passwordInput)
+                Button("解锁") {
+                    let value = passwordInput
+                    passwordInput = ""
+                    model.submitPassword(value.isEmpty ? nil : value, requestID: item.id)
+                }
+                Button("取消", role: .cancel) {
+                    passwordInput = ""
+                    model.submitPassword(nil, requestID: item.id)
+                }
+            } message: { item in
+                Text("\(item.archive.lastPathComponent)\n输入密码后即可浏览与解压。")
             }
-            Button("取消", role: .cancel) {
-                passwordInput = ""
-                model.submitPassword(nil)
-            }
-        } message: {
-            Text("\(model.passwordRequest?.archive.lastPathComponent ?? "")\n输入密码后即可浏览与解压。")
-        }
+            .id(request?.id)
+            .onChange(of: request?.id) { _, _ in passwordInput = "" }
     }
 
     func scheduleNoticeClear(_ newValue: String?) {
@@ -258,8 +257,7 @@ struct ContentView: View {
                     autoModeReady = true
                 }
             }
-            guard let window = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 400 })
-            else { return }
+            guard let window = AppDelegate.window(for: model), window.frame.width > 400 else { return }
             let compact = model.isCompactMode
             // 最小尺寸与模式解耦：完整模式也允许缩到简化尺寸。
             // 旧版在这里把完整模式锁到 1020 宽，而自动收起判据是 < 760，
@@ -290,7 +288,8 @@ struct ContentView: View {
             }
 #endif
             guard WelcomeView.minorVersion(welcomeSeenVersion)
-                    != WelcomeView.minorVersion(WelcomeView.version) else { return }
+                    != WelcomeView.minorVersion(WelcomeView.version),
+                  AppDelegate.claimStartupWelcome() else { return }
             showWelcome = true
         }
     }
@@ -373,16 +372,11 @@ struct ContentView: View {
 #endif
         // 支持 `open -a rrzip xxx.zip` 以及命令行直接传路径。
         // 判定走 OpenGate，改过名的包从命令行打开也要能认出来。
-        if model.trail.isEmpty {
-            for arg in CommandLine.arguments.dropFirst() where !arg.hasPrefix("-") {
-                let url = URL(fileURLWithPath: arg)
-                guard FileManager.default.fileExists(atPath: url.path) else { continue }
-                if case .open = OpenGate.decide(url) {
-                    model.open(url: url)
-                    break
-                }
-            }
-        }
+        let archives = CommandLine.arguments.dropFirst()
+            .filter { !$0.hasPrefix("-") }
+            .map { URL(fileURLWithPath: $0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) && ArchiveService.canOpen($0) }
+        AppDelegate.open(archives, preferred: model.sessionID)
         // 调试用：跳进某个包内目录（也支持 defaults write com.rrzip.mac rrzip.goto）
 #if DEBUG
         let goto = CommandLine.arguments.firstIndex(of: "--goto").flatMap { index in
@@ -461,9 +455,7 @@ struct ContentView: View {
     /// 手动切换模式时同步窗口尺寸：展开给工作台尺寸，收起给小窗尺寸。
     /// 顶边保持不动，避免窗口在屏幕上跳。
     func applyModeWindowSize() {
-        guard let window = NSApp.keyWindow
-                ?? NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain })
-        else { return }
+        guard let window = AppDelegate.window(for: model) else { return }
         let compact = model.isCompactMode
         // 下限恒定，不随模式抬高；抬高就等于禁止用户把完整模式拉窄到自动收起阈值以下
         window.minSize = NSSize(width: Layout.minWindowWidth,

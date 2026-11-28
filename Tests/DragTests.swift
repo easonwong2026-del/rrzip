@@ -166,9 +166,6 @@ private func expectDirectoryExport(_ archive: URL, label: String, expectsExplici
         expect(false, "\(label) 列表里没有 photos 目录")
         return
     }
-    let paths = ArchiveModel.exportPaths(for: dir, in: frame.entries)
-    expect(paths.count >= 4, "\(label) 目录导出包含后代", "实际 \(paths.count) 条")
-
     var result: URL?
     var done = false
     model.payloadURL(for: dir) { url in

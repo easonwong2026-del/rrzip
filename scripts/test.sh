@@ -28,13 +28,13 @@ fi
 
 echo "==> 编译测试"
 mkdir -p build
-xcrun swiftc -O -swift-version 5 \
+xcrun swiftc -O -swift-version 5 -strict-concurrency=complete -warnings-as-errors \
     -target arm64-apple-macos14.0 \
-    -framework UserNotifications -larchive \
+    -framework UserNotifications -framework QuickLookUI -larchive \
     -o build/rrzip-tests \
     "${ARCHIVE_CORE[@]}" "${SHARED_STATE[@]}" "${APP_ONLY[@]}" "${FINDER_CORE[@]}" \
     Sources/Model.swift Sources/Palette.swift Sources/Batch.swift Sources/Thumbnails.swift Sources/SaveAs.swift \
-    Tests/*.swift
+    "${QUICKLOOK_CORE[@]}" Tests/*.swift
 
 if [ -x "$ROOT/Assets/7zz" ]; then cp "$ROOT/Assets/7zz" build/7zz; fi
 
