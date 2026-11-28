@@ -62,7 +62,6 @@ private struct ArchiveCommands: Commands {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
-        let _ = AppDelegate.installWindowAction(openWindow)
         CommandGroup(replacing: .newItem) {
             Button("新建窗口") { openWindow(id: MainWindowRecovery.sceneID) }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
@@ -142,7 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     fileprivate static var openMainWindow: (() -> Void)?
     private static var windowRequested = false
     private static var hasRegisteredMainWindow = false
-    private static var hasFinishedLaunching = false
+    private static weak var launchedDelegate: AppDelegate?
+    private static var handlesLaterFileEvents = false
     private static var pendingOpen: [(url: URL, preferred: UUID?)] = []
     private static var fileEventWindows: Set<UUID> = []
     private static var unassignedFileWindows: Set<UUID> = []
@@ -170,7 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard windows[id]?.window !== window else { return }
         windows[id] = WindowReference(window)
         hasRegisteredMainWindow = true
-        if !hasFinishedLaunching, let event = NSAppleEventManager.shared().currentAppleEvent,
+        if !handlesLaterFileEvents, let event = NSAppleEventManager.shared().currentAppleEvent,
            event.eventClass == AEEventClass(kCoreEventClass), event.eventID == AEEventID(kAEOpenDocuments) {
             fileEventWindows.insert(id)
         } else {
@@ -182,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.cancelFinderTask = { finderTaskWorker.cancelCurrent() }
 
         DispatchQueue.main.async {
+            installOpenDocumentHandler()
             drainPendingOpen()
             consumeFinderNotice()
         }
@@ -206,12 +207,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return nil
     }
 
-    fileprivate static func installWindowAction(_ action: OpenWindowAction) {
-        guard openMainWindow == nil else { return }
-        openMainWindow = { action(id: MainWindowRecovery.sceneID) }
-        DispatchQueue.main.async { drainPendingOpen() }
-    }
-
     @discardableResult
     private static func requestWindow() -> Bool {
         if windowRequested { return true }
@@ -233,7 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static func drainPendingOpen() {
-        guard FormalWriteLedger.shared.currentGate == .idle else { return }
+        guard hasRegisteredMainWindow, FormalWriteLedger.shared.currentGate == .idle else { return }
         while let next = pendingOpen.first {
             if case .open = OpenGate.decide(next.url) {
                 switch sessions.route(next.url, preferred: next.preferred, newlyCreated: unassignedFileWindows) {
@@ -345,8 +340,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    private static func installOpenDocumentHandler() {
+        // 先让 SwiftUI 建立第一个真正的主窗口，使后续路由始终有可用的 OpenWindowAction。
+        guard !handlesLaterFileEvents, hasRegisteredMainWindow, let launchedDelegate else { return }
+        NSAppleEventManager.shared().setEventHandler(
+            launchedDelegate, andSelector: #selector(handleOpenDocuments(_:reply:)),
+            forEventClass: AEEventClass(kCoreEventClass), andEventID: AEEventID(kAEOpenDocuments))
+        handlesLaterFileEvents = true
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Self.hasFinishedLaunching = true
+        Self.launchedDelegate = self
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(windowBecameKey), name: NSWindow.didBecomeKeyNotification, object: nil)
         center.addObserver(self, selector: #selector(windowWillClose), name: NSWindow.willCloseNotification, object: nil)
@@ -357,10 +361,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Self.sessions.cancelFinderTask = { AppDelegate.finderTaskWorker.cancelCurrent() }
         TerminationCoordinator.shared.host = Self.sessions
         Self.finderTaskWorker.start()
-        // 冷启动让 SwiftUI 完成首批建窗；后续文件事件直接路由，不再为每个 URL 预建窗口。
-        NSAppleEventManager.shared().setEventHandler(
-            self, andSelector: #selector(handleOpenDocuments(_:reply:)),
-            forEventClass: AEEventClass(kCoreEventClass), andEventID: AEEventID(kAEOpenDocuments))
+        DispatchQueue.main.async { Self.installOpenDocumentHandler() }
     }
 
     /// 退出协调的界面部分：状态机在 TerminationCoordinator，这里只提供
