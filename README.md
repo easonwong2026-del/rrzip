@@ -225,7 +225,7 @@ FinderSync 任务转交和后续权限收敛设计见 [FinderSync IPC 方案](Do
 ./scripts/test.sh
 ```
 
-装好 7-Zip 引擎后，完整套件运行 **1211 项断言**。用例覆盖窗口路由与退出协调、共享暂存和预览缓存、CLI 真实归档操作、Quick Look 流式摘要、加密包和中文路径、软链与解压膨胀预检、访达队列、原子写入及设置回归。
+装好 7-Zip 引擎后，完整套件运行 **1212 项断言**。用例覆盖窗口路由与退出协调、共享暂存和预览缓存、CLI 真实归档操作、Quick Look 流式摘要、加密包和中文路径、软链与解压膨胀预检、访达队列、原子写入及设置回归。
 
 CI 和发布流程共用 `./scripts/check-tests.sh`、`./scripts/check-targets.sh` 和 `./scripts/verify-bundle.sh`，校验测试基线、界面接线、三目标严格并发，以及打包产物和当前版本说明。
 

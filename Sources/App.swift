@@ -142,7 +142,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     fileprivate static var openMainWindow: (() -> Void)?
     private static var windowRequested = false
     private static var hasRegisteredMainWindow = false
+    private static var hasFinishedLaunching = false
     private static var pendingOpen: [(url: URL, preferred: UUID?)] = []
+    private static var fileEventWindows: Set<UUID> = []
+    private static var unassignedFileWindows: Set<UUID> = []
     private static var finderJobID: UUID?
     private static var startupTasksRun = false
     private static var startupWelcomeShown = false
@@ -167,7 +170,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard windows[id]?.window !== window else { return }
         windows[id] = WindowReference(window)
         hasRegisteredMainWindow = true
-        windowRequested = false
+        if !hasFinishedLaunching, let event = NSAppleEventManager.shared().currentAppleEvent,
+           event.eventClass == AEEventClass(kCoreEventClass), event.eventID == AEEventID(kAEOpenDocuments) {
+            fileEventWindows.insert(id)
+        } else {
+            windowRequested = false
+        }
         sessions.register(model)
         if window.isKeyWindow { sessions.activate(id) }
         model.routeOpen = { urls, source in open(urls, preferred: source.sessionID) }
@@ -228,10 +236,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard FormalWriteLedger.shared.currentGate == .idle else { return }
         while let next = pendingOpen.first {
             if case .open = OpenGate.decide(next.url) {
-                switch sessions.route(next.url, preferred: next.preferred) {
+                switch sessions.route(next.url, preferred: next.preferred, newlyCreated: unassignedFileWindows) {
                 case .focus(let id):
                     focus(id)
                 case .reuse(let id):
+                    unassignedFileWindows.remove(id)
                     sessions.model(id)?.openInSession(next.url)
                     focus(id)
                 case .newWindow:
@@ -239,6 +248,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
             } else if let model = sessions.activeModel {
+                unassignedFileWindows.remove(model.sessionID)
                 model.openInSession(next.url)
                 focus(model.sessionID)
             } else {
@@ -246,6 +256,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             pendingOpen.removeFirst()
+        }
+        let unused = unassignedFileWindows
+        unassignedFileWindows.removeAll()
+        for id in unused where sessions.model(id)?.canReuseWindow == true {
+            windows[id]?.window?.close()
         }
     }
 
@@ -260,6 +275,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let id = Self.windows.first(where: { $0.value.window === window })?.key else { return }
         if let model = Self.sessions.model(id) { QuickLookController.shared.close(for: model) }
         Self.windows.removeValue(forKey: id)
+        Self.fileEventWindows.remove(id)
+        Self.unassignedFileWindows.remove(id)
         Self.sessions.unregister(id)
         if window.isKeyWindow {
             DispatchQueue.main.async {
@@ -321,13 +338,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.notice = "\(notice.title) · \(notice.message)"
     }
 
-    func applicationWillFinishLaunching(_ notification: Notification) {
-        // 统一在分配窗口前去重。SwiftUI 默认会为同一打开事件里的每个文件预建窗口。
-        NSAppleEventManager.shared().setEventHandler(
-            self, andSelector: #selector(handleOpenDocuments(_:reply:)),
-            forEventClass: AEEventClass(kCoreEventClass), andEventID: AEEventID(kAEOpenDocuments))
-    }
-
     @objc private func handleOpenDocuments(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
         let urls = openDocumentURLs(event)
         guard !urls.isEmpty else { return }
@@ -336,6 +346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.hasFinishedLaunching = true
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(windowBecameKey), name: NSWindow.didBecomeKeyNotification, object: nil)
         center.addObserver(self, selector: #selector(windowWillClose), name: NSWindow.willCloseNotification, object: nil)
@@ -346,6 +357,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Self.sessions.cancelFinderTask = { AppDelegate.finderTaskWorker.cancelCurrent() }
         TerminationCoordinator.shared.host = Self.sessions
         Self.finderTaskWorker.start()
+        // 冷启动让 SwiftUI 完成首批建窗；后续文件事件直接路由，不再为每个 URL 预建窗口。
+        NSAppleEventManager.shared().setEventHandler(
+            self, andSelector: #selector(handleOpenDocuments(_:reply:)),
+            forEventClass: AEEventClass(kCoreEventClass), andEventID: AEEventID(kAEOpenDocuments))
     }
 
     /// 退出协调的界面部分：状态机在 TerminationCoordinator，这里只提供
@@ -527,7 +542,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         guard !urls.isEmpty else { return }
+        let created = Self.fileEventWindows
+        Self.fileEventWindows.removeAll()
+        // AppKit 可能在 didFinishLaunching 前投递首批 URL。等关闭监听接好再回收多余窗口。
         Task { @MainActor in
+            AppDelegate.unassignedFileWindows.formUnion(created)
             AppDelegate.open(urls)
             NSApp.activate(ignoringOtherApps: true)
         }

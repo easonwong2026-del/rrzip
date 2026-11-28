@@ -70,7 +70,7 @@ final class WindowSessionRegistry: TerminationHost {
         onWorkDrained?()
     }
 
-    func route(_ archive: URL, preferred: UUID? = nil) -> Route {
+    func route(_ archive: URL, preferred: UUID? = nil, newlyCreated: Set<UUID> = []) -> Route {
         let key = ScratchUsage.canonical(archive.path)
         if let match = focusOrder.first(where: {
             sessions[$0]?.rootArchive.map { ScratchUsage.canonical($0.path) } == key
@@ -78,7 +78,9 @@ final class WindowSessionRegistry: TerminationHost {
             return .focus(match)
         }
         if let preferred, sessions[preferred]?.canReuseWindow == true { return .reuse(preferred) }
-        if let idle = focusOrder.first(where: { sessions[$0]?.canReuseWindow == true }) { return .reuse(idle) }
+        let idle = focusOrder.filter { sessions[$0]?.canReuseWindow == true }
+        if let existing = idle.first(where: { !newlyCreated.contains($0) }) { return .reuse(existing) }
+        if let first = idle.first { return .reuse(first) }
         return .newWindow
     }
 

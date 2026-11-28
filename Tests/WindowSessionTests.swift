@@ -94,6 +94,8 @@ private func testWindowRoutingAndSharedStash() {
             registry.register(b)
             expect(registry.route(zip, preferred: b.sessionID) == .reuse(b.sessionID), "优先复用来源首页")
             expect(registry.route(zip) == .reuse(a.sessionID), "没有来源时复用活跃首页")
+            expect(registry.route(zip, newlyCreated: [a.sessionID]) == .reuse(b.sessionID),
+                   "优先复用空闲的已有窗，不为同批系统预建窗挤走它")
             a.openInSession(zip)
             expect(registry.route(alias) == .focus(a.sessionID), "加载期间同一规范路径也只聚焦一次")
             expect(registry.route(tar) == .reuse(b.sessionID), "当前窗口正在加载时复用另一首页")
